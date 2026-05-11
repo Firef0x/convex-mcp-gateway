@@ -1,0 +1,62 @@
+name: Release
+
+# Publishes the package to npm whenever a tag matching `v*` is pushed.
+# Tags are produced by running `pnpm run release` (patch) or
+# `pnpm run alpha` (prerelease) locally; that script bumps the version,
+# commits, tags, and pushes.
+#
+# Requires repository secret `NPM_TOKEN` with publish rights to the
+# `@convex-dev` scope (or whichever scope `package.json` declares).
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Node setup
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22.x"
+          cache: "pnpm"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm run test
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Detect prerelease tag
+        id: tag
+        run: |
+          if [[ "${GITHUB_REF_NAME}" =~ -(alpha|beta|rc) ]]; then
+            echo "tag=$(echo "$GITHUB_REF_NAME" | sed -E 's/.*-(alpha|beta|rc).*/\1/')" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm
+        run: pnpm publish --no-git-checks --provenance --access public --tag ${{ steps.tag.outputs.tag }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
