@@ -1,11 +1,11 @@
-# @convex-dev/mcp-gateway
+# @tfohlmeister/convex-mcp-gateway
 
 > Auth-aware Convex component that exposes selected Convex functions as
 > MCP tools. Bring your own JWT issuer, declare scopes/roles per tool,
 > get an audit log and OAuth 2.1 protected-resource discovery for free.
 
 [![tests](https://github.com/your-org/convex-mcp-gateway/actions/workflows/test.yml/badge.svg)](https://github.com/your-org/convex-mcp-gateway/actions/workflows/test.yml)
-[![npm](https://img.shields.io/npm/v/@convex-dev/mcp-gateway.svg)](https://www.npmjs.com/package/@convex-dev/mcp-gateway)
+[![npm](https://img.shields.io/npm/v/@tfohlmeister/convex-mcp-gateway.svg)](https://www.npmjs.com/package/@tfohlmeister/convex-mcp-gateway)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
 > **Status: pre-0.1.** The resource-server side of MCP's OAuth profile
@@ -32,13 +32,13 @@ in-depth sequence and data-flow diagrams live in
 ## Quickstart
 
 ```sh
-pnpm add @convex-dev/mcp-gateway
+pnpm add @tfohlmeister/convex-mcp-gateway
 ```
 
 ```ts
 // convex/convex.config.ts
 import { defineApp } from "convex/server";
-import mcpGateway from "@convex-dev/mcp-gateway/convex.config";
+import mcpGateway from "@tfohlmeister/convex-mcp-gateway/convex.config";
 
 const app = defineApp();
 app.use(mcpGateway);
@@ -48,7 +48,7 @@ export default app;
 ```ts
 // convex/mcp.ts — register tools
 import { v } from "convex/values";
-import { McpGateway, defineMcpQuery } from "@convex-dev/mcp-gateway";
+import { McpGateway, defineMcpQuery } from "@tfohlmeister/convex-mcp-gateway";
 import { api, components } from "./_generated/api.js";
 import { internalMutation } from "./_generated/server.js";
 
@@ -86,7 +86,7 @@ import { httpRouter } from "convex/server";
 import {
   McpGateway,
   type McpAuthorizerHandler,
-} from "@convex-dev/mcp-gateway";
+} from "@tfohlmeister/convex-mcp-gateway";
 import { components } from "./_generated/api.js";
 import { httpAction } from "./_generated/server.js";
 

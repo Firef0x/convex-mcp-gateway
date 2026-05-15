@@ -15,7 +15,7 @@ a local Convex backend.
 ## 1. Install
 
 ```sh
-pnpm add @convex-dev/mcp-gateway
+pnpm add @tfohlmeister/convex-mcp-gateway
 # or: npm install / yarn add
 ```
 
@@ -25,7 +25,7 @@ In your host's `convex/convex.config.ts`:
 
 ```ts
 import { defineApp } from "convex/server";
-import mcpGateway from "@convex-dev/mcp-gateway/convex.config";
+import mcpGateway from "@tfohlmeister/convex-mcp-gateway/convex.config";
 
 const app = defineApp();
 app.use(mcpGateway);
@@ -49,7 +49,7 @@ import {
   McpGateway,
   defineMcpQuery,
   defineMcpMutation,
-} from "@convex-dev/mcp-gateway";
+} from "@tfohlmeister/convex-mcp-gateway";
 import { api, components } from "./_generated/api.js";
 import { internalMutation } from "./_generated/server.js";
 
@@ -119,7 +119,7 @@ import { httpRouter } from "convex/server";
 import {
   McpGateway,
   type McpAuthorizerHandler,
-} from "@convex-dev/mcp-gateway";
+} from "@tfohlmeister/convex-mcp-gateway";
 import { components } from "./_generated/api.js";
 import { httpAction } from "./_generated/server.js";
 

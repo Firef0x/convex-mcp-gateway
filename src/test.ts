@@ -10,7 +10,7 @@ const modules = import.meta.glob("./component/**/*.ts");
  *
  * ```ts
  * import { convexTest } from "convex-test";
- * import { register } from "@convex-dev/mcp-gateway/test";
+ * import { register } from "@tfohlmeister/convex-mcp-gateway/test";
  *
  * const t = convexTest(hostSchema, hostModules);
  * register(t);

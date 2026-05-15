@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 If you believe you have found a security vulnerability in
-`@convex-dev/mcp-gateway`, **please do not open a public GitHub issue**.
+`@tfohlmeister/convex-mcp-gateway`, **please do not open a public GitHub issue**.
 
 Instead, email the maintainers at <thorben@fohlmeister.com> with:
 

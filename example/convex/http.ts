@@ -2,7 +2,7 @@ import { httpRouter } from "convex/server";
 import {
   McpGateway,
   type McpAuthorizerHandler,
-} from "@convex-dev/mcp-gateway";
+} from "@tfohlmeister/convex-mcp-gateway";
 import { components } from "./_generated/api.js";
 import { httpAction } from "./_generated/server.js";
 

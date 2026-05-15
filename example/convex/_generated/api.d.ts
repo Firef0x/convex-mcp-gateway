@@ -51,5 +51,5 @@ export declare const internal: FilterApi<
 >;
 
 export declare const components: {
-  mcpGateway: import("@convex-dev/mcp-gateway/_generated/component.js").ComponentApi<"mcpGateway">;
+  mcpGateway: import("@tfohlmeister/convex-mcp-gateway/_generated/component.js").ComponentApi<"mcpGateway">;
 };
