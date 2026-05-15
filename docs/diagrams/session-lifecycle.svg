@@ -1,0 +1,290 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 680"
+     font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+  <defs>
+    <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="0.9" fill="rgba(11,13,11,0.10)"/>
+    </pattern>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#52534e"/>
+    </marker>
+    <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#f7591f"/>
+    </marker>
+    <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#1a70c7"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#f5f4ed"/>
+  <rect width="100%" height="100%" fill="url(#dots)" opacity="0.55"/>
+
+  <!-- Boundary: Streamable HTTP transport -->
+  <rect x="40" y="56" width="1000" height="528" rx="8"
+        fill="transparent" stroke="rgba(11,13,11,0.22)"
+        stroke-width="1" stroke-dasharray="6,4"/>
+  <rect x="52" y="44" width="252" height="20" rx="2" fill="#f5f4ed"/>
+  <text x="60" y="58" fill="#52534e" font-size="9" font-family="ui-monospace, monospace"
+        letter-spacing="1.5">STREAMABLE HTTP · SESSION LIFECYCLE</text>
+
+  <!-- ============================================================ -->
+  <!-- Lifelines (drawn first, behind everything)                   -->
+  <!-- ============================================================ -->
+  <!-- C lifeline x=180 -->
+  <line x1="180" y1="148" x2="180" y2="568"
+        stroke="rgba(11,13,11,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+  <!-- H lifeline x=540 -->
+  <line x1="540" y1="148" x2="540" y2="568"
+        stroke="rgba(11,13,11,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+  <!-- S lifeline x=900 -->
+  <line x1="900" y1="148" x2="900" y2="568"
+        stroke="rgba(247,89,31,0.30)" stroke-width="1" stroke-dasharray="3,3"/>
+
+  <!-- ============================================================ -->
+  <!-- Message arrows (drawn before boxes so labels mask correctly) -->
+  <!-- ============================================================ -->
+  <!-- 1. C -> H : initialize (no session id) -->
+  <line x1="180" y1="184" x2="540" y2="184"
+        stroke="#1a70c7" stroke-width="1.4" marker-end="url(#arrow-link)"/>
+
+  <!-- 2. H -> S : createSession(random128)  (FOCAL accent) -->
+  <line x1="540" y1="220" x2="900" y2="220"
+        stroke="#f7591f" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
+
+  <!-- 3. H ⇢ C : 200 + Mcp-Session-Id (dashed return, accent) -->
+  <line x1="540" y1="256" x2="180" y2="256"
+        stroke="#f7591f" stroke-width="1.4" stroke-dasharray="5,4"
+        marker-end="url(#arrow-accent)"/>
+
+  <!-- 4. C -> H : tools/list (Mcp-Session-Id) -->
+  <line x1="180" y1="292" x2="540" y2="292"
+        stroke="#1a70c7" stroke-width="1.4" marker-end="url(#arrow-link)"/>
+
+  <!-- 5. H -> S : getSession + touch -->
+  <line x1="540" y1="328" x2="900" y2="328"
+        stroke="#52534e" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- 6. H ⇢ C : 200 result (dashed return) -->
+  <line x1="540" y1="364" x2="180" y2="364"
+        stroke="#52534e" stroke-width="1.2" stroke-dasharray="5,4"
+        marker-end="url(#arrow)"/>
+
+  <!-- 7. C -> H : DELETE / (Mcp-Session-Id) -->
+  <line x1="180" y1="400" x2="540" y2="400"
+        stroke="#1a70c7" stroke-width="1.4" marker-end="url(#arrow-link)"/>
+
+  <!-- 8. H -> S : deleteSession -->
+  <line x1="540" y1="436" x2="900" y2="436"
+        stroke="#52534e" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- 9. H ⇢ C : 200 (dashed return) -->
+  <line x1="540" y1="472" x2="180" y2="472"
+        stroke="#52534e" stroke-width="1.2" stroke-dasharray="5,4"
+        marker-end="url(#arrow)"/>
+
+  <!-- 10. C -> H : tools/list AFTER delete -->
+  <line x1="180" y1="508" x2="540" y2="508"
+        stroke="#1a70c7" stroke-width="1.4" marker-end="url(#arrow-link)"/>
+
+  <!-- 11. H ⇢ C : 404 Not Found (dashed return, accent) -->
+  <line x1="540" y1="544" x2="180" y2="544"
+        stroke="#f7591f" stroke-width="1.4" stroke-dasharray="5,4"
+        marker-end="url(#arrow-accent)"/>
+
+  <!-- ============================================================ -->
+  <!-- Activation bars (narrow, on H lifeline during request spans) -->
+  <!-- ============================================================ -->
+  <!-- 1+2+3 : initialize span -->
+  <rect x="536" y="184" width="8" height="76"
+        fill="rgba(11,13,11,0.06)" stroke="#52534e" stroke-width="0.8"/>
+  <!-- 4+5+6 : tools/list span -->
+  <rect x="536" y="292" width="8" height="76"
+        fill="rgba(11,13,11,0.06)" stroke="#52534e" stroke-width="0.8"/>
+  <!-- 7+8+9 : DELETE span -->
+  <rect x="536" y="400" width="8" height="76"
+        fill="rgba(11,13,11,0.06)" stroke="#52534e" stroke-width="0.8"/>
+  <!-- 10+11 : reuse-after-delete span -->
+  <rect x="536" y="508" width="8" height="40"
+        fill="rgba(11,13,11,0.06)" stroke="#52534e" stroke-width="0.8"/>
+
+  <!-- ============================================================ -->
+  <!-- Arrow labels (with opaque mask rects)                        -->
+  <!-- ============================================================ -->
+  <!-- 1 -->
+  <rect x="296" y="168" width="128" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="360" y="178" fill="#1a70c7" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">POST · INITIALIZE</text>
+
+  <!-- 2 -->
+  <rect x="652" y="204" width="172" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="738" y="214" fill="#f7591f" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">CREATESESSION(RANDOM128)</text>
+
+  <!-- 3 -->
+  <rect x="276" y="240" width="168" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="360" y="250" fill="#f7591f" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">200 · MCP-SESSION-ID</text>
+
+  <!-- 4 -->
+  <rect x="288" y="276" width="144" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="360" y="286" fill="#1a70c7" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">POST · TOOLS/LIST</text>
+
+  <!-- 5 -->
+  <rect x="668" y="312" width="140" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="738" y="322" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">GETSESSION · TOUCH</text>
+
+  <!-- 6 -->
+  <rect x="312" y="348" width="96" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="360" y="358" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">200 · RESULT</text>
+
+  <!-- 7 -->
+  <rect x="288" y="384" width="144" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="360" y="394" fill="#1a70c7" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">DELETE · / (TERMINATE)</text>
+
+  <!-- 8 -->
+  <rect x="668" y="420" width="140" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="738" y="430" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">DELETESESSION</text>
+
+  <!-- 9 -->
+  <rect x="328" y="456" width="64" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="360" y="466" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">200 · OK</text>
+
+  <!-- 10 -->
+  <rect x="260" y="492" width="200" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="360" y="502" fill="#1a70c7" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">POST · TOOLS/LIST · STALE ID</text>
+
+  <!-- 11 -->
+  <rect x="280" y="528" width="160" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="360" y="538" fill="#f7591f" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">404 · NOT FOUND</text>
+
+  <!-- ============================================================ -->
+  <!-- Note: session terminated -> 404 (right of step 11)           -->
+  <!-- ============================================================ -->
+  <rect x="612" y="492" width="280" height="56" rx="6" fill="#f5f4ed"/>
+  <rect x="612" y="492" width="280" height="56" rx="6"
+        fill="rgba(247,89,31,0.05)" stroke="#f7591f" stroke-width="1"
+        stroke-dasharray="4,4"/>
+  <text x="624" y="508" fill="#f7591f" font-size="8"
+        font-family="ui-monospace, monospace" letter-spacing="0.7">NOTE</text>
+  <text x="624" y="524" fill="#0b0d0b" font-size="11" font-weight="600">session terminated &#8594; 404</text>
+  <text x="624" y="540" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace">client must re-initialize</text>
+
+  <!-- ============================================================ -->
+  <!-- Actor boxes (drawn after lines so they sit on top)           -->
+  <!-- ============================================================ -->
+  <!-- C: MCP Client (external) -->
+  <rect x="100" y="76" width="160" height="72" rx="6" fill="#f5f4ed"/>
+  <rect x="100" y="76" width="160" height="72" rx="6"
+        fill="rgba(82,83,78,0.10)" stroke="#65655c" stroke-width="1"/>
+  <rect x="108" y="84" width="32" height="12" rx="2" fill="transparent"
+        stroke="rgba(101,101,92,0.40)" stroke-width="0.8"/>
+  <text x="124" y="93" fill="#65655c" font-size="7"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">EXT</text>
+  <text x="180" y="116" fill="#0b0d0b" font-size="12" font-weight="600"
+        text-anchor="middle">MCP Client</text>
+  <text x="180" y="132" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">Claude · Cursor · Inspector</text>
+
+  <!-- H: POST /mcp/ (host) -->
+  <rect x="460" y="76" width="160" height="72" rx="6" fill="#f5f4ed"/>
+  <rect x="460" y="76" width="160" height="72" rx="6"
+        fill="#ffffff" stroke="#0b0d0b" stroke-width="1"/>
+  <rect x="468" y="84" width="36" height="12" rx="2" fill="transparent"
+        stroke="rgba(11,13,11,0.40)" stroke-width="0.8"/>
+  <text x="486" y="93" fill="#0b0d0b" font-size="7"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">HOST</text>
+  <text x="540" y="116" fill="#0b0d0b" font-size="12" font-weight="600"
+        text-anchor="middle">POST /mcp/</text>
+  <text x="540" y="132" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">handleMcpRequest</text>
+
+  <!-- S: sessions table (FOCAL coral) -->
+  <rect x="820" y="76" width="160" height="72" rx="6" fill="#f5f4ed"/>
+  <rect x="820" y="76" width="160" height="72" rx="6"
+        fill="rgba(247,89,31,0.08)" stroke="#f7591f" stroke-width="1.2"/>
+  <rect x="828" y="84" width="44" height="12" rx="2" fill="transparent"
+        stroke="rgba(247,89,31,0.50)" stroke-width="0.8"/>
+  <text x="850" y="93" fill="#f7591f" font-size="7"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">STORE</text>
+  <text x="900" y="116" fill="#0b0d0b" font-size="12" font-weight="600"
+        text-anchor="middle">sessions table</text>
+  <text x="900" y="132" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">component store</text>
+
+  <!-- ============================================================ -->
+  <!-- Phase brackets / dividers along the left edge                -->
+  <!-- ============================================================ -->
+  <!-- divider before reuse-after-delete -->
+  <line x1="60" y1="488" x2="1020" y2="488"
+        stroke="rgba(11,13,11,0.10)" stroke-width="0.8" stroke-dasharray="2,4"/>
+
+  <!-- Phase labels (eyebrow) -->
+  <text x="64" y="180" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" letter-spacing="1.5">1 · INIT</text>
+  <text x="64" y="288" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" letter-spacing="1.5">2 · CALL</text>
+  <text x="64" y="396" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" letter-spacing="1.5">3 · CLOSE</text>
+  <text x="64" y="504" fill="#f7591f" font-size="8"
+        font-family="ui-monospace, monospace" letter-spacing="1.5">4 · REUSE</text>
+
+  <!-- ============================================================ -->
+  <!-- Legend strip                                                 -->
+  <!-- ============================================================ -->
+  <line x1="40" y1="608" x2="1040" y2="608"
+        stroke="rgba(11,13,11,0.10)" stroke-width="0.8"/>
+  <text x="40" y="624" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" letter-spacing="1.5">LEGEND</text>
+
+  <rect x="40" y="640" width="14" height="10" rx="2"
+        fill="rgba(247,89,31,0.08)" stroke="#f7591f" stroke-width="1"/>
+  <text x="60" y="648" fill="#52534e" font-size="9">Sessions table (focal)</text>
+
+  <rect x="216" y="640" width="14" height="10" rx="2"
+        fill="#ffffff" stroke="#0b0d0b" stroke-width="1"/>
+  <text x="236" y="648" fill="#52534e" font-size="9">Host code</text>
+
+  <rect x="336" y="640" width="14" height="10" rx="2"
+        fill="rgba(82,83,78,0.10)" stroke="#65655c" stroke-width="1"/>
+  <text x="356" y="648" fill="#52534e" font-size="9">External</text>
+
+  <line x1="448" y1="646" x2="476" y2="646"
+        stroke="#1a70c7" stroke-width="1.4" marker-end="url(#arrow-link)"/>
+  <text x="484" y="648" fill="#52534e" font-size="9">HTTP request</text>
+
+  <line x1="600" y1="646" x2="628" y2="646"
+        stroke="#52534e" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="636" y="648" fill="#52534e" font-size="9">Internal call</text>
+
+  <line x1="740" y1="646" x2="768" y2="646"
+        stroke="#52534e" stroke-width="1.2" stroke-dasharray="5,4"
+        marker-end="url(#arrow)"/>
+  <text x="776" y="648" fill="#52534e" font-size="9">Return / response</text>
+
+  <line x1="908" y1="646" x2="936" y2="646"
+        stroke="#f7591f" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
+  <text x="944" y="648" fill="#52534e" font-size="9">Lifecycle event</text>
+</svg>

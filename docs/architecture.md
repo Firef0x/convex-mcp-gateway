@@ -24,40 +24,7 @@ That split is the entire architecture in one paragraph.
 
 ## High-level
 
-```mermaid
-flowchart LR
-  subgraph Client[" "]
-    direction TB
-    MCP["MCP client<br/>(Claude Desktop,<br/>Cursor, Inspector)"]
-  end
-
-  subgraph Convex["Convex deployment"]
-    direction TB
-    subgraph Host["Host app (your code)"]
-      AuthCfg["auth.config.ts<br/>JWT issuer"]
-      MCPRoute["http.ts<br/>/mcp/ route"]
-      Authorize["authorize<br/>callback (JS)"]
-      Tools["Tool functions<br/>query / mutation / action"]
-      Discovery["http.ts<br/>discovery route"]
-    end
-    subgraph Component["mcp-gateway component"]
-      Handler["handleMcpRequest<br/>(client lib code)"]
-      Dispatch["dispatch.runTool<br/>recordAuthDenial"]
-      Registry[("tools, config")]
-      Audit[("audit, sessions")]
-    end
-  end
-
-  MCP -->|POST /mcp/<br/>JSON-RPC + Bearer| MCPRoute
-  MCP -->|GET /.well-known/...| Discovery
-  MCPRoute -->|invokes| Handler
-  Handler -->|getUserIdentity| AuthCfg
-  Handler -->|calls| Authorize
-  Handler -->|runQuery| Registry
-  Handler -->|runAction| Dispatch
-  Dispatch -->|run handle| Tools
-  Dispatch -->|runMutation| Audit
-```
+![Architecture overview](./diagrams/architecture.svg)
 
 The split:
 
@@ -83,37 +50,7 @@ client class.
 
 ## Data model
 
-```mermaid
-erDiagram
-  tools {
-    string name "by_name index"
-    string description
-    string kind "query|mutation|action"
-    string functionHandle
-    any inputSchema
-    any metadata "host-defined: scopes, roles, public, auditArgs"
-  }
-  config {
-    string authServerUrl "OAuth IdP base URL (optional)"
-    string resourceUrl "explicit resource URL (optional)"
-  }
-  sessions {
-    string sessionId "by_sessionId index"
-    string protocolVersion
-    number createdAt
-    number lastSeenAt
-  }
-  audit {
-    string toolName "by_toolName index"
-    string toolKind
-    any args "null when metadata.auditArgs === false"
-    string outcome "by_outcome index: allowed|denied|error"
-    string identitySubject "from host's getUserIdentity()"
-    number durationMs
-    number errorCode
-    string errorMessage
-  }
-```
+![Component data model](./diagrams/data-model.svg)
 
 Four tables, all owned by the component:
 
@@ -151,26 +88,7 @@ based on the client's `Accept` header:
   transport even for short responses; ready for future progress
   notifications without protocol change.
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant C as MCP Client
-  participant H as POST /mcp/
-  participant S as sessions table
-
-  C->>H: initialize (no session id)
-  H->>S: createSession(random128)
-  H-->>C: 200 + Mcp-Session-Id: <id>
-  Note over C: persists id for the conversation
-  C->>H: tools/list (Mcp-Session-Id: <id>)
-  H->>S: getSession + touch
-  H-->>C: 200 result
-  C->>H: DELETE / (Mcp-Session-Id: <id>)
-  H->>S: deleteSession
-  H-->>C: 200
-  C->>H: tools/list (Mcp-Session-Id: <id>)
-  H-->>C: 404 Not Found  (forces re-initialize)
-```
+![Streamable HTTP session lifecycle](./diagrams/session-lifecycle.svg)
 
 Sessions are required after `initialize` (HTTP `400` on missing
 header). The server may also terminate a session at any time; clients
@@ -181,49 +99,7 @@ cron if needed.
 
 ## Request flow: `tools/call`
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant C as MCP Client
-  participant H as Host /mcp/ httpAction
-  participant Hl as handleMcpRequest
-  participant Az as authorize callback
-  participant D as component dispatch.runTool
-  participant T as Host tool fn
-  participant L as Audit log
-
-  C->>H: POST /mcp/ tools/call name=X
-  H->>Hl: handleMcpRequest(ctx, req, {authorize})
-  Hl->>Hl: ctx.auth.getUserIdentity()
-  Hl->>D: lookup tool via registry.getTool
-  alt tool not registered
-    D-->>Hl: null
-    Hl-->>H: -32602 Unknown tool
-    Note right of Hl: skipped audit (anti-DoS)
-  else tool found
-    Hl->>Az: authorize(ctx, {mode:"call", toolMetadata, args, ...})
-    alt authorize throws
-      Az-->>Hl: throw
-      Hl->>D: recordAuthDenial(outcome=error, -32603)
-      D->>L: outcome=error
-      Hl-->>H: -32603 Authorizer threw
-    else allowed=false
-      Az-->>Hl: {allowed:false, reason}
-      Hl->>D: recordAuthDenial(outcome=denied, -32001 / -32003)
-      D->>L: outcome=denied
-      Hl-->>H: -32001 / -32003 + WWW-Authenticate
-    else allowed=true
-      Az-->>Hl: {allowed:true}
-      Hl->>D: runTool(name, args, auditIdentitySubject)
-      D->>T: runQuery / runMutation / runAction(handle, args)
-      T-->>D: result | throw
-      D->>L: outcome=allowed | error -32000
-      D-->>Hl: {ok, data} | {error}
-      Hl-->>H: ok+data | error
-    end
-  end
-  H-->>C: HTTP response
-```
+![tools/call dispatch flow](./diagrams/tools-call-flow.svg)
 
 A few invariants worth pointing out:
 
@@ -245,26 +121,7 @@ A few invariants worth pointing out:
 
 ## Request flow: `tools/list`
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant C as MCP Client
-  participant H as Host /mcp/ httpAction
-  participant Hl as handleMcpRequest
-  participant R as registry.listTools
-  participant Az as authorize callback
-
-  C->>H: POST /mcp/ tools/list
-  H->>Hl: handleMcpRequest(ctx, req, {authorize})
-  Hl->>R: listTools()
-  R-->>Hl: all registered tools
-  par for each tool (in parallel)
-    Hl->>Az: authorize(ctx, {mode:"list", toolMetadata, args:{}, ...})
-    Az-->>Hl: {allowed:true|false} | throw
-  end
-  Hl-->>H: tools where allowed=true
-  H-->>C: {tools: [{name, description, inputSchema}, ...]}
-```
+![tools/list parallel filter](./diagrams/tools-list-flow.svg)
 
 The catalog visible to a caller is exactly the set of tools the
 authorize callback would let them call. An unauthenticated client sees

@@ -1,0 +1,246 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 600"
+     font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+  <defs>
+    <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="0.9" fill="rgba(11,13,11,0.10)"/>
+    </pattern>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#52534e"/>
+    </marker>
+    <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#f7591f"/>
+    </marker>
+    <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#1a70c7"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#f5f4ed"/>
+  <rect width="100%" height="100%" fill="url(#dots)" opacity="0.55"/>
+
+  <!-- ============================== -->
+  <!-- ARROWS (drawn first for z-order) -->
+  <!-- ============================== -->
+
+  <!-- start -> method? -->
+  <line x1="540" y1="92" x2="540" y2="128"
+        stroke="#52534e" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- method? -> CallMode (left) -->
+  <line x1="468" y1="180" x2="320" y2="220"
+        stroke="#52534e" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- method? -> ListMode (right) -->
+  <line x1="612" y1="180" x2="760" y2="220"
+        stroke="#52534e" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- CallMode -> Run dispatch (allowed=true) FOCAL -->
+  <line x1="160" y1="320" x2="80" y2="384"
+        stroke="#f7591f" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
+
+  <!-- CallMode -> deny error -->
+  <line x1="240" y1="328" x2="240" y2="384"
+        stroke="#52534e" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- CallMode -> internal error (throws) -->
+  <line x1="320" y1="320" x2="400" y2="384"
+        stroke="#52534e" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- ListMode -> Include in list (allowed=true) -->
+  <line x1="760" y1="328" x2="680" y2="384"
+        stroke="#52534e" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- ListMode -> Hide (allowed=false or throws) — passive, dashed -->
+  <line x1="840" y1="328" x2="920" y2="384"
+        stroke="#52534e" stroke-width="1.2" stroke-dasharray="5,4"
+        marker-end="url(#arrow)"/>
+
+  <!-- ============================== -->
+  <!-- ARROW LABELS (with mask rects)  -->
+  <!-- ============================== -->
+
+  <!-- method? -> CallMode label -->
+  <rect x="364" y="192" width="76" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="402" y="202" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">tools/call</text>
+
+  <!-- method? -> ListMode label -->
+  <rect x="640" y="192" width="76" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="678" y="202" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">tools/list</text>
+
+  <!-- CallMode -> dispatch label (focal) -->
+  <rect x="68" y="344" width="92" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="114" y="354" fill="#f7591f" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">ALLOWED = TRUE</text>
+
+  <!-- CallMode -> deny label -->
+  <rect x="200" y="344" width="80" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="240" y="354" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">ALLOWED = FALSE</text>
+
+  <!-- CallMode -> error label -->
+  <rect x="332" y="344" width="60" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="362" y="354" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">THROWS</text>
+
+  <!-- ListMode -> include label -->
+  <rect x="612" y="344" width="92" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="658" y="354" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">ALLOWED = TRUE</text>
+
+  <!-- ListMode -> hide label -->
+  <rect x="868" y="344" width="92" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="914" y="354" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">FALSE OR THROWS</text>
+
+  <!-- ============================== -->
+  <!-- NODES                            -->
+  <!-- ============================== -->
+
+  <!-- Start: oval/pill -->
+  <rect x="440" y="48" width="200" height="44" rx="20" fill="#f5f4ed"/>
+  <rect x="440" y="48" width="200" height="44" rx="20"
+        fill="rgba(82,83,78,0.10)" stroke="#65655c" stroke-width="1"/>
+  <text x="540" y="76" fill="#0b0d0b" font-size="12" font-weight="600"
+        text-anchor="middle">request arrives</text>
+
+  <!-- Decision diamond: method? -->
+  <rect x="468" y="128" width="144" height="56" rx="0"
+        fill="#f5f4ed" stroke="none"
+        transform="rotate(45 540 156)"/>
+  <rect x="468" y="128" width="144" height="56" rx="0"
+        fill="#ffffff" stroke="#0b0d0b" stroke-width="1"
+        transform="rotate(45 540 156)"/>
+  <text x="540" y="152" fill="#0b0d0b" font-size="12" font-weight="600"
+        text-anchor="middle">method?</text>
+  <text x="540" y="166" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">JSON-RPC</text>
+
+  <!-- CallMode box (FOCAL, coral) -->
+  <rect x="120" y="220" width="240" height="100" rx="6" fill="#f5f4ed"/>
+  <rect x="120" y="220" width="240" height="100" rx="6"
+        fill="rgba(247,89,31,0.08)" stroke="#f7591f" stroke-width="1.2"/>
+  <rect x="128" y="228" width="48" height="12" rx="2" fill="transparent"
+        stroke="rgba(247,89,31,0.50)" stroke-width="0.8"/>
+  <text x="152" y="237" fill="#f7591f" font-size="7"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">CALL MODE</text>
+  <text x="240" y="264" fill="#0b0d0b" font-size="12" font-weight="600"
+        text-anchor="middle">authorize</text>
+  <text x="240" y="284" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">mode = "call"</text>
+  <text x="240" y="300" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">args = caller args</text>
+
+  <!-- ListMode box -->
+  <rect x="720" y="220" width="240" height="100" rx="6" fill="#f5f4ed"/>
+  <rect x="720" y="220" width="240" height="100" rx="6"
+        fill="#ffffff" stroke="#0b0d0b" stroke-width="1"/>
+  <rect x="728" y="228" width="48" height="12" rx="2" fill="transparent"
+        stroke="rgba(11,13,11,0.40)" stroke-width="0.8"/>
+  <text x="752" y="237" fill="#0b0d0b" font-size="7"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">LIST MODE</text>
+  <text x="840" y="264" fill="#0b0d0b" font-size="12" font-weight="600"
+        text-anchor="middle">authorize</text>
+  <text x="840" y="284" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">mode = "list"</text>
+  <text x="840" y="300" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">args = {}</text>
+
+  <!-- Outcome 1: Run dispatch.runTool -->
+  <rect x="0" y="384" width="160" height="68" rx="6" fill="#f5f4ed"/>
+  <rect x="0" y="384" width="160" height="68" rx="6"
+        fill="#ffffff" stroke="#0b0d0b" stroke-width="1"/>
+  <text x="80" y="416" fill="#0b0d0b" font-size="12" font-weight="600"
+        text-anchor="middle">Run dispatch</text>
+  <text x="80" y="432" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">.runTool</text>
+
+  <!-- Outcome 2: deny error -->
+  <rect x="160" y="384" width="160" height="68" rx="6" fill="#f5f4ed"/>
+  <rect x="160" y="384" width="160" height="68" rx="6"
+        fill="rgba(11,13,11,0.05)" stroke="#52534e" stroke-width="1"/>
+  <text x="240" y="408" fill="#0b0d0b" font-size="12" font-weight="600"
+        text-anchor="middle">deny error</text>
+  <text x="240" y="424" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">-32001 / -32003</text>
+  <text x="240" y="440" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">+ audit denied</text>
+
+  <!-- Outcome 3: internal error -->
+  <rect x="320" y="384" width="160" height="68" rx="6" fill="#f5f4ed"/>
+  <rect x="320" y="384" width="160" height="68" rx="6"
+        fill="rgba(11,13,11,0.05)" stroke="#52534e" stroke-width="1"/>
+  <text x="400" y="408" fill="#0b0d0b" font-size="12" font-weight="600"
+        text-anchor="middle">internal error</text>
+  <text x="400" y="424" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">-32603</text>
+  <text x="400" y="440" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">+ audit error</text>
+
+  <!-- Outcome 4: include in list -->
+  <rect x="600" y="384" width="160" height="68" rx="6" fill="#f5f4ed"/>
+  <rect x="600" y="384" width="160" height="68" rx="6"
+        fill="#ffffff" stroke="#0b0d0b" stroke-width="1"/>
+  <text x="680" y="416" fill="#0b0d0b" font-size="12" font-weight="600"
+        text-anchor="middle">Include in</text>
+  <text x="680" y="432" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">tools/list</text>
+
+  <!-- Outcome 5: hide from list (passive, muted) -->
+  <rect x="920" y="384" width="160" height="68" rx="6" fill="#f5f4ed"/>
+  <rect x="920" y="384" width="160" height="68" rx="6"
+        fill="rgba(11,13,11,0.02)" stroke="rgba(11,13,11,0.20)" stroke-width="1"
+        stroke-dasharray="4,3"/>
+  <text x="1000" y="416" fill="#52534e" font-size="12" font-weight="600"
+        text-anchor="middle">Hide from</text>
+  <text x="1000" y="432" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">tools/list</text>
+
+  <!-- ============================== -->
+  <!-- LEGEND                           -->
+  <!-- ============================== -->
+  <line x1="40" y1="500" x2="1040" y2="500"
+        stroke="rgba(11,13,11,0.10)" stroke-width="0.8"/>
+  <text x="40" y="516" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" letter-spacing="1.5">LEGEND</text>
+
+  <rect x="40" y="532" width="14" height="10" rx="2"
+        fill="rgba(247,89,31,0.08)" stroke="#f7591f" stroke-width="1"/>
+  <text x="60" y="540" fill="#52534e" font-size="9">Call-time policy (focal)</text>
+
+  <rect x="232" y="532" width="14" height="10" rx="2"
+        fill="#ffffff" stroke="#0b0d0b" stroke-width="1"/>
+  <text x="252" y="540" fill="#52534e" font-size="9">Step / action</text>
+
+  <rect x="372" y="532" width="14" height="10" rx="2"
+        fill="rgba(82,83,78,0.10)" stroke="#65655c" stroke-width="1"/>
+  <text x="392" y="540" fill="#52534e" font-size="9">Start</text>
+
+  <rect x="464" y="532" width="14" height="10" rx="2"
+        fill="rgba(11,13,11,0.05)" stroke="#52534e" stroke-width="1"/>
+  <text x="484" y="540" fill="#52534e" font-size="9">Error outcome</text>
+
+  <rect x="608" y="532" width="14" height="10" rx="2"
+        fill="rgba(11,13,11,0.02)" stroke="rgba(11,13,11,0.20)" stroke-width="1"
+        stroke-dasharray="4,3"/>
+  <text x="628" y="540" fill="#52534e" font-size="9">Passive / hidden</text>
+
+  <line x1="760" y1="538" x2="788" y2="538"
+        stroke="#f7591f" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
+  <text x="796" y="540" fill="#52534e" font-size="9">Allowed (focal)</text>
+
+  <line x1="932" y1="538" x2="960" y2="538"
+        stroke="#52534e" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="968" y="540" fill="#52534e" font-size="9">Branch</text>
+</svg>

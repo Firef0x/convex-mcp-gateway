@@ -12,23 +12,7 @@ via `auth.config.ts` like for any other Convex deployment.
 
 ## The flow
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant C as MCP Client
-  participant G as Gateway (/mcp/)
-  participant W as Discovery (/.well-known/...)
-  participant AS as Authorization Server
-
-  C->>G: POST /mcp/ tools/call (no Bearer)
-  G-->>C: HTTP 401<br/>WWW-Authenticate: Bearer<br/>resource_metadata="https://app/.well-known/oauth-protected-resource/mcp"
-  C->>W: GET /.well-known/oauth-protected-resource/mcp
-  W-->>C: {resource, authorization_servers: [...], bearer_methods_supported: ["header"]}
-  C->>AS: OAuth 2.1 flow (DCR + PKCE + auth code, or whatever the AS supports)
-  AS-->>C: access_token
-  C->>G: POST /mcp/ tools/call (Authorization: Bearer access_token)
-  G-->>C: HTTP 200 result
-```
+![OAuth 2.1 protected-resource discovery flow](./diagrams/oauth-flow.svg)
 
 The client never has to know your AS URL up-front. It learns it from the
 `WWW-Authenticate` header on the first 401 and follows the discovery

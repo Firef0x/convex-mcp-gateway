@@ -62,17 +62,7 @@ for "user is not allowed" cases, return `{ allowed: false, reason }`.
 
 ## Two modes: `call` and `list`
 
-```mermaid
-flowchart TD
-  Start([request arrives]) --> Method{method}
-  Method -->|tools/call| CallMode[authorize<br/>mode = call<br/>args = caller args]
-  Method -->|tools/list| ListMode[authorize<br/>mode = list<br/>args = empty]
-  CallMode -->|allowed=true| Run[Component dispatch.runTool]
-  CallMode -->|allowed=false| Deny[-32001 / -32003 + audit denied]
-  CallMode -->|throws| Err[-32603 + audit error]
-  ListMode -->|allowed=true| Visible[Include in tools/list]
-  ListMode -->|allowed=false<br/>or throws| Hidden[Hide from tools/list]
-```
+![authorize call vs list mode](./diagrams/authorize-modes.svg)
 
 The contract: **the catalog visible to a caller equals the set of tools
 they could actually invoke.** An unauthenticated client never sees the

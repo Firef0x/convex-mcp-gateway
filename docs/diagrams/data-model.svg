@@ -1,0 +1,273 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 600"
+     font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+  <defs>
+    <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="0.9" fill="rgba(11,13,11,0.10)"/>
+    </pattern>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#52534e"/>
+    </marker>
+    <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#f7591f"/>
+    </marker>
+    <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#1a70c7"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#f5f4ed"/>
+  <rect width="100%" height="100%" fill="url(#dots)" opacity="0.55"/>
+
+  <!-- Boundary: gateway component -->
+  <rect x="40" y="60" width="1000" height="416" rx="8"
+        fill="transparent" stroke="rgba(11,13,11,0.22)"
+        stroke-width="1" stroke-dasharray="6,4"/>
+  <rect x="52" y="48" width="216" height="20" rx="2" fill="#f5f4ed"/>
+  <text x="60" y="62" fill="#52534e" font-size="9" font-family="ui-monospace, monospace"
+        letter-spacing="1.5">MCP-GATEWAY · COMPONENT TABLES</text>
+
+  <!-- ============================================================ -->
+  <!-- Entity: tools  (top-left)                                    -->
+  <!-- ============================================================ -->
+  <!-- Geometry: x=80, y=96, w=440, h=192 -->
+  <rect x="80" y="96" width="440" height="192" rx="6" fill="#f5f4ed"/>
+  <rect x="80" y="96" width="440" height="192" rx="6"
+        fill="rgba(11,13,11,0.05)" stroke="#52534e" stroke-width="1"/>
+  <!-- Header band -->
+  <rect x="80" y="96" width="440" height="32" rx="6"
+        fill="rgba(11,13,11,0.04)" stroke="none"/>
+  <line x1="80" y1="128" x2="520" y2="128"
+        stroke="rgba(82,83,78,0.40)" stroke-width="0.8"/>
+  <!-- Type tag -->
+  <rect x="92" y="104" width="40" height="14" rx="2" fill="transparent"
+        stroke="rgba(82,83,78,0.50)" stroke-width="0.8"/>
+  <text x="112" y="114" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">TABLE</text>
+  <!-- Entity name -->
+  <text x="148" y="116" fill="#0b0d0b" font-size="14" font-weight="600">tools</text>
+  <!-- Fields -->
+  <!-- name -->
+  <text x="96" y="152" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">name</text>
+  <text x="240" y="152" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">string</text>
+  <rect x="464" y="142" width="40" height="14" rx="2" fill="transparent"
+        stroke="rgba(82,83,78,0.50)" stroke-width="0.8"/>
+  <text x="484" y="152" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">IDX</text>
+  <!-- description -->
+  <text x="96" y="172" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">description</text>
+  <text x="240" y="172" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">string</text>
+  <!-- kind -->
+  <text x="96" y="192" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">kind</text>
+  <text x="240" y="192" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">"query"|"mutation"|"action"</text>
+  <!-- functionHandle -->
+  <text x="96" y="212" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">functionHandle</text>
+  <text x="240" y="212" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">string</text>
+  <!-- inputSchema -->
+  <text x="96" y="232" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">inputSchema</text>
+  <text x="240" y="232" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">any</text>
+  <!-- metadata -->
+  <text x="96" y="252" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">metadata</text>
+  <text x="240" y="252" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">any</text>
+  <text x="96" y="272" fill="#65655c" font-size="9"
+        font-family="ui-monospace, monospace" font-style="italic">host-defined: scopes · roles · public · auditArgs</text>
+
+  <!-- ============================================================ -->
+  <!-- Entity: config  (top-right, singleton)                       -->
+  <!-- ============================================================ -->
+  <!-- Geometry: x=560, y=96, w=440, h=120 -->
+  <rect x="560" y="96" width="440" height="120" rx="6" fill="#f5f4ed"/>
+  <rect x="560" y="96" width="440" height="120" rx="6"
+        fill="rgba(11,13,11,0.05)" stroke="#52534e" stroke-width="1"/>
+  <rect x="560" y="96" width="440" height="32" rx="6"
+        fill="rgba(11,13,11,0.04)" stroke="none"/>
+  <line x1="560" y1="128" x2="1000" y2="128"
+        stroke="rgba(82,83,78,0.40)" stroke-width="0.8"/>
+  <rect x="572" y="104" width="40" height="14" rx="2" fill="transparent"
+        stroke="rgba(82,83,78,0.50)" stroke-width="0.8"/>
+  <text x="592" y="114" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">TABLE</text>
+  <text x="628" y="116" fill="#0b0d0b" font-size="14" font-weight="600">config</text>
+  <text x="688" y="116" fill="#65655c" font-size="9"
+        font-family="ui-monospace, monospace" font-style="italic">singleton</text>
+  <!-- Fields -->
+  <text x="576" y="152" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">authServerUrl?</text>
+  <text x="744" y="152" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">string</text>
+  <text x="576" y="172" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">resourceUrl?</text>
+  <text x="744" y="172" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">string</text>
+  <text x="576" y="196" fill="#65655c" font-size="9"
+        font-family="ui-monospace, monospace" font-style="italic">? = optional</text>
+
+  <!-- ============================================================ -->
+  <!-- Entity: sessions  (middle-right)                             -->
+  <!-- ============================================================ -->
+  <!-- Geometry: x=560, y=240, w=440, h=148 -->
+  <rect x="560" y="240" width="440" height="148" rx="6" fill="#f5f4ed"/>
+  <rect x="560" y="240" width="440" height="148" rx="6"
+        fill="rgba(11,13,11,0.05)" stroke="#52534e" stroke-width="1"/>
+  <rect x="560" y="240" width="440" height="32" rx="6"
+        fill="rgba(11,13,11,0.04)" stroke="none"/>
+  <line x1="560" y1="272" x2="1000" y2="272"
+        stroke="rgba(82,83,78,0.40)" stroke-width="0.8"/>
+  <rect x="572" y="248" width="40" height="14" rx="2" fill="transparent"
+        stroke="rgba(82,83,78,0.50)" stroke-width="0.8"/>
+  <text x="592" y="258" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">TABLE</text>
+  <text x="628" y="260" fill="#0b0d0b" font-size="14" font-weight="600">sessions</text>
+  <!-- Fields -->
+  <text x="576" y="296" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">sessionId</text>
+  <text x="744" y="296" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">string</text>
+  <rect x="944" y="286" width="40" height="14" rx="2" fill="transparent"
+        stroke="rgba(82,83,78,0.50)" stroke-width="0.8"/>
+  <text x="964" y="296" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">IDX</text>
+  <text x="576" y="316" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">protocolVersion</text>
+  <text x="744" y="316" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">string</text>
+  <text x="576" y="336" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">createdAt</text>
+  <text x="744" y="336" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">number</text>
+  <text x="576" y="356" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">lastSeenAt</text>
+  <text x="744" y="356" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">number</text>
+
+  <!-- ============================================================ -->
+  <!-- Entity: audit  (bottom-left, taller)                         -->
+  <!-- ============================================================ -->
+  <!-- Geometry: x=80, y=312, w=440, h=148 -->
+  <rect x="80" y="312" width="440" height="148" rx="6" fill="#f5f4ed"/>
+  <rect x="80" y="312" width="440" height="148" rx="6"
+        fill="rgba(11,13,11,0.05)" stroke="#52534e" stroke-width="1"/>
+  <rect x="80" y="312" width="440" height="32" rx="6"
+        fill="rgba(11,13,11,0.04)" stroke="none"/>
+  <line x1="80" y1="344" x2="520" y2="344"
+        stroke="rgba(82,83,78,0.40)" stroke-width="0.8"/>
+  <rect x="92" y="320" width="40" height="14" rx="2" fill="transparent"
+        stroke="rgba(82,83,78,0.50)" stroke-width="0.8"/>
+  <text x="112" y="330" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">TABLE</text>
+  <text x="148" y="332" fill="#0b0d0b" font-size="14" font-weight="600">audit</text>
+  <!-- Fields (two columns to fit) -->
+  <!-- Left column -->
+  <text x="96" y="368" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">toolName</text>
+  <text x="200" y="368" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">string</text>
+  <rect x="252" y="358" width="40" height="14" rx="2" fill="transparent"
+        stroke="rgba(82,83,78,0.50)" stroke-width="0.8"/>
+  <text x="272" y="368" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">IDX</text>
+
+  <text x="96" y="388" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">toolKind</text>
+  <text x="200" y="388" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">"query"|"mutation"|"action"</text>
+
+  <text x="96" y="408" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">args</text>
+  <text x="200" y="408" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">any</text>
+  <text x="252" y="408" fill="#65655c" font-size="9"
+        font-family="ui-monospace, monospace" font-style="italic">null when auditArgs=false</text>
+
+  <text x="96" y="428" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">outcome</text>
+  <text x="200" y="428" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">"allowed"|"denied"|"error"</text>
+  <rect x="464" y="418" width="40" height="14" rx="2" fill="transparent"
+        stroke="rgba(82,83,78,0.50)" stroke-width="0.8"/>
+  <text x="484" y="428" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">IDX</text>
+
+  <text x="96" y="448" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">identitySubject</text>
+  <text x="240" y="448" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">string|null</text>
+  <text x="332" y="448" fill="#65655c" font-size="9"
+        font-family="ui-monospace, monospace" font-style="italic">getUserIdentity</text>
+
+  <!-- Right side: durationMs / errorCode? / errorMessage? -->
+
+  <!-- ============================================================ -->
+  <!-- Side panel: audit overflow fields                            -->
+  <!-- Place small grouped fields under the sessions box            -->
+  <!-- ============================================================ -->
+  <!-- Geometry: x=560, y=412, w=440, h=48 -->
+  <rect x="560" y="412" width="440" height="48" rx="6" fill="#f5f4ed"/>
+  <rect x="560" y="412" width="440" height="48" rx="6"
+        fill="transparent" stroke="rgba(82,83,78,0.30)" stroke-width="0.8"
+        stroke-dasharray="4,3"/>
+  <text x="572" y="428" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" letter-spacing="0.7">AUDIT · TIMING &amp; ERROR FIELDS</text>
+  <text x="572" y="448" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">durationMs</text>
+  <text x="676" y="448" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">number</text>
+  <text x="744" y="448" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">errorCode?</text>
+  <text x="848" y="448" fill="#52534e" font-size="11"
+        font-family="ui-monospace, monospace">number</text>
+  <text x="908" y="448" fill="#0b0d0b" font-size="11"
+        font-family="ui-monospace, monospace">errorMessage?</text>
+
+  <!-- ============================================================ -->
+  <!-- Legend strip                                                 -->
+  <!-- ============================================================ -->
+  <line x1="40" y1="500" x2="1040" y2="500"
+        stroke="rgba(11,13,11,0.10)" stroke-width="0.8"/>
+  <text x="40" y="516" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" letter-spacing="1.5">LEGEND</text>
+
+  <rect x="40" y="532" width="14" height="10" rx="2"
+        fill="rgba(11,13,11,0.05)" stroke="#52534e" stroke-width="1"/>
+  <text x="60" y="540" fill="#52534e" font-size="9">Component table (persistent store)</text>
+
+  <rect x="280" y="532" width="40" height="14" rx="2" fill="transparent"
+        stroke="rgba(82,83,78,0.50)" stroke-width="0.8"/>
+  <text x="300" y="542" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">IDX</text>
+  <text x="328" y="540" fill="#52534e" font-size="9">Indexed field</text>
+
+  <text x="448" y="540" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace">name?</text>
+  <text x="500" y="540" fill="#52534e" font-size="9">Optional field (v.optional)</text>
+
+  <text x="704" y="540" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace">"a"|"b"</text>
+  <text x="760" y="540" fill="#52534e" font-size="9">Literal union</text>
+
+  <rect x="868" y="532" width="14" height="10" rx="2"
+        fill="transparent" stroke="rgba(82,83,78,0.30)" stroke-width="0.8"
+        stroke-dasharray="4,3"/>
+  <text x="888" y="540" fill="#52534e" font-size="9">Field continuation</text>
+</svg>
