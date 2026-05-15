@@ -90,6 +90,22 @@ export interface McpAuthorizerArgs {
    * the authorizer reads it for scope/role / public-flag checks.
    */
   toolMetadata: unknown;
+  /**
+   * The caller's identity, resolved once at the gateway boundary
+   * before this callback runs. Source depends on configuration:
+   * - With `tokenValidator` set: whatever the validator returned
+   *   (typically userinfo-endpoint claims).
+   * - Without `tokenValidator`: the result of
+   *   `ctx.auth.getUserIdentity()`, with `iss/aud` mismatches treated
+   *   as null instead of throwing.
+   *
+   * `null` for anonymous calls (no Bearer, invalid token, etc.).
+   *
+   * Prefer this field over calling `ctx.auth.getUserIdentity()`
+   * inside the callback: it works in both pure-JWT and bridge modes,
+   * and you save a call.
+   */
+  identity: { subject: string; claims?: Record<string, unknown> } | null;
 }
 
 export interface McpAuthorizerDecision {

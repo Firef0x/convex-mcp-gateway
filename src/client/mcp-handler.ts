@@ -34,6 +34,39 @@ export type McpCorsOption =
   | ((origin: string) => boolean);
 
 /**
+ * Optional Bearer-token validator for `handleMcpRequest`. When set,
+ * the gateway calls this BEFORE `ctx.auth.getUserIdentity()` and uses
+ * its return value as the identity for the audit row and as a hint
+ * for the authorize callback (via `args.identity`).
+ *
+ * Useful when the upstream IdP issues opaque access tokens that
+ * Convex's local JWT validation can't verify — typical pattern is
+ * to call the IdP's userinfo endpoint:
+ *
+ * ```ts
+ * tokenValidator: async (token) => {
+ *   const r = await fetch("https://id.example.com/api/oidc/userinfo", {
+ *     headers: { Authorization: `Bearer ${token}` },
+ *   });
+ *   if (!r.ok) return null;
+ *   const u = await r.json();
+ *   return { subject: u.sub, claims: u };
+ * }
+ * ```
+ *
+ * Returning `null` means "token rejected" (treated identically to
+ * "no token at all"). Throwing is treated as null with a warning
+ * logged — rejection is not an error condition.
+ *
+ * When this option is omitted, the gateway falls back to
+ * `ctx.auth.getUserIdentity()` (which only handles JWTs validated
+ * by your `auth.config.ts`).
+ */
+export type McpTokenValidator = (
+  token: string,
+) => Promise<{ subject: string; claims?: Record<string, unknown> } | null>;
+
+/**
  * Options for `gateway.handleMcpRequest`. The host supplies an
  * `authorize` callback that decides allowed vs denied per
  * `tools/call` and per tool in a filtered `tools/list`. The callback
@@ -44,6 +77,11 @@ export interface HandleMcpRequestOptions {
   authorize: McpAuthorizerHandler;
   /** See `McpCorsOption`. Omit for non-browser-only deployments. */
   cors?: McpCorsOption;
+  /**
+   * See `McpTokenValidator`. Omit to use Convex's built-in JWT
+   * validation via `ctx.auth.getUserIdentity()`.
+   */
+  tokenValidator?: McpTokenValidator;
 }
 
 type HandlerCtx = {
@@ -361,27 +399,52 @@ async function handlePost(
   // own ctx.auth, but reading once keeps audit and policy consistent
   // for a single request).
   //
-  // Note: Convex's `getUserIdentity()` THROWS when the inbound Bearer
-  // token's `iss`/`aud` don't match any configured provider in
-  // `auth.config.ts`. For an MCP gateway that's serving multiple
-  // clients (some of which may use IdPs we don't trust), throwing here
-  // would 500 the request before the authorize callback ever runs.
-  // Treat the throw as "no identity" instead, so the authorize
-  // callback can decide (typically: deny with -32001, which lets the
-  // client retry the OAuth handshake).
-  let identity: { subject?: string } | null = null;
-  try {
-    identity =
-      ((await ctx.auth.getUserIdentity()) as
-        | { subject?: string }
+  // Resolution order:
+  //   1. If a tokenValidator is configured AND a Bearer is present,
+  //      call it. Its result wins.
+  //   2. Otherwise fall back to ctx.auth.getUserIdentity() (JWT
+  //      validation against auth.config.ts).
+  //
+  // ctx.auth.getUserIdentity() THROWS on iss/aud mismatch. For a
+  // gateway that may receive tokens from multiple clients (some of
+  // whose IdPs we don't trust at the Convex layer), letting that
+  // throw bubble out 500s the request. We catch and treat as null so
+  // the authorize callback gets a chance to deny cleanly with -32001.
+  let identity: {
+    subject: string;
+    claims?: Record<string, unknown>;
+  } | null = null;
+  if (options.tokenValidator) {
+    const authHeader = request.headers.get("authorization");
+    const token = authHeader?.toLowerCase().startsWith("bearer ")
+      ? authHeader.slice(7)
+      : null;
+    if (token) {
+      try {
+        identity = await options.tokenValidator(token);
+      } catch (err) {
+        console.warn(
+          `[mcp-gateway] tokenValidator threw; treating as anonymous. ` +
+            `(${err instanceof Error ? err.message : String(err)})`,
+        );
+      }
+    }
+  } else {
+    try {
+      const raw = (await ctx.auth.getUserIdentity()) as
+        | { subject?: string; [k: string]: unknown }
         | null
-        | undefined) ?? null;
-  } catch (err) {
-    console.warn(
-      `[mcp-gateway] ctx.auth.getUserIdentity() threw; treating as anonymous. ` +
-        `Likely a Bearer token whose iss/aud doesn't match auth.config.ts. ` +
-        `(${err instanceof Error ? err.message : String(err)})`,
-    );
+        | undefined;
+      if (raw && typeof raw.subject === "string") {
+        identity = { subject: raw.subject, claims: raw };
+      }
+    } catch (err) {
+      console.warn(
+        `[mcp-gateway] ctx.auth.getUserIdentity() threw; treating as anonymous. ` +
+          `Likely a Bearer token whose iss/aud doesn't match auth.config.ts. ` +
+          `(${err instanceof Error ? err.message : String(err)})`,
+      );
+    }
   }
   const auditIdentitySubject = identity?.subject ?? null;
 
@@ -424,6 +487,7 @@ async function handlePost(
           args: {},
           mode: "list",
           toolMetadata: tool.metadata ?? null,
+          identity,
         });
         if (decision.allowed) {
           visible.push({
@@ -469,6 +533,7 @@ async function handlePost(
         args,
         mode: "call",
         toolMetadata: tool.metadata ?? null,
+        identity,
       });
 
       if (!decision.allowed) {

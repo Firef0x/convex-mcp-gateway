@@ -468,6 +468,70 @@ describe("authorize callback (host's http.ts)", () => {
   });
 });
 
+describe("OAuth bridge mode (DCR + AS metadata + tokenValidator)", () => {
+  test("handleClientRegistration returns the configured upstream client_id", async () => {
+    const t = newTest();
+    const res = await t.fetch("/oauth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        client_name: "claude.ai",
+        redirect_uris: ["https://claude.ai/api/mcp/auth_callback"],
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { client_id: string; redirect_uris: string[] };
+    expect(body.client_id).toBe("upstream-client-id-fixed");
+    expect(body.redirect_uris).toEqual([
+      "https://claude.ai/api/mcp/auth_callback",
+    ]);
+  });
+
+  test("handleClientRegistration rejects redirect_uris outside the allowlist", async () => {
+    const t = newTest();
+    const res = await t.fetch("/oauth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        client_name: "evil",
+        redirect_uris: ["https://attacker.example.com/callback"],
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("invalid_redirect_uri");
+  });
+
+  test("tokenValidator path: identity from validator, not Convex auth", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    const session = await initialize(t);
+    // The host's mcpHandler routes through `tokenValidator` when a Bearer
+    // is present. The example wires it to accept the literal token
+    // "valid-userinfo-token" → subject "validator-resolved-sub".
+    const res = await t.fetch("/mcp/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "mcp-session-id": session,
+        authorization: "Bearer valid-userinfo-token",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 5,
+        method: "tools/call",
+        params: { name: "invoices.list", arguments: {} },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const entries = await t.run(async (ctx) =>
+      ctx.runQuery(components.mcpGateway.audit.listEntries, {}),
+    );
+    const row = entries.find((e) => e.toolName === "invoices.list");
+    expect(row?.identitySubject).toBe("validator-resolved-sub");
+  });
+});
+
 describe("audit listEntries (filter regression coverage)", () => {
   test("finds older matches when newer entries don't match the outcome filter", async () => {
     const t = newTest();

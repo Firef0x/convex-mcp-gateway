@@ -26,7 +26,11 @@ export type {
   McpToolDefinition,
   McpToolKind,
 } from "../shared.js";
-export type { HandleMcpRequestOptions } from "./mcp-handler.js";
+export type {
+  HandleMcpRequestOptions,
+  McpCorsOption,
+  McpTokenValidator,
+} from "./mcp-handler.js";
 export {
   buildProtectedResourceMetadataUrl,
   buildResourceUrl,
@@ -456,6 +460,273 @@ export class McpGateway {
       },
     );
   }
+
+  // ---------------------------------------------------------------
+  // OPTIONAL: OIDC-bridge mode
+  //
+  // The two methods below are opt-in helpers for hosts whose upstream
+  // IdP doesn't support Dynamic Client Registration (RFC 7591) — e.g.
+  // Pocket-ID 2.x — but who still want browser-based MCP clients
+  // (which DO require DCR) to connect.
+  //
+  // Pattern: the host advertises ITSELF as the authorization server in
+  // the protected-resource metadata, mounts these two helpers as
+  // `/.well-known/oauth-authorization-server` and `/oauth/register`,
+  // pre-registers ONE client with the upstream IdP, and configures
+  // these helpers with that client's id. DCR requests from MCP clients
+  // are answered with the same fixed client id; everything else (the
+  // actual `authorize`, `token`, `userinfo` endpoints) flows directly
+  // to the upstream.
+  //
+  // Hosts that don't need this can ignore both methods. The "dumb"
+  // pass-through mode (the host owns auth entirely via its `authorize`
+  // callback, with or without `setOAuthConfig` for plain RFC 9728
+  // discovery) keeps working unchanged.
+  // ---------------------------------------------------------------
+
+  /**
+   * Serve RFC 8414 OAuth Authorization Server Metadata, wrapping an
+   * upstream IdP. Fetches the upstream's openid-configuration once
+   * per process (in-memory cached), copies the relevant fields, and
+   * substitutes our own `registration_endpoint` so MCP clients DCR
+   * against `handleClientRegistration` instead of the upstream.
+   *
+   * Mount on the host:
+   *
+   * ```ts
+   * http.route({
+   *   path: "/.well-known/oauth-authorization-server",
+   *   method: "GET",
+   *   handler: httpAction(async (ctx, request) =>
+   *     gateway.serveAuthorizationServerMetadata(ctx, request, {
+   *       upstreamIssuer: "https://id.example.com",
+   *     }),
+   *   ),
+   * });
+   * ```
+   */
+  async serveAuthorizationServerMetadata(
+    _ctx: unknown,
+    request: Request,
+    options: {
+      upstreamIssuer: string;
+      /** Path to your `handleClientRegistration` route. Default: `/oauth/register` */
+      registrationPath?: string;
+    },
+  ): Promise<Response> {
+    const corsHeaders = {
+      "access-control-allow-origin": "*",
+      vary: "Origin",
+    } as const;
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          ...corsHeaders,
+          "access-control-allow-methods": "GET, OPTIONS",
+          "access-control-allow-headers":
+            request.headers.get("access-control-request-headers") ?? "*",
+          "access-control-max-age": "86400",
+        },
+      });
+    }
+    const url = new URL(request.url);
+    const registrationPath = options.registrationPath ?? "/oauth/register";
+    let upstream: Record<string, unknown>;
+    try {
+      upstream = await fetchOidcConfigCached(options.upstreamIssuer);
+    } catch (err) {
+      return new Response(
+        JSON.stringify({
+          error: "upstream_metadata_unreachable",
+          error_description:
+            err instanceof Error ? err.message : String(err),
+        }),
+        {
+          status: 502,
+          headers: { "content-type": "application/json", ...corsHeaders },
+        },
+      );
+    }
+    const body = {
+      issuer: url.origin,
+      authorization_endpoint: upstream.authorization_endpoint,
+      token_endpoint: upstream.token_endpoint,
+      userinfo_endpoint: upstream.userinfo_endpoint,
+      jwks_uri: upstream.jwks_uri,
+      scopes_supported: upstream.scopes_supported,
+      response_types_supported: upstream.response_types_supported,
+      grant_types_supported: upstream.grant_types_supported,
+      code_challenge_methods_supported:
+        upstream.code_challenge_methods_supported,
+      // Public-client (PKCE) only at the bridge — secrets stay
+      // upstream and never round-trip through here.
+      token_endpoint_auth_methods_supported: ["none"],
+      registration_endpoint: `${url.origin}${registrationPath}`,
+    };
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "public, max-age=3600",
+        ...corsHeaders,
+      },
+    });
+  }
+
+  /**
+   * Serve RFC 7591 Dynamic Client Registration, returning a fixed
+   * pre-registered upstream client id for every request. This is the
+   * "fake DCR" that lets browser MCP clients (which insist on DCR)
+   * connect to upstream IdPs that don't support DCR.
+   *
+   * **`allowedRedirectPatterns` is required** to prevent open-redirect
+   * attacks: without it any caller could "register" a client with an
+   * attacker-controlled `redirect_uri` and steal auth codes.
+   *
+   * Mount on the host:
+   *
+   * ```ts
+   * http.route({
+   *   path: "/oauth/register",
+   *   method: "POST",
+   *   handler: httpAction(async (ctx, request) =>
+   *     gateway.handleClientRegistration(ctx, request, {
+   *       upstreamClientId: "<your pre-registered id>",
+   *       allowedRedirectPatterns: [
+   *         /^https:\/\/claude\.ai\//,
+   *         /^https:\/\/claude\.com\//,
+   *         /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//,
+   *       ],
+   *     }),
+   *   ),
+   * });
+   * ```
+   */
+  async handleClientRegistration(
+    _ctx: unknown,
+    request: Request,
+    options: {
+      upstreamClientId: string;
+      allowedRedirectPatterns: RegExp[];
+    },
+  ): Promise<Response> {
+    const corsHeaders = {
+      "access-control-allow-origin": "*",
+      vary: "Origin",
+    } as const;
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          ...corsHeaders,
+          "access-control-allow-methods": "POST, OPTIONS",
+          "access-control-allow-headers":
+            request.headers.get("access-control-request-headers") ??
+            "content-type",
+          "access-control-max-age": "86400",
+        },
+      });
+    }
+    if (request.method !== "POST") {
+      return new Response("Method Not Allowed", {
+        status: 405,
+        headers: { allow: "POST, OPTIONS", ...corsHeaders },
+      });
+    }
+    let body: { redirect_uris?: unknown; client_name?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return jsonError(400, "invalid_client_metadata", "Invalid JSON body", corsHeaders);
+    }
+    const redirectUris = Array.isArray(body.redirect_uris)
+      ? (body.redirect_uris as unknown[])
+      : [];
+    if (redirectUris.length === 0) {
+      return jsonError(
+        400,
+        "invalid_redirect_uri",
+        "redirect_uris is required and must be a non-empty array",
+        corsHeaders,
+      );
+    }
+    const invalid = redirectUris.filter((u) => {
+      if (typeof u !== "string") return true;
+      return !options.allowedRedirectPatterns.some((p) => p.test(u));
+    });
+    if (invalid.length > 0) {
+      return jsonError(
+        400,
+        "invalid_redirect_uri",
+        `One or more redirect_uris are not allowed: ${JSON.stringify(invalid)}`,
+        corsHeaders,
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        client_id: options.upstreamClientId,
+        client_name: body.client_name ?? "MCP Client",
+        redirect_uris: redirectUris,
+        grant_types: ["authorization_code", "refresh_token"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none",
+      }),
+      {
+        status: 201,
+        headers: {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          ...corsHeaders,
+        },
+      },
+    );
+  }
+}
+
+// In-memory cache for upstream OIDC discovery docs. One Convex
+// httpAction process serves many requests; refetching openid-config
+// per call would add 100ms+ per AS-metadata request for no benefit
+// (the doc is effectively static — TTL is 1 hour to recover from
+// upstream config changes without a redeploy).
+const oidcCache = new Map<
+  string,
+  { fetchedAt: number; doc: Record<string, unknown> }
+>();
+const OIDC_CACHE_TTL_MS = 60 * 60 * 1000;
+
+async function fetchOidcConfigCached(
+  issuer: string,
+): Promise<Record<string, unknown>> {
+  const cached = oidcCache.get(issuer);
+  if (cached && Date.now() - cached.fetchedAt < OIDC_CACHE_TTL_MS) {
+    return cached.doc;
+  }
+  const url = `${issuer.replace(/\/$/, "")}/.well-known/openid-configuration`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(
+      `Upstream OIDC discovery returned ${res.status} from ${url}`,
+    );
+  }
+  const doc = (await res.json()) as Record<string, unknown>;
+  oidcCache.set(issuer, { fetchedAt: Date.now(), doc });
+  return doc;
+}
+
+function jsonError(
+  status: number,
+  error: string,
+  description: string,
+  extraHeaders: Record<string, string>,
+): Response {
+  return new Response(
+    JSON.stringify({ error, error_description: description }),
+    {
+      status,
+      headers: { "content-type": "application/json", ...extraHeaders },
+    },
+  );
 }
 
 export default McpGateway;
