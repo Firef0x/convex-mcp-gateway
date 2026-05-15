@@ -360,10 +360,29 @@ async function handlePost(
   // and to pass into the authorize callback (the callback also has its
   // own ctx.auth, but reading once keeps audit and policy consistent
   // for a single request).
-  const identity = (await ctx.auth.getUserIdentity()) as
-    | { subject?: string }
-    | null
-    | undefined;
+  //
+  // Note: Convex's `getUserIdentity()` THROWS when the inbound Bearer
+  // token's `iss`/`aud` don't match any configured provider in
+  // `auth.config.ts`. For an MCP gateway that's serving multiple
+  // clients (some of which may use IdPs we don't trust), throwing here
+  // would 500 the request before the authorize callback ever runs.
+  // Treat the throw as "no identity" instead, so the authorize
+  // callback can decide (typically: deny with -32001, which lets the
+  // client retry the OAuth handshake).
+  let identity: { subject?: string } | null = null;
+  try {
+    identity =
+      ((await ctx.auth.getUserIdentity()) as
+        | { subject?: string }
+        | null
+        | undefined) ?? null;
+  } catch (err) {
+    console.warn(
+      `[mcp-gateway] ctx.auth.getUserIdentity() threw; treating as anonymous. ` +
+        `Likely a Bearer token whose iss/aud doesn't match auth.config.ts. ` +
+        `(${err instanceof Error ? err.message : String(err)})`,
+    );
+  }
   const auditIdentitySubject = identity?.subject ?? null;
 
   let body: string;
