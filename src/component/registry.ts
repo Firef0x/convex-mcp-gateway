@@ -142,14 +142,11 @@ export const replaceTools = mutation({
  *
  * Reads the current row, applies the patch, and writes via db.replace so
  * field-clearing is reliable (db.patch treats undefined as "no change",
- * which silently keeps stale values). Both `setAuthorizer` and
- * `setOAuthConfig` go through this helper so the singleton's other fields
- * are preserved without each writer having to enumerate them.
+ * which silently keeps stale values).
  */
 async function patchConfigRow(
   ctx: MutationCtx,
   patch: {
-    authorizerHandle?: string | null;
     authServerUrl?: string | null;
     resourceUrl?: string | null;
   },
@@ -164,10 +161,6 @@ async function patchConfigRow(
     return supplied;
   }
   const next = {
-    authorizerHandle: apply(
-      patch.authorizerHandle,
-      existing?.authorizerHandle,
-    ),
     authServerUrl: apply(patch.authServerUrl, existing?.authServerUrl),
     resourceUrl: apply(patch.resourceUrl, existing?.resourceUrl),
   };
@@ -177,34 +170,6 @@ async function patchConfigRow(
     await ctx.db.insert("config", next);
   }
 }
-
-/**
- * Register the host-side authorizer that decides per `tools/call` whether
- * the request may proceed. The authorizer is a Convex query handle (created
- * via `createFunctionHandle`) with the standardized args/returns contract
- * documented in the package's `shared` module.
- *
- * Calling this with `null` removes the registered authorizer, after which
- * every `tools/call` is rejected with `-32011 No authorizer configured`.
- * Deny-by-default: a fresh deployment must opt in to a policy.
- */
-export const setAuthorizer = mutation({
-  args: { authorizerHandle: v.union(v.string(), v.null()) },
-  returns: v.null(),
-  handler: async (ctx, args) => {
-    await patchConfigRow(ctx, { authorizerHandle: args.authorizerHandle });
-    return null;
-  },
-});
-
-export const getAuthorizer = query({
-  args: {},
-  returns: v.union(v.string(), v.null()),
-  handler: async (ctx) => {
-    const row = await ctx.db.query("config").unique();
-    return row?.authorizerHandle ?? null;
-  },
-});
 
 /**
  * Set or clear the OAuth 2.1 protected-resource metadata: the

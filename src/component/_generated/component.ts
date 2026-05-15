@@ -71,36 +71,32 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       >;
     };
     dispatch: {
-      callTool: FunctionReference<
+      recordAuthDenial: FunctionReference<
         "action",
         "internal",
-        { args: any; name: string },
-        | { data: any; ok: true }
-        | { error: { code: number; message: string }; ok: false },
+        {
+          args: any;
+          auditIdentitySubject: string | null;
+          durationMs: number;
+          errorCode: number;
+          errorMessage: string;
+          name: string;
+          outcome: "denied" | "error";
+        },
+        null,
         Name
       >;
-      listVisibleTools: FunctionReference<
+      runTool: FunctionReference<
         "action",
         "internal",
-        {},
-        Array<{
-          description: string;
-          inputSchema: any;
-          kind: "query" | "mutation" | "action";
-          name: string;
-        }>,
+        { args: any; auditIdentitySubject: string | null; name: string },
+        | { data: any; ok: true }
+        | { error: { code: number; message: string }; ok: false },
         Name
       >;
     };
     registry: {
       clearAll: FunctionReference<"mutation", "internal", {}, null, Name>;
-      getAuthorizer: FunctionReference<
-        "query",
-        "internal",
-        {},
-        string | null,
-        Name
-      >;
       getOAuthConfig: FunctionReference<
         "query",
         "internal",
@@ -167,13 +163,6 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             name: string;
           }>;
         },
-        null,
-        Name
-      >;
-      setAuthorizer: FunctionReference<
-        "mutation",
-        "internal",
-        { authorizerHandle: string | null },
         null,
         Name
       >;

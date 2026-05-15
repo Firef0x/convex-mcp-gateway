@@ -13,6 +13,10 @@ import {
   type McpToolDefinition,
   type McpToolKind,
 } from "../shared.js";
+import {
+  handleMcpRequest as handleMcpRequestImpl,
+  type HandleMcpRequestOptions,
+} from "./mcp-handler.js";
 
 export type {
   JsonSchema,
@@ -22,12 +26,11 @@ export type {
   McpToolDefinition,
   McpToolKind,
 } from "../shared.js";
+export type { HandleMcpRequestOptions } from "./mcp-handler.js";
 export {
   buildProtectedResourceMetadataUrl,
   buildResourceUrl,
   convexValidatorToJsonSchema,
-  mcpAuthorizerArgs,
-  mcpAuthorizerReturns,
   resourcePathFromWellKnownRequest,
 } from "../shared.js";
 
@@ -155,57 +158,39 @@ export function defineMcpAction<
 }
 
 /**
- * Reference to the host's authorizer query. The query must have the
- * standardized signature
- *   `args: { toolName, toolKind, args }`, `returns: { allowed, reason? }`.
- *
- * Build it with `mcpAuthorizerArgs` + `mcpAuthorizerReturns` to get the
- * types right; the constraint here is just a sanity check (`AuthorizerRef`
- * is loose because the actual signature is enforced by the validators on
- * both sides).
- */
-export type AuthorizerRef = FunctionReference<
-  "query",
-  "internal" | "public",
-  any,
-  any
->;
-
-/**
  * Host-app handle for the MCP gateway component.
  *
- * Construct one with the generated `components.mcpGateway` and use it to
- * register typesafe tool descriptors plus an authorizer:
+ * Authorization is **not** registered ahead of time as a Convex
+ * function reference. Pass an `authorize` callback to
+ * `gateway.handleMcpRequest` instead; it runs inside the host's
+ * HTTP-action context where `ctx.auth.getUserIdentity()` works.
+ *
+ * Construct one with the generated `components.mcpGateway` and use it
+ * to register typesafe tool descriptors:
  *
  * ```ts
  * import {
  *   McpGateway,
  *   defineMcpQuery,
- *   mcpAuthorizerArgs,
- *   mcpAuthorizerReturns,
+ *   type McpAuthorizerHandler,
  * } from "@convex-dev/mcp-gateway";
- * import { components, api, internal } from "./_generated/api.js";
- * import { internalMutation, internalQuery } from "./_generated/server.js";
+ * import { components, api } from "./_generated/api.js";
+ * import { internalMutation } from "./_generated/server.js";
  *
  * const gateway = new McpGateway(components.mcpGateway);
- *
- * export const authorize = internalQuery({
- *   args: mcpAuthorizerArgs,
- *   returns: mcpAuthorizerReturns,
- *   handler: async (ctx) => {
- *     const identity = await ctx.auth.getUserIdentity();
- *     if (!identity) return { allowed: false, reason: "Unauthorized" };
- *     return { allowed: true };
- *   },
- * });
  *
  * export const bootstrap = internalMutation({
  *   args: {},
  *   handler: async (ctx) => {
- *     await gateway.setAuthorizer(ctx, internal.mcp.authorize);
- *     await gateway.register(ctx, [defineMcpQuery({ ... })]);
+ *     await gateway.register(ctx, [defineMcpQuery({ ... })], { replace: true });
  *   },
  * });
+ *
+ * export const authorize: McpAuthorizerHandler = async (ctx, args) => {
+ *   const identity = await ctx.auth.getUserIdentity();
+ *   if (!identity) return { allowed: false, reason: "Unauthorized" };
+ *   return { allowed: true };
+ * };
  * ```
  */
 export class McpGateway {
@@ -321,24 +306,6 @@ export class McpGateway {
   }
 
   /**
-   * Register (or replace) the authorizer that decides whether a `tools/call`
-   * may proceed. Pass `null` to clear the configured authorizer; in that
-   * state every call is rejected with `-32011 No authorizer configured`.
-   */
-  async setAuthorizer(
-    ctx: RunMutationCtx,
-    authorizer: AuthorizerRef | null,
-  ): Promise<void> {
-    const handle =
-      authorizer === null
-        ? null
-        : await createFunctionHandle(authorizer as any);
-    await ctx.runMutation(this.component.registry.setAuthorizer, {
-      authorizerHandle: handle,
-    });
-  }
-
-  /**
    * Configure OAuth 2.1 protected-resource discovery so MCP clients can
    * find the authorization server that issues their Bearer tokens.
    *
@@ -364,6 +331,43 @@ export class McpGateway {
         ? { resourceUrl: config.resourceUrl }
         : {}),
     });
+  }
+
+  /**
+   * Handle an MCP HTTP request (POST/GET/DELETE on `/mcp/`). Hosts mount
+   * this on their own `httpRouter`; the component's HTTP routes have no
+   * `ctx.auth` per Convex's component-isolation model, so the protocol
+   * surface lives here on the client side instead.
+   *
+   * The host supplies an `authorize` callback that runs in the host's
+   * action context (so `ctx.auth.getUserIdentity()` works). The
+   * callback decides per `tools/call` and per tool in `tools/list`.
+   *
+   * ```ts
+   * import { httpRouter } from "convex/server";
+   * import { httpAction } from "./_generated/server.js";
+   * import { gateway } from "./mcp.js";
+   * import { authorize } from "./authorize.js";
+   *
+   * const http = httpRouter();
+   * const mcp = httpAction(async (ctx, req) =>
+   *   gateway.handleMcpRequest(ctx, req, { authorize }),
+   * );
+   * http.route({ path: "/mcp/", method: "POST",   handler: mcp });
+   * http.route({ path: "/mcp/", method: "GET",    handler: mcp });
+   * http.route({ path: "/mcp/", method: "DELETE", handler: mcp });
+   * export default http;
+   * ```
+   */
+  async handleMcpRequest(
+    ctx: RunMutationCtx & {
+      runAction: (ref: any, args: any) => Promise<any>;
+      auth: { getUserIdentity: () => Promise<any> };
+    },
+    request: Request,
+    options: HandleMcpRequestOptions,
+  ): Promise<Response> {
+    return await handleMcpRequestImpl(ctx, request, this.component, options);
   }
 
   /**

@@ -1,4 +1,3 @@
-import { v } from "convex/values";
 import type {
   GenericValidator,
   PropertyValidators,
@@ -66,64 +65,30 @@ export interface McpToolDefinition {
 }
 
 /**
- * Argument validator object for the authorizer query.
+ * Args that the gateway passes to the host's `authorize` callback for
+ * each `tools/call` and each filtered `tools/list` evaluation.
  *
- * The host wraps a Convex `internalQuery` that uses these exact args and
- * returns `mcpAuthorizerReturns`. Use it together with the convenience type
- * `McpAuthorizerHandler` for full type inference inside the handler.
- *
- * ```ts
- * import { internalQuery } from "./_generated/server.js";
- * import {
- *   mcpAuthorizerArgs,
- *   mcpAuthorizerReturns,
- *   type McpAuthorizerHandler,
- * } from "@convex-dev/mcp-gateway";
- *
- * export const mcpAuthorize = internalQuery({
- *   args: mcpAuthorizerArgs,
- *   returns: mcpAuthorizerReturns,
- *   handler: (async (ctx, { toolName, toolKind, args }) => {
- *     const identity = await ctx.auth.getUserIdentity();
- *     if (!identity) return { allowed: false, reason: "Unauthorized" };
- *     return { allowed: true };
- *   }) satisfies McpAuthorizerHandler,
- * });
- * ```
+ * The authorizer is a regular JS function the host hands to
+ * `gateway.handleMcpRequest({ authorize })`, **not** a registered
+ * Convex query: Convex doesn't propagate `ctx.auth` into component
+ * code, so the policy decision must run host-side where
+ * `ctx.auth.getUserIdentity()` works.
  */
-export const mcpAuthorizerArgs = {
-  toolName: v.string(),
-  toolKind: v.union(
-    v.literal("query"),
-    v.literal("mutation"),
-    v.literal("action"),
-  ),
-  args: v.any(),
-  /**
-   * `"call"` for an actual `tools/call` dispatch, `"list"` when the
-   * gateway is filtering `tools/list` per tool. `args` for `"list"` is
-   * always an empty object.
-   */
-  mode: v.union(v.literal("call"), v.literal("list")),
-  /**
-   * Free-form metadata the host attached to the tool via
-   * `defineMcp*({ metadata })`. The component itself never inspects this;
-   * it just hands it back so the authorizer can implement scope/role
-   * checks without re-reading the registry.
-   */
-  toolMetadata: v.any(),
-} as const;
-
-export const mcpAuthorizerReturns = v.object({
-  allowed: v.boolean(),
-  reason: v.optional(v.string()),
-});
-
 export interface McpAuthorizerArgs {
   toolName: string;
   toolKind: McpToolKind;
   args: Record<string, unknown>;
+  /**
+   * `"call"` for an actual `tools/call` dispatch, `"list"` when the
+   * gateway is filtering `tools/list` per tool. `args` for `"list"`
+   * is always an empty object.
+   */
   mode: "call" | "list";
+  /**
+   * Free-form metadata the host attached to the tool via
+   * `defineMcp*({ metadata })`. The component never inspects this;
+   * the authorizer reads it for scope/role / public-flag checks.
+   */
   toolMetadata: unknown;
 }
 
@@ -133,13 +98,26 @@ export interface McpAuthorizerDecision {
 }
 
 /**
- * Type alias for an authorizer handler body. Used as a documentation hint
- * for the args + return shape; `ctx` is intentionally `any` so the alias
- * stays assignable from the host's own concrete `internalQuery` typing
- * (which has its own data model, identity shape, etc.).
+ * Authorizer signature: a regular async (or sync) function. It runs in
+ * the host's HTTP-action context, so `ctx.auth.getUserIdentity()`
+ * returns the JWT-validated identity here.
+ *
+ * ```ts
+ * import type { McpAuthorizerHandler } from "@convex-dev/mcp-gateway";
+ *
+ * export const authorize: McpAuthorizerHandler = async (ctx, args) => {
+ *   const identity = await ctx.auth.getUserIdentity();
+ *   if (!identity) return { allowed: false, reason: "Unauthorized" };
+ *   // ... your scope / role / metadata check ...
+ *   return { allowed: true };
+ * };
+ * ```
  */
 export type McpAuthorizerHandler = (
-  ctx: any,
+  ctx: { auth: { getUserIdentity: () => Promise<unknown> } } & Record<
+    string,
+    unknown
+  >,
   args: McpAuthorizerArgs,
 ) => Promise<McpAuthorizerDecision> | McpAuthorizerDecision;
 

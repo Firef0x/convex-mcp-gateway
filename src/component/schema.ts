@@ -24,20 +24,22 @@ export default defineSchema({
   }).index("by_name", ["name"]),
 
   /**
-   * Singleton row holding the function handle of the host-registered
-   * authorizer. Empty until the host calls `gateway.setAuthorizer`.
+   * Singleton row holding the OAuth 2.1 protected-resource metadata.
+   * Empty until the host calls `gateway.setOAuthConfig`.
    *
-   * A row exists at most once. We don't use an index because lookups always
-   * fetch the single row.
+   * Authorization itself is **not** stored here: it lives in the host
+   * as a regular JS callback passed to `gateway.handleMcpRequest`,
+   * because Convex doesn't propagate `ctx.auth` into component code.
+   *
+   * A row exists at most once. We don't use an index because lookups
+   * always fetch the single row.
    */
   config: defineTable({
-    authorizerHandle: v.optional(v.string()),
     /**
      * Issuer URL of the OAuth 2.1 authorization server that hands out
      * Bearer tokens for this MCP gateway. Surfaced via
      * `/.well-known/oauth-protected-resource` so MCP clients can discover
-     * the AS automatically. Empty until the host calls
-     * `gateway.setOAuthConfig`.
+     * the AS automatically.
      */
     authServerUrl: v.optional(v.string()),
     /**
@@ -48,6 +50,13 @@ export default defineSchema({
      * deployments.
      */
     resourceUrl: v.optional(v.string()),
+    /**
+     * Legacy field from the pre-callback authorizer model. Tolerated
+     * here so old deployments deploy cleanly; the new `setOAuthConfig`
+     * uses `db.replace` and silently drops it. Will be removed in a
+     * future release.
+     */
+    authorizerHandle: v.optional(v.string()),
   }),
 
   /**

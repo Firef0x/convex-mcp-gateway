@@ -19,202 +19,414 @@ function newTest() {
   return t;
 }
 
-describe("host-app integration with the mcp-gateway component", () => {
-  test("registerDefaults seeds the registry and the authorizer", async () => {
+// =================================================================
+// Component-level tests: dispatch.runTool runs whatever you give it
+// (no auth in the component; auth lives in the host's HTTP handler).
+// =================================================================
+
+describe("dispatch.runTool", () => {
+  test("runs a registered tool and returns its data", async () => {
     const t = newTest();
-
     await t.mutation(internal.mcp.registerDefaults, {});
-
-    const tools = await t.run(async (ctx) => {
-      return await ctx.runQuery(components.mcpGateway.registry.listTools, {});
+    await t.run(async (ctx) => {
+      await ctx.db.insert("invoices", { status: "open", amount: 7 });
     });
 
-    const names = tools.map((tool) => tool.name).sort();
-    expect(names).toEqual([
+    const result = await t.action(components.mcpGateway.dispatch.runTool, {
+      name: "invoices.summary",
+      args: {},
+      auditIdentitySubject: null,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.data).toEqual({ total: 1 });
+  });
+
+  test("unknown tool returns -32602 and writes no audit row", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+
+    const result = await t.action(components.mcpGateway.dispatch.runTool, {
+      name: "no.such.tool",
+      args: {},
+      auditIdentitySubject: null,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe(-32602);
+      expect(result.error.message).toMatch(/no\.such\.tool/);
+    }
+
+    const entries = await t.run(async (ctx) =>
+      ctx.runQuery(components.mcpGateway.audit.listEntries, {}),
+    );
+    expect(entries.find((e) => e.toolName === "no.such.tool")).toBeUndefined();
+  });
+
+  test("writes audit row with auditIdentitySubject for allowed calls", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+
+    await t.action(components.mcpGateway.dispatch.runTool, {
+      name: "invoices.summary",
+      args: {},
+      auditIdentitySubject: "alice",
+    });
+
+    const entries = await t.run(async (ctx) =>
+      ctx.runQuery(components.mcpGateway.audit.listEntries, {}),
+    );
+    const row = entries.find((e) => e.toolName === "invoices.summary");
+    expect(row).toBeDefined();
+    expect(row?.outcome).toBe("allowed");
+    expect(row?.identitySubject).toBe("alice");
+  });
+
+  test("metadata.auditArgs.redact replaces listed top-level fields", async () => {
+    const t = newTest();
+    // Register a mutation tagged for field-level redaction.
+    await t.run(async (ctx) => {
+      const handle = await createFunctionHandle(api.invoices.markPaid);
+      await ctx.runMutation(components.mcpGateway.registry.replaceTools, {
+        tools: [
+          {
+            name: "secret.write",
+            description: "Demo of declarative field redaction.",
+            kind: "mutation",
+            functionHandle: handle,
+            inputSchema: { type: "object" },
+            metadata: { auditArgs: { redact: ["password", "token"] } },
+          },
+        ],
+      });
+    });
+
+    // The dispatch will fail because invoices.markPaid expects an `id`,
+    // but the audit row is written either way. We're testing redaction,
+    // not success.
+    await t.action(components.mcpGateway.dispatch.runTool, {
+      name: "secret.write",
+      args: { password: "p@ss", token: "t0k3n", username: "alice" },
+      auditIdentitySubject: null,
+    });
+
+    const entries = await t.run(async (ctx) =>
+      ctx.runQuery(components.mcpGateway.audit.listEntries, {
+        toolName: "secret.write",
+      }),
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.args).toEqual({
+      password: "[redacted]",
+      token: "[redacted]",
+      username: "alice",
+    });
+  });
+});
+
+// =================================================================
+// dispatch.recordAuthDenial: hosts call this when the authorize
+// callback returns allowed=false so the audit log captures rejections.
+// =================================================================
+
+describe("dispatch.recordAuthDenial", () => {
+  test("writes a denied audit row for a known tool", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+
+    await t.action(components.mcpGateway.dispatch.recordAuthDenial, {
+      name: "invoices.list",
+      args: { status: "open" },
+      auditIdentitySubject: null,
+      outcome: "denied",
+      errorCode: -32001,
+      errorMessage: "Unauthorized",
+      durationMs: 3,
+    });
+
+    const entries = await t.run(async (ctx) =>
+      ctx.runQuery(components.mcpGateway.audit.listEntries, {}),
+    );
+    expect(entries.find((e) => e.toolName === "invoices.list")).toMatchObject({
+      outcome: "denied",
+      errorCode: -32001,
+      errorMessage: "Unauthorized",
+      identitySubject: null,
+    });
+  });
+});
+
+// =================================================================
+// End-to-end via t.fetch through the host's http.ts. Verifies the
+// integrated Streamable-HTTP flow including session lifecycle,
+// content negotiation, and the host's authorize callback.
+// =================================================================
+
+async function initialize(t: ReturnType<typeof newTest>): Promise<string> {
+  const res = await t.fetch("/mcp/", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18" },
+    }),
+  });
+  expect(res.status).toBe(200);
+  const sessionId = res.headers.get("mcp-session-id");
+  expect(sessionId).toBeTruthy();
+  return sessionId!;
+}
+
+async function rpc(
+  t: ReturnType<typeof newTest>,
+  sessionId: string,
+  body: object,
+  headers: Record<string, string> = {},
+): Promise<Response> {
+  return await t.fetch("/mcp/", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "mcp-session-id": sessionId,
+      ...headers,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+describe("HTTP envelope (host-mounted /mcp/)", () => {
+  test("POST without session id returns 400", async () => {
+    const t = newTest();
+    const res = await t.fetch("/mcp/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/list",
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("initialize returns Mcp-Session-Id header", async () => {
+    const t = newTest();
+    const session = await initialize(t);
+    expect(session).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  test("DELETE terminates session, subsequent request returns 404", async () => {
+    const t = newTest();
+    const session = await initialize(t);
+    const del = await t.fetch("/mcp/", {
+      method: "DELETE",
+      headers: { "mcp-session-id": session },
+    });
+    expect(del.status).toBe(200);
+
+    const next = await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 99,
+      method: "tools/list",
+    });
+    expect(next.status).toBe(404);
+  });
+
+  test("GET /mcp/ returns 405 with allow header", async () => {
+    const t = newTest();
+    const res = await t.fetch("/mcp/", { method: "GET" });
+    expect(res.status).toBe(405);
+    expect(res.headers.get("allow")).toContain("POST");
+  });
+
+  test("Accept: text/event-stream returns SSE-framed response", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    const session = await initialize(t);
+    const res = await rpc(
+      t,
+      session,
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "invoices.summary", arguments: {} },
+      },
+      { accept: "application/json, text/event-stream" },
+    );
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+    const text = await res.text();
+    expect(text).toMatch(/^id: 1\nevent: message\ndata: /);
+    expect(text).toContain('"jsonrpc":"2.0"');
+  });
+});
+
+describe("authorize callback (host's http.ts)", () => {
+  test("anonymous tools/list shows only public tools", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    const session = await initialize(t);
+    const res = await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    });
+    const body = (await res.json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    expect(body.result.tools.map((tool) => tool.name)).toEqual([
+      "invoices.summary",
+    ]);
+  });
+
+  test("anonymous tools/call on a public tool succeeds", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    const session = await initialize(t);
+    const res = await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "invoices.summary", arguments: {} },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { result: { content: unknown } };
+    expect(body.result.content).toBeDefined();
+  });
+
+  test("anonymous tools/call on a private tool returns 401 + WWW-Authenticate", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    // Configure OAuth so the 401 carries the discovery header.
+    await t.run(async (ctx) => {
+      await ctx.runMutation(components.mcpGateway.registry.setOAuthConfig, {
+        authServerUrl: "https://idp.example.com/",
+      });
+    });
+
+    const session = await initialize(t);
+    const res = await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: { name: "invoices.list", arguments: {} },
+    });
+    expect(res.status).toBe(401);
+    const wwwAuth = res.headers.get("www-authenticate") ?? "";
+    expect(wwwAuth).toMatch(/^Bearer resource_metadata="/);
+  });
+
+  test("authenticated tools/list shows the full catalog the user can call", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+
+    const session = await initialize(
+      t.withIdentity({ subject: "alice" }) as ReturnType<typeof newTest>,
+    );
+    const res = await (t.withIdentity({ subject: "alice" }) as ReturnType<
+      typeof newTest
+    >).fetch("/mcp/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "mcp-session-id": session,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 5,
+        method: "tools/list",
+      }),
+    });
+    const body = (await res.json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    // alice has no admin role → markPaid is hidden, list + summary visible.
+    expect(body.result.tools.map((tool) => tool.name).sort()).toEqual([
+      "invoices.list",
+      "invoices.summary",
+    ]);
+  });
+
+  test("admin sees the full catalog including the role-gated mutation", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    const tWithRoles = t.withIdentity({
+      subject: "carol",
+      roles: ["finance.admin"],
+    } as unknown as Parameters<typeof t.withIdentity>[0]) as ReturnType<
+      typeof newTest
+    >;
+
+    const session = await initialize(tWithRoles);
+    const res = await tWithRoles.fetch("/mcp/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "mcp-session-id": session,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 6,
+        method: "tools/list",
+      }),
+    });
+    const body = (await res.json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    expect(body.result.tools.map((tool) => tool.name).sort()).toEqual([
       "invoices.list",
       "invoices.markPaid",
       "invoices.summary",
     ]);
-
-    const listTool = tools.find((t) => t.name === "invoices.list")!;
-    expect(listTool.kind).toBe("query");
-    expect(listTool.inputSchema).toEqual({
-      type: "object",
-      properties: {
-        status: { anyOf: [{ const: "open" }, { const: "paid" }] },
-      },
-      additionalProperties: false,
-    });
-
-    const authorizerHandle = await t.run(async (ctx) => {
-      return await ctx.runQuery(
-        components.mcpGateway.registry.getAuthorizer,
-        {},
-      );
-    });
-    expect(authorizerHandle).toBeTypeOf("string");
   });
 
-  test("registerDefaults is idempotent on tool name", async () => {
+  test("audit log records denied calls (subject + reason)", async () => {
     const t = newTest();
     await t.mutation(internal.mcp.registerDefaults, {});
-    await t.mutation(internal.mcp.registerDefaults, {});
+    const session = await initialize(t);
 
-    const tools = await t.run(async (ctx) => {
-      return await ctx.runQuery(components.mcpGateway.registry.listTools, {});
+    await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: { name: "invoices.list", arguments: {} },
     });
-    expect(tools).toHaveLength(3);
+
+    const entries = await t.run(async (ctx) =>
+      ctx.runQuery(components.mcpGateway.audit.listEntries, {}),
+    );
+    const denied = entries.find(
+      (e) => e.toolName === "invoices.list" && e.outcome === "denied",
+    );
+    expect(denied).toBeDefined();
+    expect(denied?.errorCode).toBe(-32001);
+    expect(denied?.identitySubject).toBeNull();
+  });
+
+  test("audit log skips unknown-tool calls (anti-DoS)", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    const session = await initialize(t);
+
+    await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 8,
+      method: "tools/call",
+      params: { name: "does.not.exist", arguments: {} },
+    });
+
+    const entries = await t.run(async (ctx) =>
+      ctx.runQuery(components.mcpGateway.audit.listEntries, {}),
+    );
+    expect(
+      entries.find((e) => e.toolName === "does.not.exist"),
+    ).toBeUndefined();
   });
 });
 
-describe("dispatch + authorizer", () => {
-  test("public tool succeeds without identity", async () => {
-    const t = newTest();
-    await t.mutation(internal.mcp.registerDefaults, {});
-
-    const result = await t.action(components.mcpGateway.dispatch.callTool, {
-      name: "invoices.summary",
-      args: {},
-    });
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.data).toEqual({ total: 0 });
-  });
-
-  test("private tool is rejected without identity", async () => {
-    const t = newTest();
-    await t.mutation(internal.mcp.registerDefaults, {});
-
-    const result = await t.action(components.mcpGateway.dispatch.callTool, {
-      name: "invoices.list",
-      args: {},
-    });
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe(-32001);
-      expect(result.error.message).toMatch(/unauth/i);
-    }
-  });
-
-  test("private tool succeeds with a real identity and propagates it to the handler", async () => {
-    const t = newTest();
-    await t.mutation(internal.mcp.registerDefaults, {});
-
-    // Seed an invoice so the tool has something to return.
-    await t.run(async (ctx) => {
-      await ctx.db.insert("invoices", { status: "open", amount: 17 });
-    });
-
-    const result = await t
-      .withIdentity({ subject: "alice" })
-      .action(components.mcpGateway.dispatch.callTool, {
-        name: "invoices.list",
-        args: { status: "open" },
-      });
-
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      const data = result.data as {
-        caller: string | null;
-        invoices: Array<{ status: string; amount: number }>;
-      };
-      expect(data.caller).toBe("alice");
-      expect(data.invoices).toHaveLength(1);
-      expect(data.invoices[0]!.status).toBe("open");
-    }
-  });
-
-  test("role-gated tool is rejected without the right role", async () => {
-    const t = newTest();
-    await t.mutation(internal.mcp.registerDefaults, {});
-    const invoiceId = (await t.run(async (ctx) => {
-      return await ctx.db.insert("invoices", { status: "open", amount: 1 });
-    })) as string;
-
-    const result = await t
-      .withIdentity({ subject: "bob" })
-      .action(components.mcpGateway.dispatch.callTool, {
-        name: "invoices.markPaid",
-        args: { id: invoiceId },
-      });
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe(-32003);
-      expect(result.error.message).toMatch(/finance\.admin/);
-    }
-  });
-
-  test("role-gated tool succeeds with matching role claim", async () => {
-    const t = newTest();
-    await t.mutation(internal.mcp.registerDefaults, {});
-    const invoiceId = (await t.run(async (ctx) => {
-      return await ctx.db.insert("invoices", { status: "open", amount: 1 });
-    })) as string;
-
-    const result = await t
-      .withIdentity({
-        subject: "carol",
-        // convex-test forwards any extra fields onto the synthesized identity,
-        // so the authorizer sees `identity.roles` exactly as it would with a
-        // real JWT that contains a `roles` claim.
-        roles: ["finance.admin"],
-      } as unknown as Parameters<typeof t.withIdentity>[0])
-      .action(components.mcpGateway.dispatch.callTool, {
-        name: "invoices.markPaid",
-        args: { id: invoiceId },
-      });
-
-    expect(result.ok).toBe(true);
-
-    const invoice = await t.run(async (ctx) => {
-      return await ctx.db.get("invoices", invoiceId as never);
-    });
-    expect((invoice as { status: string }).status).toBe("paid");
-  });
-
-  test("dispatch writes one audit entry per call (allowed, denied, error)", async () => {
-    const t = newTest();
-    await t.mutation(internal.mcp.registerDefaults, {});
-
-    // allowed (public tool)
-    await t.action(components.mcpGateway.dispatch.callTool, {
-      name: "invoices.summary",
-      args: {},
-    });
-
-    // denied (private tool, no identity)
-    await t.action(components.mcpGateway.dispatch.callTool, {
-      name: "invoices.list",
-      args: {},
-    });
-
-    // unknown tool: must NOT be audited (anti-DoS, see dispatch.callTool)
-    await t.action(components.mcpGateway.dispatch.callTool, {
-      name: "no.such.tool",
-      args: {},
-    });
-
-    const entries = await t.run(async (ctx) => {
-      return await ctx.runQuery(
-        components.mcpGateway.audit.listEntries,
-        {},
-      );
-    });
-    expect(entries).toHaveLength(2);
-
-    const byName = Object.fromEntries(entries.map((e) => [e.toolName, e]));
-    expect(byName["invoices.summary"]!.outcome).toBe("allowed");
-    expect(byName["invoices.summary"]!.identitySubject).toBeNull();
-    expect(byName["invoices.list"]!.outcome).toBe("denied");
-    expect(byName["invoices.list"]!.errorCode).toBe(-32001);
-    expect(byName["no.such.tool"]).toBeUndefined();
-  });
-
-  test("audit listEntries finds older matches when newer entries don't match the outcome filter", async () => {
-    // Regression: the original implementation used `take(limit*2)` then JS
-    // post-filter, which silently lost matches when most of the recent
-    // window was the wrong outcome. The fix iterates the index until
-    // `limit` matches are collected.
+describe("audit listEntries (filter regression coverage)", () => {
+  test("finds older matches when newer entries don't match the outcome filter", async () => {
     const t = newTest();
     await t.mutation(internal.mcp.registerDefaults, {});
 
@@ -232,7 +444,7 @@ describe("dispatch + authorizer", () => {
           errorMessage: "old error",
         });
       }
-      // 50 recent allowed rows on top, hiding the errors past any small window.
+      // 50 recent allowed rows hide the errors past any small window.
       for (let i = 0; i < 50; i++) {
         await ctx.runMutation(components.mcpGateway.audit.recordEntry, {
           toolName: "x",
@@ -245,254 +457,20 @@ describe("dispatch + authorizer", () => {
       }
     });
 
-    const errors = await t.run(async (ctx) => {
-      return await ctx.runQuery(components.mcpGateway.audit.listEntries, {
+    const errors = await t.run(async (ctx) =>
+      ctx.runQuery(components.mcpGateway.audit.listEntries, {
         toolName: "x",
         outcome: "error",
         limit: 10,
-      });
-    });
+      }),
+    );
     expect(errors).toHaveLength(3);
-    for (const e of errors) {
-      expect(e.outcome).toBe("error");
-      expect(e.toolName).toBe("x");
-    }
-  });
-
-  test("audit listEntries can filter by toolName and outcome", async () => {
-    const t = newTest();
-    await t.mutation(internal.mcp.registerDefaults, {});
-
-    await t.action(components.mcpGateway.dispatch.callTool, {
-      name: "invoices.summary",
-      args: {},
-    });
-    await t.action(components.mcpGateway.dispatch.callTool, {
-      name: "invoices.list",
-      args: {},
-    });
-
-    const allowed = await t.run(async (ctx) => {
-      return await ctx.runQuery(components.mcpGateway.audit.listEntries, {
-        outcome: "allowed",
-      });
-    });
-    expect(allowed.map((e) => e.toolName)).toEqual(["invoices.summary"]);
-
-    const byName = await t.run(async (ctx) => {
-      return await ctx.runQuery(components.mcpGateway.audit.listEntries, {
-        toolName: "invoices.list",
-      });
-    });
-    expect(byName).toHaveLength(1);
-    expect(byName[0]!.outcome).toBe("denied");
-  });
-
-  test("listVisibleTools hides tools the authorizer would reject", async () => {
-    const t = newTest();
-    await t.mutation(internal.mcp.registerDefaults, {});
-
-    // Without an identity, only the public summary tool is visible.
-    const anon = await t.action(
-      components.mcpGateway.dispatch.listVisibleTools,
-      {},
-    );
-    expect(anon.map((tool) => tool.name)).toEqual(["invoices.summary"]);
-
-    // With an identity but no admin role, the role-gated mutation stays
-    // hidden while the read tool becomes visible.
-    const alice = await t
-      .withIdentity({ subject: "alice" })
-      .action(components.mcpGateway.dispatch.listVisibleTools, {});
-    expect(alice.map((tool) => tool.name).sort()).toEqual([
-      "invoices.list",
-      "invoices.summary",
-    ]);
-
-    // Admin sees the full catalog.
-    const admin = await t
-      .withIdentity({
-        subject: "carol",
-        roles: ["finance.admin"],
-      } as unknown as Parameters<typeof t.withIdentity>[0])
-      .action(components.mcpGateway.dispatch.listVisibleTools, {});
-    expect(admin.map((tool) => tool.name).sort()).toEqual([
-      "invoices.list",
-      "invoices.markPaid",
-      "invoices.summary",
-    ]);
-  });
-
-  test("authorizer receives `mode: \"list\"` for listVisibleTools and `\"call\"` for callTool", async () => {
-    const t = newTest();
-    await t.mutation(internal.mcp.registerDefaults, {});
-
-    // Swap to the mode-asserting authorizer (allows list, denies call).
-    await t.run(async (ctx) => {
-      const handle = await createFunctionHandle(
-        internal.mcp.modeAssertingAuthorizer,
-      );
-      await ctx.runMutation(components.mcpGateway.registry.setAuthorizer, {
-        authorizerHandle: handle,
-      });
-    });
-
-    const visible = await t.action(
-      components.mcpGateway.dispatch.listVisibleTools,
-      {},
-    );
-    expect(visible.map((tool) => tool.name).sort()).toEqual([
-      "invoices.list",
-      "invoices.markPaid",
-      "invoices.summary",
-    ]);
-
-    const call = await t.action(components.mcpGateway.dispatch.callTool, {
-      name: "invoices.summary",
-      args: {},
-    });
-    expect(call.ok).toBe(false);
-    if (!call.ok) {
-      expect(call.error.message).toMatch(/call mode/);
-    }
-  });
-
-  test("authorizer receives the registered tool's metadata as `toolMetadata`", async () => {
-    const t = newTest();
-    await t.mutation(internal.mcp.registerDefaults, {});
-
-    // Re-register with metadata + swap to the metadata-asserting authorizer.
-    await t.run(async (ctx) => {
-      await ctx.runMutation(components.mcpGateway.registry.replaceTools, {
-        tools: [
-          {
-            name: "tagged.allowed",
-            description: "should pass",
-            kind: "query",
-            functionHandle: "irrelevant",
-            inputSchema: { type: "object" },
-            metadata: { allow: true },
-          },
-          {
-            name: "tagged.denied",
-            description: "should fail",
-            kind: "query",
-            functionHandle: "irrelevant",
-            inputSchema: { type: "object" },
-          },
-        ],
-      });
-      const handle = await createFunctionHandle(
-        internal.mcp.metadataAssertingAuthorizer,
-      );
-      await ctx.runMutation(components.mcpGateway.registry.setAuthorizer, {
-        authorizerHandle: handle,
-      });
-    });
-
-    const visible = await t.action(
-      components.mcpGateway.dispatch.listVisibleTools,
-      {},
-    );
-    expect(visible.map((tool) => tool.name)).toEqual(["tagged.allowed"]);
-  });
-
-  test("authorizer that throws is treated as deny-with-error, not as an HTTP 500", async () => {
-    const t = newTest();
-    await t.mutation(internal.mcp.registerDefaults, {});
-
-    await t.run(async (ctx) => {
-      const handle = await createFunctionHandle(
-        internal.mcp.throwingAuthorizer,
-      );
-      await ctx.runMutation(components.mcpGateway.registry.setAuthorizer, {
-        authorizerHandle: handle,
-      });
-    });
-
-    // listVisibleTools must not throw; it returns the empty subset.
-    const visible = await t.action(
-      components.mcpGateway.dispatch.listVisibleTools,
-      {},
-    );
-    expect(visible).toEqual([]);
-
-    // callTool must surface a JSON-RPC error envelope, not propagate.
-    const call = await t.action(components.mcpGateway.dispatch.callTool, {
-      name: "invoices.summary",
-      args: {},
-    });
-    expect(call.ok).toBe(false);
-    if (!call.ok) {
-      expect(call.error.code).toBe(-32603);
-      expect(call.error.message).toMatch(/Authorizer threw/);
-    }
-
-    // The failed authorizer evaluation IS recorded in the audit log.
-    const entries = await t.run(async (ctx) => {
-      return await ctx.runQuery(
-        components.mcpGateway.audit.listEntries,
-        { outcome: "error" },
-      );
-    });
-    expect(entries.length).toBeGreaterThanOrEqual(1);
-    expect(entries[0]!.errorCode).toBe(-32603);
-  });
-
-  test("metadata.auditArgs.redact replaces listed top-level fields with [redacted]", async () => {
-    const t = newTest();
-
-    // Register a mutation tagged for field-level redaction.
-    await t.run(async (ctx) => {
-      const handle = await createFunctionHandle(api.invoices.markPaid);
-      await ctx.runMutation(components.mcpGateway.registry.replaceTools, {
-        tools: [
-          {
-            name: "secret.write",
-            description: "Demo of declarative field redaction.",
-            kind: "mutation",
-            functionHandle: handle,
-            inputSchema: { type: "object" },
-            metadata: { auditArgs: { redact: ["password", "token"] } },
-          },
-        ],
-      });
-      const authorizerHandle = await createFunctionHandle(
-        internal.mcp.authorize,
-      );
-      await ctx.runMutation(components.mcpGateway.registry.setAuthorizer, {
-        authorizerHandle,
-      });
-    });
-
-    // We don't need the call to succeed; we just need an audit row.
-    // The default authorizer denies anonymous, so the deny path runs
-    // and writes an audit row with the redacted args.
-    await t.action(components.mcpGateway.dispatch.callTool, {
-      name: "secret.write",
-      args: { password: "p@ss", token: "t0k3n", username: "alice" },
-    });
-
-    const entries = await t.run(async (ctx) => {
-      return await ctx.runQuery(
-        components.mcpGateway.audit.listEntries,
-        { toolName: "secret.write" },
-      );
-    });
-    expect(entries).toHaveLength(1);
-    expect(entries[0]!.args).toEqual({
-      password: "[redacted]",
-      token: "[redacted]",
-      username: "alice",
-    });
   });
 
   test("audit pruning drops rows older than the cutoff", async () => {
     const t = newTest();
     await t.mutation(internal.mcp.registerDefaults, {});
-
     await t.run(async (ctx) => {
-      // Insert one ancient + one fresh entry directly.
       await ctx.runMutation(components.mcpGateway.audit.recordEntry, {
         toolName: "old.tool",
         toolKind: "query",
@@ -502,88 +480,11 @@ describe("dispatch + authorizer", () => {
         durationMs: 1,
       });
     });
-
-    // Prune everything older than ten minutes from now (ancient row
-    // qualifies; freshly inserted row above does not).
     const farFuture = Date.now() + 10 * 60 * 1000;
     const deleted = await t.mutation(
       components.mcpGateway.audit.pruneOlderThan,
       { cutoffMs: farFuture },
     );
     expect(deleted).toBeGreaterThanOrEqual(1);
-  });
-
-  test("audit dispatch is not aborted when the audit write itself fails", async () => {
-    // We can't easily simulate a recordEntry failure inside convex-test, but
-    // the `safeRecordAudit` wrapper guarantees the dispatch outcome is
-    // independent of audit-write success. This test documents the intent and
-    // verifies that a successful tool call still returns ok=true even when
-    // we artificially provoke a downstream audit issue (here: the entry is
-    // still inserted, but the test asserts the structural invariant).
-    const t = newTest();
-    await t.mutation(internal.mcp.registerDefaults, {});
-
-    const result = await t.action(components.mcpGateway.dispatch.callTool, {
-      name: "invoices.summary",
-      args: {},
-    });
-    expect(result.ok).toBe(true);
-  });
-
-  test("listVisibleTools returns an empty catalog when no authorizer is configured", async () => {
-    const t = newTest();
-    await t.run(async (ctx) => {
-      await ctx.runMutation(components.mcpGateway.registry.registerTool, {
-        name: "isolated.tool",
-        description: "no authorizer set",
-        kind: "query",
-        functionHandle: "unused",
-        inputSchema: { type: "object" },
-      });
-    });
-
-    const visible = await t.action(
-      components.mcpGateway.dispatch.listVisibleTools,
-      {},
-    );
-    expect(visible).toEqual([]);
-  });
-
-  test("calling an unknown tool returns a -32602 JSON-RPC error", async () => {
-    const t = newTest();
-    await t.mutation(internal.mcp.registerDefaults, {});
-
-    const result = await t.action(components.mcpGateway.dispatch.callTool, {
-      name: "does.not.exist",
-      args: {},
-    });
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe(-32602);
-      expect(result.error.message).toMatch(/does\.not\.exist/);
-    }
-  });
-
-  test("dispatch refuses when no authorizer is configured", async () => {
-    const t = newTest();
-    await t.run(async (ctx) => {
-      await ctx.runMutation(components.mcpGateway.registry.registerTool, {
-        name: "naked.tool",
-        description: "no authorizer set",
-        kind: "query",
-        functionHandle: "unused",
-        inputSchema: { type: "object" },
-      });
-    });
-
-    const result = await t.action(components.mcpGateway.dispatch.callTool, {
-      name: "naked.tool",
-      args: {},
-    });
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe(-32011);
-      expect(result.error.message).toMatch(/no authorizer/i);
-    }
   });
 });
