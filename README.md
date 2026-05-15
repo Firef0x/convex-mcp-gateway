@@ -1,127 +1,201 @@
 # @convex-dev/mcp-gateway
 
-> Auth-aware Convex component that exposes selected Convex functions as MCP tools.
+> Auth-aware Convex component that exposes selected Convex functions as
+> MCP tools. Bring your own JWT issuer, declare scopes/roles per tool,
+> get an audit log and OAuth 2.1 protected-resource discovery for free.
 
-A Convex component that owns its own `/mcp` HTTP route and dispatches `tools/list` / `tools/call` back into host-app functions through `createFunctionHandle`. The component keeps a persistent tool registry; the host app declares its tools typesafely against its own `api`.
+[![tests](https://github.com/your-org/convex-mcp-gateway/actions/workflows/test.yml/badge.svg)](https://github.com/your-org/convex-mcp-gateway/actions/workflows/test.yml)
+[![npm](https://img.shields.io/npm/v/@convex-dev/mcp-gateway.svg)](https://www.npmjs.com/package/@convex-dev/mcp-gateway)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
-> Status: pre-0.1. The HTTP route currently speaks MCP 2025-06-18 JSON-RPC without auth. OAuth bridging (Phase 2) and scope/role enforcement land later.
+> **Status: pre-0.1.** The resource-server side of MCP's OAuth profile
+> is implemented (RFC 9728 discovery, RFC 6750 `WWW-Authenticate`
+> headers, scope-aware `tools/list` filter, audit log). A built-in
+> authorization-server bridge with DCR + PKCE is on the [roadmap](#roadmap).
 
-## Install
+## What it does
+
+![Architecture overview](./docs/diagrams/architecture.svg)
+
+You write a single `internalQuery` (the *authorizer*) that decides per
+call whether the request goes through. The gateway handles the JSON-RPC
+envelope, the HTTP route, the OAuth discovery doc, the
+`WWW-Authenticate` headers, and the audit log. Your existing Convex
+auth (Clerk, Auth0, Pocket-ID, custom JWT issuer) just works.
+
+A standalone editorial-styled version of the diagram is at
+[`docs/diagrams/architecture.html`](./docs/diagrams/architecture.html);
+in-depth sequence and data-flow diagrams live in
+[`docs/architecture.md`](./docs/architecture.md).
+
+## Quickstart
 
 ```sh
 pnpm add @convex-dev/mcp-gateway
 ```
 
-In your host app's `convex/convex.config.ts`:
-
 ```ts
+// convex/convex.config.ts
 import { defineApp } from "convex/server";
 import mcpGateway from "@convex-dev/mcp-gateway/convex.config";
 
 const app = defineApp();
-app.use(mcpGateway);
+app.use(mcpGateway, { httpPrefix: "/mcp" });
 export default app;
 ```
 
-## Wire up an authorizer
-
-The component knows nothing about scopes, roles, JWT claims, IP ranges, or any other access policy. It calls a single host-side `internalQuery` for every `tools/call` and lets that function decide. Deny-by-default: until an authorizer is registered, every `tools/call` returns `-32011 No authorizer configured`.
-
 ```ts
+// convex/mcp.ts
+import { v } from "convex/values";
 import {
+  McpGateway,
+  defineMcpQuery,
   mcpAuthorizerArgs,
   mcpAuthorizerReturns,
   type McpAuthorizerHandler,
 } from "@convex-dev/mcp-gateway";
-import { internalQuery } from "./_generated/server.js";
+import { api, components, internal } from "./_generated/api.js";
+import { internalMutation, internalQuery } from "./_generated/server.js";
+
+const gateway = new McpGateway(components.mcpGateway);
 
 export const authorize = internalQuery({
   args: mcpAuthorizerArgs,
   returns: mcpAuthorizerReturns,
-  handler: (async (ctx, { toolName }) => {
-    if (toolName === "invoices.summary") {
-      return { allowed: true }; // public
-    }
+  handler: (async (ctx, { toolMetadata }) => {
+    const meta = (toolMetadata ?? {}) as { public?: boolean };
+    if (meta.public) return { allowed: true };
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) return { allowed: false, reason: "Unauthorized" };
-    // ... your own role / scope / ABAC logic here
     return { allowed: true };
   }) satisfies McpAuthorizerHandler,
 });
-```
 
-The component invokes this query via a `createFunctionHandle`. Convex propagates the JWT-validated identity through `ctx.runQuery`, so the authorizer (and the tool handler itself) can call `ctx.auth.getUserIdentity()` exactly like in any normal Convex query.
-
-## Register tools typesafely
-
-```ts
-import { v } from "convex/values";
-import { McpGateway, defineMcpQuery } from "@convex-dev/mcp-gateway";
-import { api, components, internal } from "./_generated/api.js";
-import { internalMutation } from "./_generated/server.js";
-
-const gateway = new McpGateway(components.mcpGateway);
-
-export const bootstrap = internalMutation({
+export const registerDefaults = internalMutation({
   args: {},
   handler: async (ctx) => {
     await gateway.setAuthorizer(ctx, internal.mcp.authorize);
-    await gateway.register(ctx, [
-      defineMcpQuery({
-        name: "invoices.list",
-        description: "List invoices, optionally filtered by status.",
-        fn: api.invoices.list,
-        args: {
-          status: v.optional(v.union(v.literal("open"), v.literal("paid"))),
-        },
-      }),
-    ]);
+    await gateway.register(
+      ctx,
+      [
+        defineMcpQuery({
+          name: "invoices.summary",
+          description: "Public invoice counter.",
+          fn: api.invoices.summary,
+          args: {},
+          metadata: { public: true },
+        }),
+        defineMcpQuery({
+          name: "invoices.list",
+          description: "List invoices for the authenticated user.",
+          fn: api.invoices.list,
+          args: { status: v.optional(v.string()) },
+        }),
+      ],
+      { replace: true },
+    );
   },
 });
 ```
 
-`defineMcpQuery` / `defineMcpMutation` / `defineMcpAction` constrain the `args` validator against the actual `FunctionArgs<typeof fn>` *and* enforce that the function reference matches the helper's kind. Passing a mutation to `defineMcpQuery` or a mismatched args validator is a compile error.
-
-## Talk to it over MCP
-
-The component owns the `/mcp/` HTTP route on the host's Convex HTTP endpoint. Note the trailing slash: with `httpPrefix: "/mcp"` plus a component-internal route at `/`, the deployed path is `/mcp/`.
-
 ```sh
-curl -sS -X POST "$CONVEX_SITE_URL/mcp/" \
+npx convex dev --once
+npx convex run mcp:registerDefaults
+
+curl -X POST "$CONVEX_SITE_URL/mcp/" \
   -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-`tools/call` dispatches the registered function handle and returns its result wrapped in MCP `content: [{type:"text", text: ...}]`.
+The anonymous client sees only `invoices.summary` (the `public: true`
+tool); calling `invoices.list` without a Bearer returns HTTP 401 with a
+`WWW-Authenticate` header pointing at your discovery endpoint. See
+[Getting Started](./docs/getting-started.md) for the full walkthrough.
+
+## Documentation
+
+- **[Getting Started](./docs/getting-started.md)** — install, register,
+  call, in five minutes
+- **[Architecture](./docs/architecture.md)** — component model, data
+  flow, sequence diagrams
+- **[Authorization](./docs/authorization.md)** — authorizer contract,
+  `mode: "list"` vs `"call"`, scope/role recipes
+- **[OAuth 2.1 setup](./docs/oauth.md)** — RFC 9728 discovery, host-side
+  mount, multi-tenant
+- **[Audit log](./docs/audit-log.md)** — reading, filtering, redacting,
+  pruning
+- **[Testing](./docs/testing.md)** — convex-test patterns, identity
+  injection, swappable authorizers
+
+## Design choices, briefly
+
+- **One authorizer query, deny-by-default.** The component has no
+  notion of scopes, roles, JWT claims, or tenants. It calls one
+  `internalQuery` per dispatch and lets it decide. Until that query is
+  registered, nothing works.
+- **Scope-aware `tools/list`.** The catalog visible to a caller equals
+  the set of tools they could actually invoke; the same authorizer
+  filters both with a `mode: "list"` discriminator.
+- **Audit never alters dispatch.** Every audit write is best-effort;
+  failures log and swallow. A successful tool mutation always returns
+  `ok: true`.
+- **Identity propagation is free.** Convex validates inbound Bearer
+  tokens against your `auth.config.ts` before any function runs; the
+  same identity flows into the authorizer and the tool handler.
+- **OAuth discovery is opt-in.** Configure an authorization server, and
+  401s carry `WWW-Authenticate` headers per RFC 6750 and the
+  RFC 9728 path-prefix metadata URL.
 
 ## Local development
 
 ```sh
 pnpm install
-pnpm check                              # codegen + typecheck + tests
+pnpm check                              # codegen + typecheck + tests + lint
+
+# Iterate against a local Convex backend:
+pnpm local:start                        # downloads the pinned binary, writes .env.local
+                                        # runs on :3310 / :3311 (no Docker)
 ```
 
-To iterate against a real local Convex backend (HTTP route reachable via curl):
+The local backend uses upstream test fixture credentials checked into
+`get-convex/convex-backend` — public, deterministic, safe to commit.
+See [docs/testing.md](./docs/testing.md) for `convex-test` patterns and
+[CONTRIBUTING.md](./CONTRIBUTING.md) for the contribution workflow.
 
-```sh
-pnpm local:start                        # downloads the pinned convex-local-backend binary
-                                        # into .tools/, writes .env.local, runs the backend
-                                        # on :3310 / :3311
+## Roadmap
 
-# in another shell:
-source .env.local && pnpm convex:codegen
-source .env.local && npx convex dev --once
-source .env.local && npx convex run mcp:registerDefaults
-curl -sS -X POST http://127.0.0.1:3311/mcp/ \
-  -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-```
+Phase 1 (in progress):
+- ✅ Resource-server endpoints (RFC 9728 metadata, `WWW-Authenticate`)
+- ✅ `tools/list` scope filter via authorizer `mode: "list"`
+- ✅ Audit log with per-tool `auditArgs: false` opt-out
+- ✅ `defineMcp{Query,Mutation,Action}` typesafe helpers
+- ✅ Convex validator → JSON Schema (covers all standard types)
+- ⏳ Streamable-HTTP transport (SSE + `Mcp-Session-Id`)
+- ⏳ Built-in authorization-server bridge (DCR + PKCE)
+- ⏳ NPM 0.1.0 release
 
-The local backend boots with the upstream test fixture credentials checked into
-`get-convex/convex-backend` (`crates/keybroker/dev/`), so there is no Docker step
-and no admin-key derivation. Both the instance name and admin key are public
-test fixtures, safe to commit.
+Phase 2:
+- OIDC pass-through for Pocket-ID, Auth0, Clerk
+- Capability tokens for agent-spawning workflows
+- `mcpResource` and `mcpPrompt` MCP primitives
+- Multi-tenant pre-baked patterns
+- Audit log UI
+
+Phase 3:
+- Reverse direction (consume external MCP servers as Convex tools)
+- Smithery.ai listing
+- RFC 8693 token exchange for cross-domain identity
+
+See the [GitHub project](https://github.com/your-org/convex-mcp-gateway/projects)
+or
+[the planning task](https://dashboard.fohlmeister.org/kanban/task/mn7e33ettrsattthk5bdakgrj98666vj)
+for finer-grained tracking.
+
+## Security
+
+If you discover a vulnerability, please follow [SECURITY.md](./SECURITY.md)
+(do not file a public issue).
 
 ## License
 
-Apache-2.0
+[Apache-2.0](./LICENSE)
