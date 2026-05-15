@@ -39,18 +39,27 @@ export const authorize: McpAuthorizerHandler = async (ctx, args) => {
 const http = httpRouter();
 
 const mcpHandler = httpAction(async (ctx, request) =>
-  gateway.handleMcpRequest(ctx, request, { authorize }),
+  gateway.handleMcpRequest(ctx, request, { authorize, cors: true }),
 );
 http.route({ path: "/mcp/", method: "POST", handler: mcpHandler });
 http.route({ path: "/mcp/", method: "GET", handler: mcpHandler });
 http.route({ path: "/mcp/", method: "DELETE", handler: mcpHandler });
+// CORS preflight: browser MCP clients (e.g. claude.ai) issue an
+// OPTIONS request before each cross-origin call.
+http.route({ path: "/mcp/", method: "OPTIONS", handler: mcpHandler });
 
+const discoveryHandler = httpAction(async (ctx, request) =>
+  gateway.serveProtectedResourceMetadata(ctx, request),
+);
 http.route({
   path: "/.well-known/oauth-protected-resource/mcp",
   method: "GET",
-  handler: httpAction(async (ctx, request) =>
-    gateway.serveProtectedResourceMetadata(ctx, request),
-  ),
+  handler: discoveryHandler,
+});
+http.route({
+  path: "/.well-known/oauth-protected-resource/mcp",
+  method: "OPTIONS",
+  handler: discoveryHandler,
 });
 
 export default http;

@@ -240,6 +240,49 @@ describe("HTTP envelope (host-mounted /mcp/)", () => {
     expect(res.headers.get("allow")).toContain("POST");
   });
 
+  test("OPTIONS preflight returns CORS headers when cors: true", async () => {
+    const t = newTest();
+    const res = await t.fetch("/mcp/", {
+      method: "OPTIONS",
+      headers: {
+        origin: "https://claude.ai",
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "content-type, authorization",
+      },
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(res.headers.get("access-control-allow-methods")).toContain("POST");
+    expect(res.headers.get("access-control-allow-headers")).toContain(
+      "content-type",
+    );
+    expect(res.headers.get("access-control-expose-headers")).toContain(
+      "mcp-session-id",
+    );
+  });
+
+  test("POST responses include CORS headers when cors: true", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    const res = await t.fetch("/mcp/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://claude.ai",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18" },
+      }),
+    });
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(res.headers.get("access-control-expose-headers")).toContain(
+      "mcp-session-id",
+    );
+  });
+
   test("Accept: text/event-stream returns SSE-framed response", async () => {
     const t = newTest();
     await t.mutation(internal.mcp.registerDefaults, {});

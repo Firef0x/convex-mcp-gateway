@@ -7,6 +7,33 @@ import {
 } from "../shared.js";
 
 /**
+ * Browser-based MCP clients (e.g. anything served from a webapp
+ * origin) issue a CORS preflight before each `/mcp/` call. Set this
+ * option to enable preflight handling and the matching response
+ * headers; non-browser clients (CLIs, server-to-server) work without
+ * it.
+ *
+ * - `true` — permissive: `Access-Control-Allow-Origin: *`,
+ *   `Access-Control-Allow-Credentials: false` (the spec forbids
+ *   credentials with the wildcard origin). Tokens are passed via
+ *   `Authorization: Bearer ...` so this works for OAuth flows.
+ * - `string` / `string[]` — exact-match allowlist of origins. The
+ *   request's `Origin` header is echoed back if it matches, otherwise
+ *   no CORS headers are emitted (the browser then blocks the call).
+ * - `(origin: string) => boolean` — custom matcher for things like
+ *   subdomain wildcards or per-tenant rules.
+ *
+ * `Mcp-Session-Id` is automatically exposed via
+ * `Access-Control-Expose-Headers` so JS clients can read it after
+ * `initialize`.
+ */
+export type McpCorsOption =
+  | true
+  | string
+  | string[]
+  | ((origin: string) => boolean);
+
+/**
  * Options for `gateway.handleMcpRequest`. The host supplies an
  * `authorize` callback that decides allowed vs denied per
  * `tools/call` and per tool in a filtered `tools/list`. The callback
@@ -15,6 +42,8 @@ import {
  */
 export interface HandleMcpRequestOptions {
   authorize: McpAuthorizerHandler;
+  /** See `McpCorsOption`. Omit for non-browser-only deployments. */
+  cors?: McpCorsOption;
 }
 
 type HandlerCtx = {
@@ -48,6 +77,80 @@ const SERVER_VERSION = "0.0.0";
 const UNAUTHORIZED = -32001;
 const FORBIDDEN = -32003;
 const INTERNAL_ERROR = -32603;
+
+function resolveCorsOrigin(
+  cors: McpCorsOption | undefined,
+  requestOrigin: string | null,
+): string | null {
+  if (cors === undefined) return null;
+  if (cors === true) return "*";
+  if (!requestOrigin) return null;
+  if (typeof cors === "string") {
+    return cors === requestOrigin ? requestOrigin : null;
+  }
+  if (Array.isArray(cors)) {
+    return cors.includes(requestOrigin) ? requestOrigin : null;
+  }
+  return cors(requestOrigin) ? requestOrigin : null;
+}
+
+function corsHeaders(
+  cors: McpCorsOption | undefined,
+  request: Request,
+): Record<string, string> {
+  const allowOrigin = resolveCorsOrigin(cors, request.headers.get("origin"));
+  if (allowOrigin === null) return {};
+  const headers: Record<string, string> = {
+    "access-control-allow-origin": allowOrigin,
+    "access-control-expose-headers": "mcp-session-id",
+    vary: "Origin",
+  };
+  // The wildcard origin forbids credentials per spec; with an exact
+  // origin we leave credentials off too because MCP carries auth via
+  // Bearer tokens, not cookies.
+  return headers;
+}
+
+function preflightResponse(
+  cors: McpCorsOption | undefined,
+  request: Request,
+): Response {
+  const baseHeaders = corsHeaders(cors, request);
+  if (Object.keys(baseHeaders).length === 0) {
+    // CORS not configured for this origin — let the browser block it.
+    return new Response(null, { status: 204 });
+  }
+  const requestedHeaders =
+    request.headers.get("access-control-request-headers") ??
+    "content-type, authorization, mcp-session-id, accept";
+  return new Response(null, {
+    status: 204,
+    headers: {
+      ...baseHeaders,
+      "access-control-allow-methods": "POST, GET, DELETE, OPTIONS",
+      "access-control-allow-headers": requestedHeaders,
+      "access-control-max-age": "86400",
+    },
+  });
+}
+
+function withCors(
+  response: Response,
+  cors: McpCorsOption | undefined,
+  request: Request,
+): Response {
+  const extra = corsHeaders(cors, request);
+  if (Object.keys(extra).length === 0) return response;
+  const merged = new Headers(response.headers);
+  for (const [key, value] of Object.entries(extra)) {
+    merged.set(key, value);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: merged,
+  });
+}
 
 function generateSessionId(): string {
   const bytes = new Uint8Array(16);
@@ -150,22 +253,30 @@ export async function handleMcpRequest(
   component: ComponentApi,
   options: HandleMcpRequestOptions,
 ): Promise<Response> {
+  if (request.method === "OPTIONS") {
+    return preflightResponse(options.cors, request);
+  }
+  let response: Response;
   switch (request.method) {
     case "POST":
-      return handlePost(ctx, request, component, options);
+      response = await handlePost(ctx, request, component, options);
+      break;
     case "GET":
-      return new Response("Method Not Allowed", {
+      response = new Response("Method Not Allowed", {
         status: 405,
-        headers: { allow: "POST, DELETE" },
+        headers: { allow: "POST, DELETE, OPTIONS" },
       });
+      break;
     case "DELETE":
-      return handleDelete(ctx, request, component);
+      response = await handleDelete(ctx, request, component);
+      break;
     default:
-      return new Response("Method Not Allowed", {
+      response = new Response("Method Not Allowed", {
         status: 405,
-        headers: { allow: "POST, GET, DELETE" },
+        headers: { allow: "POST, GET, DELETE, OPTIONS" },
       });
   }
+  return withCors(response, options.cors, request);
 }
 
 async function handleDelete(

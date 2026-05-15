@@ -404,12 +404,34 @@ export class McpGateway {
     ctx: RunQueryCtx,
     request: Request,
   ): Promise<Response> {
+    // Discovery is read-only public metadata (RFC 9728 §3) and is
+    // fetched cross-origin by every browser MCP client. Always
+    // permissive CORS — no secrets here.
+    const corsHeaders = {
+      "access-control-allow-origin": "*",
+      vary: "Origin",
+    } as const;
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          ...corsHeaders,
+          "access-control-allow-methods": "GET, OPTIONS",
+          "access-control-allow-headers":
+            request.headers.get("access-control-request-headers") ?? "*",
+          "access-control-max-age": "86400",
+        },
+      });
+    }
     const oauthConfig = await ctx.runQuery(
       this.component.registry.getOAuthConfig,
       {},
     );
     if (!oauthConfig) {
-      return new Response("OAuth discovery not configured", { status: 404 });
+      return new Response("OAuth discovery not configured", {
+        status: 404,
+        headers: corsHeaders,
+      });
     }
     const url = new URL(request.url);
     const resourcePath = resourcePathFromWellKnownRequest(url.pathname);
@@ -429,6 +451,7 @@ export class McpGateway {
         headers: {
           "content-type": "application/json",
           "cache-control": "public, max-age=3600",
+          ...corsHeaders,
         },
       },
     );
