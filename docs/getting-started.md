@@ -194,12 +194,29 @@ lives outside the component's `httpPrefix`. Full guide:
 
 ## 7. Talk to it
 
-Plain JSON-RPC over HTTP works straight from `curl`:
+The gateway speaks **MCP 2025-06-18 Streamable HTTP**: every client
+must first `initialize` to receive a session ID, then include it on
+all subsequent requests via the `Mcp-Session-Id` header. JSON and SSE
+responses are both supported; the server picks based on the client's
+`Accept` header.
 
 ```sh
+# 1. Initialize and capture the session id from the response header.
+SESSION=$(curl -sSD - -X POST "$CONVEX_SITE_URL/mcp/" \
+  -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+  | tee /dev/stderr | awk '/^[Mm]cp-[Ss]ession-[Ii]d:/ {print $2}' | tr -d '\r')
+
+# 2. Use the session for everything else.
 curl -sS -X POST "$CONVEX_SITE_URL/mcp/" \
   -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+  -H 'accept: application/json, text/event-stream' \
+  -H "mcp-session-id: $SESSION" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+# 3. (Optional) DELETE explicitly when you're done.
+curl -X DELETE "$CONVEX_SITE_URL/mcp/" -H "mcp-session-id: $SESSION"
 ```
 
 Anonymous callers see only the public tools (`metadata.public: true` in
@@ -207,6 +224,9 @@ the authorizer above). Authenticated callers get the full catalog they
 are allowed to invoke. Calling a private tool without a Bearer returns
 HTTP 401 with a `WWW-Authenticate` header pointing at your discovery
 endpoint, exactly what MCP clients expect.
+
+Real MCP clients (Claude Desktop, MCP Inspector, Cursor) handle the
+session handshake automatically; you only configure the URL.
 
 ## Local development
 

@@ -94,6 +94,59 @@ Three tables, all owned by the component:
   OAuth metadata.
 - `audit` grows linearly with `tools/call` traffic. Two indexes
   (`by_toolName`, `by_outcome`) keep the most common queries cheap.
+- `sessions` is the MCP Streamable HTTP session table. One row per
+  active client, keyed on the cryptographically random session id the
+  server issued during `initialize`. The row also stores the
+  negotiated protocol version and a `lastSeenAt` timestamp for
+  idle-pruning via `gateway.pruneSessions` if the host wants it.
+
+## MCP Streamable HTTP transport
+
+The component implements MCP 2025-06-18 Streamable HTTP at the
+`/mcp/` endpoint:
+
+| Method | Purpose | Notes |
+|---|---|---|
+| `POST /mcp/` | Send a JSON-RPC message | First call must be `initialize`; subsequent calls require `Mcp-Session-Id` |
+| `GET /mcp/` | Open server-initiated SSE channel | Returns `405 Method Not Allowed`; we don't push notifications yet |
+| `DELETE /mcp/` | Terminate session | Drops the session row; subsequent requests with that id get `404` |
+
+Two response shapes for `POST` are both supported. The server picks
+based on the client's `Accept` header:
+
+- `Accept: application/json` → JSON envelope (default, simplest)
+- `Accept: text/event-stream` → single-frame SSE response with the same
+  payload wrapped in an event. Used by clients that prefer streaming
+  transport even for short responses; ready for future progress
+  notifications without protocol change.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as MCP Client
+  participant H as POST /mcp/
+  participant S as sessions table
+
+  C->>H: initialize (no session id)
+  H->>S: createSession(random128)
+  H-->>C: 200 + Mcp-Session-Id: <id>
+  Note over C: persists id for the conversation
+  C->>H: tools/list (Mcp-Session-Id: <id>)
+  H->>S: getSession + touch
+  H-->>C: 200 result
+  C->>H: DELETE / (Mcp-Session-Id: <id>)
+  H->>S: deleteSession
+  H-->>C: 200
+  C->>H: tools/list (Mcp-Session-Id: <id>)
+  H-->>C: 404 Not Found  (forces re-initialize)
+```
+
+Sessions are required after `initialize` (HTTP `400` on missing
+header). The server may also terminate a session at any time; clients
+that get `404` on a previously valid session id MUST start a fresh
+`initialize`. The component never garbage-collects sessions on its own;
+the host can schedule `gateway.pruneSessions(ctx, idleMs)` from a
+cron if needed.
 
 ## Request flow: `tools/call`
 

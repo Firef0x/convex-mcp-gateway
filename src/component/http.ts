@@ -15,34 +15,110 @@ type JsonRpcRequest = {
   params?: Record<string, any>;
 };
 
+type JsonRpcResult =
+  | { kind: "result"; id: JsonRpcRequest["id"]; value: unknown }
+  | {
+      kind: "error";
+      id: JsonRpcRequest["id"];
+      code: number;
+      message: string;
+    }
+  | { kind: "ack" }
+  | { kind: "raw"; response: Response };
+
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26"] as const;
 const DEFAULT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
+const SERVER_NAME = "convex-mcp-gateway";
+const SERVER_VERSION = "0.0.0";
 
-function jsonResponse(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
+function generateSessionId(): string {
+  // 128-bit random hex (32 chars). MCP spec requires globally unique +
+  // visible ASCII only; lowercase hex satisfies both.
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function jsonRpcResult(id: JsonRpcRequest["id"], value: unknown) {
-  return jsonResponse({ jsonrpc: "2.0", id: id ?? null, result: value });
+function jsonRpcEnvelope(result: JsonRpcResult): {
+  body: string;
+  status: number;
+  contentType: string;
+} {
+  switch (result.kind) {
+    case "result":
+      return {
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: result.id ?? null,
+          result: result.value,
+        }),
+        status: 200,
+        contentType: "application/json",
+      };
+    case "error":
+      return {
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: result.id ?? null,
+          error: { code: result.code, message: result.message },
+        }),
+        status: 200,
+        contentType: "application/json",
+      };
+    case "ack":
+    case "raw":
+      // Caller handled the response itself; this branch is unreachable
+      // because we short-circuit before reaching the envelope builder.
+      throw new Error("ack/raw cannot be enveloped");
+  }
 }
 
-function jsonRpcError(
-  id: JsonRpcRequest["id"],
-  code: number,
-  message: string,
-) {
-  return jsonResponse({
-    jsonrpc: "2.0",
-    id: id ?? null,
-    error: { code, message },
-  });
+/**
+ * Wrap a JSON-RPC payload in a single SSE event and close the stream.
+ * The MCP 2025-06-18 spec allows the server to choose between
+ * `application/json` and `text/event-stream`; clients MUST support
+ * both. We pick SSE only when the client explicitly accepts it, so
+ * legacy non-streaming clients keep getting plain JSON.
+ *
+ * Each event carries a unique `id` so future Last-Event-ID resumability
+ * stays an option without rewriting the producer.
+ */
+function sseEvent(id: number, payload: string): string {
+  return `id: ${id}\nevent: message\ndata: ${payload}\n\n`;
 }
 
-// Mounted under whatever `httpPrefix` the host passes to `app.use(mcpGateway, ...)`.
-// The component itself routes only the relative path `/`.
+function clientWantsSse(request: Request): boolean {
+  const accept = (request.headers.get("accept") ?? "").toLowerCase();
+  return accept.includes("text/event-stream");
+}
+
+function isJsonRpcRequest(message: JsonRpcRequest): boolean {
+  return (
+    message.method !== undefined &&
+    message.id !== undefined &&
+    message.id !== null
+  );
+}
+
+function isJsonRpcNotificationOrResponse(message: JsonRpcRequest): boolean {
+  // Notification: method present, no id. Response: id present, no method.
+  // Either way the spec says: 202 Accepted with empty body.
+  if (
+    message.method !== undefined &&
+    (message.id === undefined || message.id === null)
+  ) {
+    return true;
+  }
+  if (
+    message.method === undefined &&
+    message.id !== undefined &&
+    message.id !== null
+  ) {
+    return true;
+  }
+  return false;
+}
+
 http.route({
   path: "/",
   method: "POST",
@@ -51,35 +127,108 @@ http.route({
     try {
       message = (await request.json()) as JsonRpcRequest;
     } catch {
-      return jsonRpcError(null, -32700, "Parse error");
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32700, message: "Parse error" },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
     }
 
+    const isInitialize = message.method === "initialize";
+
+    // === Session validation ===
+    // Initialize creates a fresh session. All other requests must carry
+    // a valid Mcp-Session-Id; missing → 400 Bad Request, unknown → 404
+    // Not Found (per MCP 2025-06-18 §Session Management).
+    let sessionId: string;
+    let issueSessionHeader = false;
+
+    if (isInitialize) {
+      sessionId = generateSessionId();
+      issueSessionHeader = true;
+    } else {
+      const headerSessionId = request.headers.get("mcp-session-id");
+      if (!headerSessionId) {
+        return new Response("Missing Mcp-Session-Id header", { status: 400 });
+      }
+      const session = await ctx.runQuery(api.sessions.getSession, {
+        sessionId: headerSessionId,
+      });
+      if (!session) {
+        return new Response("Unknown or terminated session", { status: 404 });
+      }
+      sessionId = headerSessionId;
+      // Touch best-effort. A failure here must never block dispatch, so
+      // we swallow; lastSeenAt drift only affects idle-pruning accuracy.
+      try {
+        await ctx.runMutation(api.sessions.touchSession, {
+          sessionId: headerSessionId,
+        });
+      } catch {
+        /* noop */
+      }
+    }
+
+    // === Notifications / responses: 202 Accepted, no body ===
+    if (isJsonRpcNotificationOrResponse(message)) {
+      const headers: Record<string, string> = {};
+      if (issueSessionHeader) {
+        headers["mcp-session-id"] = sessionId;
+      }
+      return new Response(null, { status: 202, headers });
+    }
+
+    if (!isJsonRpcRequest(message)) {
+      // Neither a request nor a recognised notification: treat as parse-
+      // level malformed.
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: null,
+          error: {
+            code: -32600,
+            message: "Invalid Request: missing method or id",
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    // === Dispatch the JSON-RPC request to the matching handler ===
+    let result: JsonRpcResult;
     switch (message.method) {
       case "initialize": {
-        // MCP 2025-06-18 lifecycle: the version the client requests lives
-        // in `params.protocolVersion`. The `MCP-Protocol-Version` header
-        // is for follow-up requests after initialize, not for initialize
-        // itself. If the server can't speak the requested version, it
-        // returns its latest supported version instead.
         const requested = message.params?.protocolVersion;
         const negotiated =
           typeof requested === "string" &&
-          (SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(requested)
+          (SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(
+            requested,
+          )
             ? requested
             : DEFAULT_PROTOCOL_VERSION;
-        return jsonRpcResult(message.id, {
+        // Persist the freshly issued session with the negotiated
+        // protocol version. The session row exists from this point on
+        // until the client DELETEs it or it ages out.
+        await ctx.runMutation(api.sessions.createSession, {
+          sessionId,
           protocolVersion: negotiated,
-          serverInfo: { name: "convex-mcp-gateway", version: "0.0.0" },
-          capabilities: { tools: {} },
         });
+        result = {
+          kind: "result",
+          id: message.id,
+          value: {
+            protocolVersion: negotiated,
+            serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
+            capabilities: { tools: {} },
+          },
+        };
+        break;
       }
 
       case "tools/list": {
-        // The listing is filtered through the same authorizer that gates
-        // `tools/call`, in `mode: "list"`, via `dispatch.listVisibleTools`.
-        // The contract is "the catalog visible to a caller equals the set
-        // of tools they could actually invoke", so an unauthenticated
-        // client never sees a tool whose call would be rejected.
         const visible = (await ctx.runAction(
           api.dispatch.listVisibleTools,
           {},
@@ -88,37 +237,45 @@ http.route({
           description: string;
           inputSchema: unknown;
         }>;
-        return jsonRpcResult(message.id, {
-          tools: visible.map((tool) => ({
-            name: tool.name,
-            description: tool.description,
-            inputSchema: tool.inputSchema,
-          })),
-        });
+        result = {
+          kind: "result",
+          id: message.id,
+          value: {
+            tools: visible.map((tool) => ({
+              name: tool.name,
+              description: tool.description,
+              inputSchema: tool.inputSchema,
+            })),
+          },
+        };
+        break;
       }
 
       case "tools/call": {
         const name = message.params?.name;
         if (typeof name !== "string") {
-          return jsonRpcError(message.id, -32602, "Missing tool name");
+          result = {
+            kind: "error",
+            id: message.id,
+            code: -32602,
+            message: "Missing tool name",
+          };
+          break;
         }
-
         const args = (message.params?.arguments ?? {}) as Record<
           string,
           unknown
         >;
-
         const dispatched = await ctx.runAction(api.dispatch.callTool, {
           name,
           args,
         });
-
         if (!dispatched.ok) {
-          // Per MCP 2025-06-18, an authentication failure on a protected
-          // resource is signalled with HTTP 401 + `WWW-Authenticate: Bearer
-          // resource_metadata="<url>"` (RFC 6750 + RFC 9728), so the MCP
-          // client knows where to fetch the auth-server discovery doc.
-          // Other JSON-RPC errors stay HTTP 200 with an error envelope.
+          // 401 with WWW-Authenticate is the spec-mandated response for
+          // unauthenticated access to a protected resource (RFC 6750 +
+          // RFC 9728). It bypasses the JSON-RPC envelope and uses HTTP
+          // status semantics, so the MCP client can begin OAuth
+          // discovery from the header.
           if (dispatched.error.code === -32001) {
             const oauthConfig = await ctx.runQuery(
               api.registry.getOAuthConfig,
@@ -126,61 +283,157 @@ http.route({
             );
             if (oauthConfig) {
               const requestUrl = new URL(request.url);
-              const mcpPath = requestUrl.pathname.replace(/\/+$/, "") || "/";
-              // The metadata URL is the RFC 9728 path-prefix variant:
-              // `<origin>/.well-known/oauth-protected-resource<mcpPath>`,
-              // which the host must mount on its own httpRouter (the
-              // component cannot serve outside its `httpPrefix`).
+              const mcpPath =
+                requestUrl.pathname.replace(/\/+$/, "") || "/";
               const metadataUrl = buildProtectedResourceMetadataUrl(
                 requestUrl.origin,
                 mcpPath,
               );
-              return new Response(
-                JSON.stringify({
-                  jsonrpc: "2.0",
-                  id: message.id ?? null,
-                  error: {
-                    code: dispatched.error.code,
-                    message: dispatched.error.message,
+              result = {
+                kind: "raw",
+                response: new Response(
+                  JSON.stringify({
+                    jsonrpc: "2.0",
+                    id: message.id ?? null,
+                    error: {
+                      code: dispatched.error.code,
+                      message: dispatched.error.message,
+                    },
+                  }),
+                  {
+                    status: 401,
+                    headers: {
+                      "content-type": "application/json",
+                      "www-authenticate": `Bearer resource_metadata="${metadataUrl}"`,
+                      ...(issueSessionHeader
+                        ? { "mcp-session-id": sessionId }
+                        : {}),
+                    },
                   },
-                }),
-                {
-                  status: 401,
-                  headers: {
-                    "content-type": "application/json",
-                    "www-authenticate": `Bearer resource_metadata="${metadataUrl}"`,
-                  },
-                },
-              );
+                ),
+              };
+              break;
             }
           }
-          return jsonRpcError(
-            message.id,
-            dispatched.error.code,
-            dispatched.error.message,
-          );
+          result = {
+            kind: "error",
+            id: message.id,
+            code: dispatched.error.code,
+            message: dispatched.error.message,
+          };
+          break;
         }
-
-        return jsonRpcResult(message.id, {
-          content: [
-            { type: "text", text: JSON.stringify(dispatched.data, null, 2) },
-          ],
-          isError: false,
-        });
+        result = {
+          kind: "result",
+          id: message.id,
+          value: {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(dispatched.data, null, 2),
+              },
+            ],
+            isError: false,
+          },
+        };
+        break;
       }
 
       default:
-        return jsonRpcError(
-          message.id,
-          -32601,
-          `Unsupported method: ${message.method}`,
-        );
+        result = {
+          kind: "error",
+          id: message.id,
+          code: -32601,
+          message: `Unsupported method: ${message.method}`,
+        };
     }
+
+    // Raw response (e.g. 401): caller already constructed it.
+    if (result.kind === "raw") {
+      return result.response;
+    }
+
+    // === Content negotiation: SSE vs JSON ===
+    const envelope = jsonRpcEnvelope(result);
+    const wantsSse = clientWantsSse(request);
+
+    const headers: Record<string, string> = {};
+    if (issueSessionHeader) {
+      headers["mcp-session-id"] = sessionId;
+    }
+
+    if (wantsSse) {
+      // Single-frame SSE: emit one event with the JSON-RPC payload, then
+      // close. This is fully spec-compliant Streamable HTTP without
+      // requiring a long-running stream. When we add progress
+      // notifications, the producer can yield additional events here
+      // before the final response without breaking the protocol.
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const encoder = new TextEncoder();
+          controller.enqueue(encoder.encode(sseEvent(1, envelope.body)));
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: {
+          ...headers,
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache, no-transform",
+        },
+      });
+    }
+
+    return new Response(envelope.body, {
+      status: envelope.status,
+      headers: {
+        ...headers,
+        "content-type": envelope.contentType,
+      },
+    });
+  }),
+});
+
+/**
+ * GET on the MCP endpoint would open a long-lived SSE stream that the
+ * server uses for unprompted notifications/requests. We don't yet have
+ * any to send (no progress notifications, no cancellation pushes), so
+ * we follow the spec's allowance to return 405 instead. The `Allow`
+ * header tells the client which methods we do support.
+ */
+http.route({
+  path: "/",
+  method: "GET",
+  handler: httpAction(async () => {
+    return new Response("Method Not Allowed", {
+      status: 405,
+      headers: { allow: "POST, DELETE" },
+    });
+  }),
+});
+
+/**
+ * DELETE explicitly terminates a session. Per MCP 2025-06-18 §Session
+ * Management, the server MAY refuse with 405; we accept since dropping
+ * a session row is cheap and clients benefit from clean termination.
+ */
+http.route({
+  path: "/",
+  method: "DELETE",
+  handler: httpAction(async (ctx, request) => {
+    const sessionId = request.headers.get("mcp-session-id");
+    if (!sessionId) {
+      return new Response("Missing Mcp-Session-Id header", { status: 400 });
+    }
+    const deleted = await ctx.runMutation(api.sessions.deleteSession, {
+      sessionId,
+    });
+    return new Response(null, { status: deleted ? 200 : 404 });
   }),
 });
 
 export default http;
 
-// Helper re-exports so tests can import the URL builders without pulling
-// in the http router itself. Buildable in pure JS contexts.
+// Helper re-exports for unit tests.
 export { buildProtectedResourceMetadataUrl, buildResourceUrl };

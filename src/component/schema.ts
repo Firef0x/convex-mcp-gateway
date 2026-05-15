@@ -58,6 +58,23 @@ export default defineSchema({
    * reach the tool, or by wrapping `dispatch.callTool` in a redacting
    * middleware in a future iteration).
    */
+  /**
+   * MCP Streamable HTTP sessions. Created on `initialize` if the client
+   * negotiated session-aware transport, looked up on every subsequent
+   * request, and deleted on explicit `DELETE` or after a server-side
+   * timeout (managed by the host via a cron, not the component).
+   *
+   * `sessionId` is a 128-bit cryptographically random hex string,
+   * matching the MCP 2025-06-18 requirement that it be globally unique
+   * and consist of visible ASCII characters only.
+   */
+  sessions: defineTable({
+    sessionId: v.string(),
+    protocolVersion: v.string(),
+    createdAt: v.number(),
+    lastSeenAt: v.number(),
+  }).index("by_sessionId", ["sessionId"]),
+
   audit: defineTable({
     toolName: v.string(),
     toolKind: toolKindValidator,

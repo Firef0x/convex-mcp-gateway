@@ -46,6 +46,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         }>,
         Name
       >;
+      pruneOlderThan: FunctionReference<
+        "mutation",
+        "internal",
+        { cutoffMs: number },
+        number,
+        Name
+      >;
       recordEntry: FunctionReference<
         "mutation",
         "internal",
@@ -181,6 +188,50 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "mutation",
         "internal",
         { name: string },
+        boolean,
+        Name
+      >;
+    };
+    sessions: {
+      createSession: FunctionReference<
+        "mutation",
+        "internal",
+        { protocolVersion: string; sessionId: string },
+        string,
+        Name
+      >;
+      deleteSession: FunctionReference<
+        "mutation",
+        "internal",
+        { sessionId: string },
+        boolean,
+        Name
+      >;
+      getSession: FunctionReference<
+        "query",
+        "internal",
+        { sessionId: string },
+        {
+          _creationTime: number;
+          _id: string;
+          createdAt: number;
+          lastSeenAt: number;
+          protocolVersion: string;
+          sessionId: string;
+        } | null,
+        Name
+      >;
+      pruneSessions: FunctionReference<
+        "mutation",
+        "internal",
+        { olderThanMs: number },
+        number,
+        Name
+      >;
+      touchSession: FunctionReference<
+        "mutation",
+        "internal",
+        { sessionId: string },
         boolean,
         Name
       >;
