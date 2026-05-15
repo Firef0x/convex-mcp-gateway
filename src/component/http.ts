@@ -1,6 +1,10 @@
 import { httpRouter } from "convex/server";
 import { httpAction } from "./_generated/server.js";
 import { api } from "./_generated/api.js";
+import {
+  buildProtectedResourceMetadataUrl,
+  buildResourceUrl,
+} from "../shared.js";
 
 const http = httpRouter();
 
@@ -11,7 +15,8 @@ type JsonRpcRequest = {
   params?: Record<string, any>;
 };
 
-const PROTOCOL_VERSION = "2025-06-18";
+const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26"] as const;
+const DEFAULT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -51,27 +56,40 @@ http.route({
 
     switch (message.method) {
       case "initialize": {
-        const requested =
-          request.headers.get("mcp-protocol-version") ?? PROTOCOL_VERSION;
+        // MCP 2025-06-18 lifecycle: the version the client requests lives
+        // in `params.protocolVersion`. The `MCP-Protocol-Version` header
+        // is for follow-up requests after initialize, not for initialize
+        // itself. If the server can't speak the requested version, it
+        // returns its latest supported version instead.
+        const requested = message.params?.protocolVersion;
+        const negotiated =
+          typeof requested === "string" &&
+          (SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(requested)
+            ? requested
+            : DEFAULT_PROTOCOL_VERSION;
         return jsonRpcResult(message.id, {
-          protocolVersion: requested,
+          protocolVersion: negotiated,
           serverInfo: { name: "convex-mcp-gateway", version: "0.0.0" },
           capabilities: { tools: {} },
         });
       }
 
       case "tools/list": {
-        // No auth check on tools/list itself, but the listing only exposes
-        // public metadata (name + description + inputSchema), never function
-        // handles. Per-tool scopes/roles are *not* filtered server-side here
-        // yet, so clients see the full catalog. Scope-aware filtering is a
-        // Phase 2 item.
-        const tools = await ctx.runQuery(
-          api.registry.listTools,
+        // The listing is filtered through the same authorizer that gates
+        // `tools/call`, in `mode: "list"`, via `dispatch.listVisibleTools`.
+        // The contract is "the catalog visible to a caller equals the set
+        // of tools they could actually invoke", so an unauthenticated
+        // client never sees a tool whose call would be rejected.
+        const visible = (await ctx.runAction(
+          api.dispatch.listVisibleTools,
           {},
-        );
+        )) as Array<{
+          name: string;
+          description: string;
+          inputSchema: unknown;
+        }>;
         return jsonRpcResult(message.id, {
-          tools: tools.map((tool) => ({
+          tools: visible.map((tool) => ({
             name: tool.name,
             description: tool.description,
             inputSchema: tool.inputSchema,
@@ -96,6 +114,46 @@ http.route({
         });
 
         if (!dispatched.ok) {
+          // Per MCP 2025-06-18, an authentication failure on a protected
+          // resource is signalled with HTTP 401 + `WWW-Authenticate: Bearer
+          // resource_metadata="<url>"` (RFC 6750 + RFC 9728), so the MCP
+          // client knows where to fetch the auth-server discovery doc.
+          // Other JSON-RPC errors stay HTTP 200 with an error envelope.
+          if (dispatched.error.code === -32001) {
+            const oauthConfig = await ctx.runQuery(
+              api.registry.getOAuthConfig,
+              {},
+            );
+            if (oauthConfig) {
+              const requestUrl = new URL(request.url);
+              const mcpPath = requestUrl.pathname.replace(/\/+$/, "") || "/";
+              // The metadata URL is the RFC 9728 path-prefix variant:
+              // `<origin>/.well-known/oauth-protected-resource<mcpPath>`,
+              // which the host must mount on its own httpRouter (the
+              // component cannot serve outside its `httpPrefix`).
+              const metadataUrl = buildProtectedResourceMetadataUrl(
+                requestUrl.origin,
+                mcpPath,
+              );
+              return new Response(
+                JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: message.id ?? null,
+                  error: {
+                    code: dispatched.error.code,
+                    message: dispatched.error.message,
+                  },
+                }),
+                {
+                  status: 401,
+                  headers: {
+                    "content-type": "application/json",
+                    "www-authenticate": `Bearer resource_metadata="${metadataUrl}"`,
+                  },
+                },
+              );
+            }
+          }
           return jsonRpcError(
             message.id,
             dispatched.error.code,
@@ -122,3 +180,7 @@ http.route({
 });
 
 export default http;
+
+// Helper re-exports so tests can import the URL builders without pulling
+// in the http router itself. Buildable in pure JS contexts.
+export { buildProtectedResourceMetadataUrl, buildResourceUrl };

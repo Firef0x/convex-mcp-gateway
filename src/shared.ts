@@ -62,6 +62,7 @@ export interface McpToolDefinition {
   kind: McpToolKind;
   functionReference: unknown;
   inputSchema: JsonSchema;
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -98,6 +99,19 @@ export const mcpAuthorizerArgs = {
     v.literal("action"),
   ),
   args: v.any(),
+  /**
+   * `"call"` for an actual `tools/call` dispatch, `"list"` when the
+   * gateway is filtering `tools/list` per tool. `args` for `"list"` is
+   * always an empty object.
+   */
+  mode: v.union(v.literal("call"), v.literal("list")),
+  /**
+   * Free-form metadata the host attached to the tool via
+   * `defineMcp*({ metadata })`. The component itself never inspects this;
+   * it just hands it back so the authorizer can implement scope/role
+   * checks without re-reading the registry.
+   */
+  toolMetadata: v.any(),
 } as const;
 
 export const mcpAuthorizerReturns = v.object({
@@ -109,6 +123,8 @@ export interface McpAuthorizerArgs {
   toolName: string;
   toolKind: McpToolKind;
   args: Record<string, unknown>;
+  mode: "call" | "list";
+  toolMetadata: unknown;
 }
 
 export interface McpAuthorizerDecision {
@@ -257,3 +273,60 @@ export type {
   VString,
   VUnion,
 };
+
+/**
+ * Compute the RFC 9728 protected-resource metadata URL for an MCP gateway
+ * mounted at `mcpPath` on `origin`. The canonical (path-prefix) form
+ * places the well-known segment between host and path:
+ *
+ *     `<origin>/.well-known/oauth-protected-resource<mcpPath>`
+ *
+ * For example, an MCP endpoint at `https://app.example.com/mcp/` has
+ * metadata at `https://app.example.com/.well-known/oauth-protected-resource/mcp`.
+ *
+ * Pure function so the gateway can compute the URL from inside an
+ * httpAction without re-parsing intermediate URLs, and so it is unit
+ * testable independently of any framework.
+ *
+ * Spec: RFC 9728 §3.1 ("Well-Known URI"). The host is expected to mount
+ * the discovery handler at exactly this path; the gateway does not
+ * (cannot) own routes outside its own `httpPrefix`.
+ */
+export function buildProtectedResourceMetadataUrl(
+  origin: string,
+  mcpPath: string,
+): string {
+  const path = mcpPath.replace(/\/+$/, "");
+  return `${origin}/.well-known/oauth-protected-resource${path}`;
+}
+
+/**
+ * Compute the canonical resource URL for an MCP gateway from a request
+ * URL plus an optional override. Used by both the 401 path (where the
+ * request hits `<mcpPath>`) and by host-mounted discovery handlers
+ * (which call this with the path stripped of the well-known prefix).
+ */
+export function buildResourceUrl(
+  origin: string,
+  mcpPath: string,
+  override: string | null | undefined,
+): string {
+  if (override) return override;
+  const path = mcpPath.endsWith("/") ? mcpPath : `${mcpPath}/`;
+  return `${origin}${path}`;
+}
+
+/**
+ * Strip the `/.well-known/oauth-protected-resource` prefix from a
+ * request path to recover the resource path the metadata document
+ * describes. Used by the host's discovery-route handler.
+ *
+ * Returns `"/"` if nothing follows the well-known segment, matching the
+ * RFC 9728 example for resources mounted at the host root.
+ */
+export function resourcePathFromWellKnownRequest(pathname: string): string {
+  const prefix = "/.well-known/oauth-protected-resource";
+  if (!pathname.startsWith(prefix)) return pathname;
+  const rest = pathname.slice(prefix.length);
+  return rest === "" ? "/" : rest;
+}

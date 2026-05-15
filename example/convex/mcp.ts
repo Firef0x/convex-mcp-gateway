@@ -59,6 +59,49 @@ export const authorize = internalQuery({
 });
 
 /**
+ * Test-only authorizer used to prove that the `mode` discriminator is
+ * propagated correctly: it allows tools/list but denies tools/call.
+ */
+export const modeAssertingAuthorizer = internalQuery({
+  args: mcpAuthorizerArgs,
+  returns: mcpAuthorizerReturns,
+  handler: (async (_ctx, { mode }) => {
+    if (mode === "list") return { allowed: true };
+    return { allowed: false, reason: `Forbidden in ${mode} mode` };
+  }) satisfies McpAuthorizerHandler,
+});
+
+/**
+ * Test-only authorizer used to prove that `toolMetadata` reaches the
+ * authorizer intact. Allows only tools whose metadata has `allow: true`.
+ */
+export const metadataAssertingAuthorizer = internalQuery({
+  args: mcpAuthorizerArgs,
+  returns: mcpAuthorizerReturns,
+  handler: (async (_ctx, { toolName, toolMetadata }) => {
+    const meta = (toolMetadata ?? {}) as { allow?: boolean };
+    if (meta.allow === true) return { allowed: true };
+    return {
+      allowed: false,
+      reason: `tool ${toolName} has no allow flag in metadata`,
+    };
+  }) satisfies McpAuthorizerHandler,
+});
+
+/**
+ * Test-only authorizer that always throws. Used to prove that
+ * `dispatch.callTool` and `dispatch.listVisibleTools` isolate authorizer
+ * failures rather than turning them into HTTP 500s.
+ */
+export const throwingAuthorizer = internalQuery({
+  args: mcpAuthorizerArgs,
+  returns: mcpAuthorizerReturns,
+  handler: ((_ctx, _args) => {
+    throw new Error("authorizer boom");
+  }) satisfies McpAuthorizerHandler,
+});
+
+/**
  * Run once (or whenever the tool list / authorizer changes) to populate the
  * component registry and configure the authorizer.
  *
@@ -72,30 +115,34 @@ export const registerDefaults = internalMutation({
   handler: async (ctx) => {
     await gateway.setAuthorizer(ctx, internal.mcp.authorize);
 
-    await gateway.register(ctx, [
-      defineMcpQuery({
-        name: "invoices.list",
-        description: "List invoices, optionally filtered by status.",
-        fn: api.invoices.list,
-        args: {
-          status: v.optional(
-            v.union(v.literal("open"), v.literal("paid")),
-          ),
-        },
-      }),
-      defineMcpMutation({
-        name: "invoices.markPaid",
-        description: "Mark an invoice as paid.",
-        fn: api.invoices.markPaid,
-        args: { id: v.id("invoices") },
-      }),
-      defineMcpQuery({
-        name: "invoices.summary",
-        description: "Return the total number of invoices. Public.",
-        fn: api.invoices.summary,
-        args: {},
-      }),
-    ]);
+    await gateway.register(
+      ctx,
+      [
+        defineMcpQuery({
+          name: "invoices.list",
+          description: "List invoices, optionally filtered by status.",
+          fn: api.invoices.list,
+          args: {
+            status: v.optional(
+              v.union(v.literal("open"), v.literal("paid")),
+            ),
+          },
+        }),
+        defineMcpMutation({
+          name: "invoices.markPaid",
+          description: "Mark an invoice as paid.",
+          fn: api.invoices.markPaid,
+          args: { id: v.id("invoices") },
+        }),
+        defineMcpQuery({
+          name: "invoices.summary",
+          description: "Return the total number of invoices. Public.",
+          fn: api.invoices.summary,
+          args: {},
+        }),
+      ],
+      { replace: true },
+    );
     return null;
   },
 });

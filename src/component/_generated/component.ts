@@ -23,6 +23,46 @@ import type { FunctionReference } from "convex/server";
  */
 export type ComponentApi<Name extends string | undefined = string | undefined> =
   {
+    audit: {
+      listEntries: FunctionReference<
+        "query",
+        "internal",
+        {
+          limit?: number;
+          outcome?: "allowed" | "denied" | "error";
+          toolName?: string;
+        },
+        Array<{
+          _creationTime: number;
+          _id: string;
+          args: any;
+          durationMs: number;
+          errorCode?: number;
+          errorMessage?: string;
+          identitySubject: string | null;
+          outcome: "allowed" | "denied" | "error";
+          toolKind: "query" | "mutation" | "action";
+          toolName: string;
+        }>,
+        Name
+      >;
+      recordEntry: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          args: any;
+          durationMs: number;
+          errorCode?: number;
+          errorMessage?: string;
+          identitySubject: string | null;
+          outcome: "allowed" | "denied" | "error";
+          toolKind: "query" | "mutation" | "action";
+          toolName: string;
+        },
+        string,
+        Name
+      >;
+    };
     dispatch: {
       callTool: FunctionReference<
         "action",
@@ -30,6 +70,18 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         { args: any; name: string },
         | { data: any; ok: true }
         | { error: { code: number; message: string }; ok: false },
+        Name
+      >;
+      listVisibleTools: FunctionReference<
+        "action",
+        "internal",
+        {},
+        Array<{
+          description: string;
+          inputSchema: any;
+          kind: "query" | "mutation" | "action";
+          name: string;
+        }>,
         Name
       >;
     };
@@ -40,6 +92,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "internal",
         {},
         string | null,
+        Name
+      >;
+      getOAuthConfig: FunctionReference<
+        "query",
+        "internal",
+        {},
+        { authServerUrl: string; resourceUrl: string | null } | null,
         Name
       >;
       getTool: FunctionReference<
@@ -53,6 +112,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           functionHandle: string;
           inputSchema: any;
           kind: "query" | "mutation" | "action";
+          metadata?: any;
           name: string;
         } | null,
         Name
@@ -68,6 +128,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           functionHandle: string;
           inputSchema: any;
           kind: "query" | "mutation" | "action";
+          metadata?: any;
           name: string;
         }>,
         Name
@@ -80,15 +141,39 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           functionHandle: string;
           inputSchema: any;
           kind: "query" | "mutation" | "action";
+          metadata?: any;
           name: string;
         },
         string,
+        Name
+      >;
+      replaceTools: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          tools: Array<{
+            description: string;
+            functionHandle: string;
+            inputSchema: any;
+            kind: "query" | "mutation" | "action";
+            metadata?: any;
+            name: string;
+          }>;
+        },
+        null,
         Name
       >;
       setAuthorizer: FunctionReference<
         "mutation",
         "internal",
         { authorizerHandle: string | null },
+        null,
+        Name
+      >;
+      setOAuthConfig: FunctionReference<
+        "mutation",
+        "internal",
+        { authServerUrl: string | null; resourceUrl?: string | null },
         null,
         Name
       >;

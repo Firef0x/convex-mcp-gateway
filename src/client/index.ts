@@ -7,7 +7,9 @@ import {
 import type { ObjectType, PropertyValidators } from "convex/values";
 import type { ComponentApi } from "../component/_generated/component.js";
 import {
+  buildResourceUrl,
   convexValidatorToJsonSchema,
+  resourcePathFromWellKnownRequest,
   type McpToolDefinition,
   type McpToolKind,
 } from "../shared.js";
@@ -21,9 +23,12 @@ export type {
   McpToolKind,
 } from "../shared.js";
 export {
+  buildProtectedResourceMetadataUrl,
+  buildResourceUrl,
   convexValidatorToJsonSchema,
   mcpAuthorizerArgs,
   mcpAuthorizerReturns,
+  resourcePathFromWellKnownRequest,
 } from "../shared.js";
 
 export type RunQueryCtx = {
@@ -81,6 +86,14 @@ interface McpToolConfigBase<
   description: string;
   fn: Ref;
   args: ArgsV;
+  /**
+   * Free-form metadata stored alongside the tool registration. The
+   * component never inspects this; it is forwarded to the host's
+   * authorizer (via `mcpAuthorizerArgs.toolMetadata`) so per-tool
+   * scope/role checks can stay declarative. Use whatever shape your
+   * authorizer expects, e.g. `{ scopes: ["finance:read"], roles: [...] }`.
+   */
+  metadata?: Record<string, unknown>;
 }
 
 function build<
@@ -98,6 +111,7 @@ function build<
     fn: config.fn,
     functionReference: config.fn,
     inputSchema: convexValidatorToJsonSchema(config.args),
+    ...(config.metadata !== undefined ? { metadata: config.metadata } : {}),
   } as McpToolDefinition & { fn: Ref; kind: Kind };
 }
 
@@ -208,13 +222,31 @@ export class McpGateway {
       kind: tool.kind,
       functionHandle: handle,
       inputSchema: tool.inputSchema,
+      ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
     });
   }
 
   async register(
     ctx: RunMutationCtx,
     tools: Array<McpToolDefinition & { fn: AnyToolFunctionReference }>,
+    options?: { replace?: boolean },
   ): Promise<void> {
+    if (options?.replace) {
+      const resolved = await Promise.all(
+        tools.map(async (tool) => ({
+          name: tool.name,
+          description: tool.description,
+          kind: tool.kind,
+          functionHandle: await createFunctionHandle(tool.fn as any),
+          inputSchema: tool.inputSchema,
+          ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
+        })),
+      );
+      await ctx.runMutation(this.component.registry.replaceTools, {
+        tools: resolved,
+      });
+      return;
+    }
     for (const tool of tools) {
       await this.registerTool(ctx, tool);
     }
@@ -228,6 +260,22 @@ export class McpGateway {
 
   async listTools(ctx: RunQueryCtx) {
     return await ctx.runQuery(this.component.registry.listTools, {});
+  }
+
+  /**
+   * Inspect the audit log written by the component on every `tools/call`.
+   * Returns newest entries first. Use `toolName` and/or `outcome` to filter;
+   * `limit` defaults to 100 and is capped server-side at 1000.
+   */
+  async listAuditEntries(
+    ctx: RunQueryCtx,
+    args: {
+      toolName?: string;
+      outcome?: "allowed" | "denied" | "error";
+      limit?: number;
+    } = {},
+  ) {
+    return await ctx.runQuery(this.component.audit.listEntries, args);
   }
 
   async clearAll(ctx: RunMutationCtx): Promise<void> {
@@ -250,6 +298,95 @@ export class McpGateway {
     await ctx.runMutation(this.component.registry.setAuthorizer, {
       authorizerHandle: handle,
     });
+  }
+
+  /**
+   * Configure OAuth 2.1 protected-resource discovery so MCP clients can
+   * find the authorization server that issues their Bearer tokens.
+   *
+   * Once set, `tools/call` responses with `-32001 Unauthorized` switch
+   * to HTTP 401 with a `WWW-Authenticate: Bearer resource_metadata=...`
+   * header. The host must additionally mount the discovery handler at
+   * the canonical RFC 9728 path on its own `httpRouter`; see
+   * `serveProtectedResourceMetadata`.
+   *
+   * `resourceUrl` is optional; when omitted the discovery handler
+   * derives the resource from the inbound request URL, which is correct
+   * for single-tenant deployments. Pass `authServerUrl: null` to disable
+   * discovery again. Both URLs are validated as absolute http/https URLs
+   * at write time; an invalid value throws `ConvexError` immediately.
+   */
+  async setOAuthConfig(
+    ctx: RunMutationCtx,
+    config: { authServerUrl: string | null; resourceUrl?: string | null },
+  ): Promise<void> {
+    await ctx.runMutation(this.component.registry.setOAuthConfig, {
+      authServerUrl: config.authServerUrl,
+      ...(config.resourceUrl !== undefined
+        ? { resourceUrl: config.resourceUrl }
+        : {}),
+    });
+  }
+
+  /**
+   * Serve the RFC 9728 protected-resource metadata document. Hosts mount
+   * this on their own `httpRouter` at the canonical well-known path:
+   *
+   * ```ts
+   * import { httpRouter } from "convex/server";
+   * import { httpAction } from "./_generated/server.js";
+   * import { gateway } from "./mcp.js";  // or wherever you build it
+   *
+   * const http = httpRouter();
+   * http.route({
+   *   pathPrefix: "/.well-known/oauth-protected-resource",
+   *   method: "GET",
+   *   handler: httpAction(async (ctx, request) =>
+   *     gateway.serveProtectedResourceMetadata(ctx, request),
+   *   ),
+   * });
+   * export default http;
+   * ```
+   *
+   * The component cannot mount this route itself: Convex components only
+   * own routes under their own `httpPrefix` (e.g. `/mcp`), but RFC 9728
+   * §3.1 mandates the metadata at `<origin>/.well-known/oauth-protected-resource<path>`,
+   * which lives outside the component's prefix.
+   *
+   * Returns `404` when no OAuth config has been set via `setOAuthConfig`.
+   */
+  async serveProtectedResourceMetadata(
+    ctx: RunQueryCtx,
+    request: Request,
+  ): Promise<Response> {
+    const oauthConfig = await ctx.runQuery(
+      this.component.registry.getOAuthConfig,
+      {},
+    );
+    if (!oauthConfig) {
+      return new Response("OAuth discovery not configured", { status: 404 });
+    }
+    const url = new URL(request.url);
+    const resourcePath = resourcePathFromWellKnownRequest(url.pathname);
+    const resource = buildResourceUrl(
+      url.origin,
+      resourcePath,
+      oauthConfig.resourceUrl,
+    );
+    return new Response(
+      JSON.stringify({
+        resource,
+        authorization_servers: [oauthConfig.authServerUrl],
+        bearer_methods_supported: ["header"],
+      }),
+      {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "cache-control": "public, max-age=3600",
+        },
+      },
+    );
   }
 }
 
