@@ -27,81 +27,29 @@ import { defineApp } from "convex/server";
 import mcpGateway from "@convex-dev/mcp-gateway/convex.config";
 
 const app = defineApp();
-app.use(mcpGateway, { httpPrefix: "/mcp" });
+app.use(mcpGateway);
 export default app;
 ```
 
-`httpPrefix` is required, otherwise the component's `/mcp/` route is not
-reachable. Pick whatever path you want; the rest of these docs assume
-`/mcp`.
+The component owns three Convex tables (`tools`, `config`, `audit`) plus a
+`sessions` table for Streamable-HTTP. It does **not** mount any HTTP routes
+of its own. The `/mcp/` endpoint and the OAuth discovery route both live
+in your host's `http.ts` (steps 3 and 6 below). The reason is structural:
+Convex doesn't propagate `ctx.auth` into component code, so the only place
+the gateway can read the JWT-validated identity is from a host-mounted
+`httpAction`.
 
-## 3. Make sure HTTP actions are enabled
-
-Convex needs at least one route on the host's `httpRouter()` to enable
-HTTP actions globally. If you don't already have a `convex/http.ts`, add
-one (it can stay otherwise empty for now):
-
-```ts
-// convex/http.ts
-import { httpRouter } from "convex/server";
-
-const http = httpRouter();
-export default http;
-```
-
-You will extend this file in step 6 to mount the OAuth discovery handler.
-
-## 4. Define your authorizer
-
-The gateway is **deny-by-default**. Until you register an authorizer,
-every `tools/call` returns `-32011 No authorizer configured` and every
-`tools/list` returns an empty catalog. The authorizer is a normal
-`internalQuery` of yours, called once per dispatch:
+## 3. Register tools
 
 ```ts
 // convex/mcp.ts
-import {
-  mcpAuthorizerArgs,
-  mcpAuthorizerReturns,
-  type McpAuthorizerHandler,
-} from "@convex-dev/mcp-gateway";
-import { internalQuery } from "./_generated/server.js";
-
-export const authorize = internalQuery({
-  args: mcpAuthorizerArgs,
-  returns: mcpAuthorizerReturns,
-  handler: (async (ctx, { toolName, toolMetadata }) => {
-    // Public tools opt in via metadata.
-    const meta = (toolMetadata ?? {}) as { public?: boolean };
-    if (meta.public) return { allowed: true };
-
-    // Everything else needs a Convex identity.
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) return { allowed: false, reason: "Unauthorized" };
-
-    return { allowed: true };
-  }) satisfies McpAuthorizerHandler,
-});
-```
-
-`ctx.auth.getUserIdentity()` returns whatever Convex resolved from the
-inbound `Authorization: Bearer ...` header against your `auth.config.ts`.
-If your app already uses Clerk, Auth0, Pocket-ID or a JWT issuer, the
-gateway picks up that same identity for free.
-
-See [authorization.md](./authorization.md) for scope/role recipes.
-
-## 5. Register tools
-
-```ts
-// convex/mcp.ts (continued)
 import { v } from "convex/values";
 import {
   McpGateway,
   defineMcpQuery,
   defineMcpMutation,
 } from "@convex-dev/mcp-gateway";
-import { api, components, internal } from "./_generated/api.js";
+import { api, components } from "./_generated/api.js";
 import { internalMutation } from "./_generated/server.js";
 
 const gateway = new McpGateway(components.mcpGateway);
@@ -109,7 +57,6 @@ const gateway = new McpGateway(components.mcpGateway);
 export const registerDefaults = internalMutation({
   args: {},
   handler: async (ctx) => {
-    await gateway.setAuthorizer(ctx, internal.mcp.authorize);
     await gateway.register(
       ctx,
       [
@@ -131,6 +78,7 @@ export const registerDefaults = internalMutation({
           description: "Mark an invoice as paid.",
           fn: api.invoices.markPaid,
           args: { id: v.id("invoices") },
+          metadata: { roles: ["finance.admin"] },
         }),
       ],
       { replace: true },
@@ -147,35 +95,96 @@ the flag, `register` is upsert-only and old tools survive.
 `FunctionArgs<typeof fn>` at compile time. Passing the wrong validator or
 the wrong function kind is a type error, not a runtime surprise.
 
+`metadata` is host-defined free-form data. The gateway never inspects it;
+your authorize callback (step 4) reads it for public/role/scope checks.
+
 Run it once after `convex dev`:
 
 ```sh
 npx convex run mcp:registerDefaults
 ```
 
-## 6. (Optional) Mount OAuth discovery
+## 4. Mount `/mcp/` with your authorize callback
+
+The gateway is **deny-by-default**. Until you mount the handler with an
+`authorize` callback, nothing reaches your tools. The callback is a
+regular JS function (not a registered Convex query) because Convex only
+exposes `ctx.auth.getUserIdentity()` inside host-side `httpAction`s, not
+inside component code.
+
+```ts
+// convex/http.ts
+import { httpRouter } from "convex/server";
+import {
+  McpGateway,
+  type McpAuthorizerHandler,
+} from "@convex-dev/mcp-gateway";
+import { components } from "./_generated/api.js";
+import { httpAction } from "./_generated/server.js";
+
+const gateway = new McpGateway(components.mcpGateway);
+
+const authorize: McpAuthorizerHandler = async (ctx, args) => {
+  const meta = (args.toolMetadata ?? {}) as {
+    public?: boolean;
+    roles?: string[];
+  };
+  if (meta.public) return { allowed: true };
+
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) return { allowed: false, reason: "Unauthorized" };
+
+  if (meta.roles && meta.roles.length > 0) {
+    const claimRoles =
+      ((identity as { roles?: unknown }).roles as string[] | undefined) ?? [];
+    const missing = meta.roles.filter((r) => !claimRoles.includes(r));
+    if (missing.length > 0) {
+      return {
+        allowed: false,
+        reason: `Forbidden: needs roles ${missing.join(", ")}`,
+      };
+    }
+  }
+  return { allowed: true };
+};
+
+const http = httpRouter();
+
+const mcpHandler = httpAction(async (ctx, request) =>
+  gateway.handleMcpRequest(ctx, request, { authorize }),
+);
+http.route({ path: "/mcp/", method: "POST", handler: mcpHandler });
+http.route({ path: "/mcp/", method: "GET", handler: mcpHandler });
+http.route({ path: "/mcp/", method: "DELETE", handler: mcpHandler });
+
+export default http;
+```
+
+`ctx.auth.getUserIdentity()` returns whatever Convex resolved from the
+inbound `Authorization: Bearer ...` header against your `auth.config.ts`.
+If your app already uses Clerk, Auth0, Pocket-ID or a JWT issuer, the
+gateway picks up that same identity for free.
+
+The same callback is used for both `tools/call` (it gates the dispatch)
+and `tools/list` (it filters the catalog per tool with `mode: "list"`).
+See [authorization.md](./authorization.md) for scope/role/argument
+recipes.
+
+## 5. (Optional) Mount OAuth discovery
 
 If you want MCP clients (Claude Desktop, Inspector) to discover your
 authorization server automatically, configure it via the gateway and
 mount the RFC 9728 discovery route on your host's `httpRouter`:
 
 ```ts
-// convex/mcp.ts
+// convex/mcp.ts (in registerDefaults, before gateway.register)
 await gateway.setOAuthConfig(ctx, {
   authServerUrl: "https://your-idp.example.com/",
 });
 ```
 
 ```ts
-// convex/http.ts
-import { httpRouter } from "convex/server";
-import { McpGateway } from "@convex-dev/mcp-gateway";
-import { components } from "./_generated/api.js";
-import { httpAction } from "./_generated/server.js";
-
-const gateway = new McpGateway(components.mcpGateway);
-const http = httpRouter();
-
+// convex/http.ts (extend the router from step 4)
 http.route({
   path: "/.well-known/oauth-protected-resource/mcp",
   method: "GET",
@@ -183,16 +192,13 @@ http.route({
     gateway.serveProtectedResourceMetadata(ctx, request),
   ),
 });
-
-export default http;
 ```
 
-The component cannot mount this route itself: RFC 9728 §3.1 mandates the
-metadata at `<origin>/.well-known/oauth-protected-resource<path>`, which
-lives outside the component's `httpPrefix`. Full guide:
-[oauth.md](./oauth.md).
+RFC 9728 §3.1 mandates the metadata at
+`<origin>/.well-known/oauth-protected-resource<path>`, which is outside
+the `/mcp/` path the handler owns. Full guide: [oauth.md](./oauth.md).
 
-## 7. Talk to it
+## 6. Talk to it
 
 The gateway speaks **MCP 2025-06-18 Streamable HTTP**: every client
 must first `initialize` to receive a session ID, then include it on
@@ -220,10 +226,10 @@ curl -X DELETE "$CONVEX_SITE_URL/mcp/" -H "mcp-session-id: $SESSION"
 ```
 
 Anonymous callers see only the public tools (`metadata.public: true` in
-the authorizer above). Authenticated callers get the full catalog they
-are allowed to invoke. Calling a private tool without a Bearer returns
-HTTP 401 with a `WWW-Authenticate` header pointing at your discovery
-endpoint, exactly what MCP clients expect.
+the authorize callback above). Authenticated callers get the full catalog
+they are allowed to invoke. Calling a private tool without a Bearer
+returns HTTP 401 with a `WWW-Authenticate` header pointing at your
+discovery endpoint, exactly what MCP clients expect.
 
 Real MCP clients (Claude Desktop, MCP Inspector, Cursor) handle the
 session handshake automatically; you only configure the URL.
@@ -240,9 +246,14 @@ pnpm local:start                      # in one shell
 # in another shell:
 npx convex dev --once
 npx convex run mcp:registerDefaults
-curl http://127.0.0.1:3311/mcp/ \
+SESSION=$(curl -sSD - -X POST http://127.0.0.1:3211/mcp/ \
   -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+  | awk '/^[Mm]cp-[Ss]ession-[Ii]d:/ {print $2}' | tr -d '\r')
+curl http://127.0.0.1:3211/mcp/ \
+  -H 'content-type: application/json' \
+  -H "mcp-session-id: $SESSION" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 ```
 
 ## Where to go next

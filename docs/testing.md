@@ -5,6 +5,15 @@ a real backend. This doc shows the patterns specific to the component;
 for general convex-test usage, see the
 [convex-test docs](https://www.npmjs.com/package/convex-test).
 
+There are two layers worth covering:
+
+1. **Component layer** — `dispatch.runTool` and `dispatch.recordAuthDenial`,
+   exercised directly via `t.action(components.mcpGateway.*)`. No HTTP,
+   no auth — just the registry + tool execution + audit pipeline.
+2. **End-to-end layer** — drive the host's `/mcp/` route via `t.fetch`
+   to cover the full Streamable-HTTP envelope, the authorize callback,
+   and identity propagation through `t.withIdentity`.
+
 ## Setup
 
 The component lives in your host's `node_modules` so its modules need to
@@ -34,44 +43,205 @@ function newTest() {
 > Inside this monorepo the test imports from `../../src/component/...`
 > instead of `node_modules`, but the pattern is the same.
 
-## Identities
+## Layer 1: component-level tests
 
-Use `t.withIdentity({ subject, ... })` to synthesize the JWT-validated
-identity that `ctx.auth.getUserIdentity()` returns. Any extra fields are
-forwarded onto the identity, so role/scope claims work without setting
-up a real signer:
+Use `t.action(components.mcpGateway.dispatch.runTool, {...})` to invoke
+a tool by name with explicit `auditIdentitySubject`. There is no
+authorization at this layer; that is the host's job.
 
 ```ts
-test("private tool succeeds with a real identity", async () => {
+test("runs a registered tool and returns its data", async () => {
+  const t = newTest();
+  await t.mutation(internal.mcp.registerDefaults, {});
+  await t.run(async (ctx) => {
+    await ctx.db.insert("invoices", { status: "open", amount: 7 });
+  });
+
+  const result = await t.action(components.mcpGateway.dispatch.runTool, {
+    name: "invoices.summary",
+    args: {},
+    auditIdentitySubject: "alice",
+  });
+
+  expect(result.ok).toBe(true);
+  if (result.ok) expect(result.data).toEqual({ total: 1 });
+});
+
+test("unknown tool returns -32602 and writes no audit row", async () => {
   const t = newTest();
   await t.mutation(internal.mcp.registerDefaults, {});
 
-  const result = await t
-    .withIdentity({ subject: "alice" })
-    .action(components.mcpGateway.dispatch.callTool, {
-      name: "invoices.list",
-      args: {},
-    });
+  const result = await t.action(components.mcpGateway.dispatch.runTool, {
+    name: "no.such.tool",
+    args: {},
+    auditIdentitySubject: null,
+  });
 
-  expect(result.ok).toBe(true);
+  expect(result.ok).toBe(false);
+  if (!result.ok) expect(result.error.code).toBe(-32602);
+
+  const entries = await t.run(async (ctx) =>
+    ctx.runQuery(components.mcpGateway.audit.listEntries, {}),
+  );
+  expect(entries.find((e) => e.toolName === "no.such.tool")).toBeUndefined();
 });
+```
 
-test("role-gated mutation requires the matching role", async () => {
+To verify the host's "deny" code path also writes an audit row, call
+`recordAuthDenial` directly the way `handleMcpRequest` does:
+
+```ts
+test("recordAuthDenial writes a denied audit row", async () => {
   const t = newTest();
   await t.mutation(internal.mcp.registerDefaults, {});
 
-  const result = await t
-    .withIdentity({
-      subject: "carol",
-      roles: ["finance.admin"],
-    } as unknown as Parameters<typeof t.withIdentity>[0])
-    .action(components.mcpGateway.dispatch.callTool, {
-      name: "invoices.markPaid",
-      args: { id: "..." },
-    });
+  await t.action(components.mcpGateway.dispatch.recordAuthDenial, {
+    name: "invoices.list",
+    args: { status: "open" },
+    auditIdentitySubject: null,
+    outcome: "denied",
+    errorCode: -32001,
+    errorMessage: "Unauthorized",
+    durationMs: 3,
+  });
 
-  expect(result.ok).toBe(true);
+  const entries = await t.run(async (ctx) =>
+    ctx.runQuery(components.mcpGateway.audit.listEntries, {}),
+  );
+  expect(entries.find((e) => e.toolName === "invoices.list")).toMatchObject({
+    outcome: "denied",
+    errorCode: -32001,
+  });
 });
+```
+
+## Layer 2: end-to-end via `t.fetch`
+
+`convex-test` routes the **host's** `http.ts` via `t.fetch`. Since the
+gateway lives in the host's `httpAction` (not in component-mounted
+routes), the full pipeline (envelope, sessions, authorize callback,
+identity, dispatch, audit) is reachable in unit tests. Two helpers
+remove most of the boilerplate:
+
+```ts
+async function initialize(t: ReturnType<typeof newTest>): Promise<string> {
+  const res = await t.fetch("/mcp/", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18" },
+    }),
+  });
+  expect(res.status).toBe(200);
+  const sessionId = res.headers.get("mcp-session-id");
+  expect(sessionId).toBeTruthy();
+  return sessionId!;
+}
+
+async function rpc(
+  t: ReturnType<typeof newTest>,
+  sessionId: string,
+  body: object,
+  headers: Record<string, string> = {},
+): Promise<Response> {
+  return await t.fetch("/mcp/", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "mcp-session-id": sessionId,
+      ...headers,
+    },
+    body: JSON.stringify(body),
+  });
+}
+```
+
+A few representative tests:
+
+```ts
+test("anonymous tools/list shows only public tools", async () => {
+  const t = newTest();
+  await t.mutation(internal.mcp.registerDefaults, {});
+  const session = await initialize(t);
+
+  const res = await rpc(t, session, {
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/list",
+  });
+  const body = (await res.json()) as {
+    result: { tools: Array<{ name: string }> };
+  };
+  expect(body.result.tools.map((tool) => tool.name)).toEqual([
+    "invoices.summary",
+  ]);
+});
+
+test("anonymous private call returns 401 + WWW-Authenticate", async () => {
+  const t = newTest();
+  await t.mutation(internal.mcp.registerDefaults, {});
+  await t.run(async (ctx) => {
+    await ctx.runMutation(components.mcpGateway.registry.setOAuthConfig, {
+      authServerUrl: "https://idp.example.com/",
+    });
+  });
+
+  const session = await initialize(t);
+  const res = await rpc(t, session, {
+    jsonrpc: "2.0",
+    id: 3,
+    method: "tools/call",
+    params: { name: "invoices.list", arguments: {} },
+  });
+  expect(res.status).toBe(401);
+  expect(res.headers.get("www-authenticate")).toMatch(/^Bearer /);
+});
+
+test("admin sees the role-gated mutation", async () => {
+  const t = newTest();
+  await t.mutation(internal.mcp.registerDefaults, {});
+  const tWithRoles = t.withIdentity({
+    subject: "carol",
+    roles: ["finance.admin"],
+  } as unknown as Parameters<typeof t.withIdentity>[0]) as ReturnType<
+    typeof newTest
+  >;
+
+  const session = await initialize(tWithRoles);
+  const res = await tWithRoles.fetch("/mcp/", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "mcp-session-id": session,
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list" }),
+  });
+  const body = (await res.json()) as {
+    result: { tools: Array<{ name: string }> };
+  };
+  expect(body.result.tools.map((t) => t.name).sort()).toEqual([
+    "invoices.list",
+    "invoices.markPaid",
+    "invoices.summary",
+  ]);
+});
+```
+
+## Identities
+
+`t.withIdentity({ subject, ... })` synthesizes the JWT-validated
+identity that `ctx.auth.getUserIdentity()` returns inside the host's
+`httpAction`. Any extra fields are forwarded onto the identity, so
+role/scope claims work without setting up a real signer:
+
+```ts
+const tAdmin = t.withIdentity({
+  subject: "carol",
+  roles: ["finance.admin"],
+} as unknown as Parameters<typeof t.withIdentity>[0]);
 ```
 
 The `as unknown as ...` cast is a convex-test typing quirk: the public
@@ -79,71 +249,19 @@ identity type doesn't include arbitrary claims, but the runtime
 forwards them. They show up on `identity.roles` etc. just like a real
 JWT claim would.
 
-## Calling the component directly vs. via HTTP
+## Swapping the authorize callback per test
 
-`convex-test`'s `t.fetch` only routes the **host's** `http.ts`. It does
-not currently route component-mounted HTTP routes (the gateway's `/mcp/`
-endpoint). To test gateway behavior, drive the underlying actions
-directly:
+The authorize callback is just a JS closure, so testing alternative
+policies means mounting a different `/mcp/` route in a test-only
+`http.ts`, or parameterising the host's `http.ts` to read the callback
+from a test-injected variable. Most projects keep the production
+authorize callback and rely on `t.withIdentity` to drive the
+allowed/denied paths instead.
 
-```ts
-// instead of: t.fetch("/mcp/", { method: "POST", body: JSON.stringify({ method: "tools/list", ... }) })
-const visible = await t.action(
-  components.mcpGateway.dispatch.listVisibleTools,
-  {},
-);
-
-// instead of: t.fetch("/mcp/", { method: "POST", body: JSON.stringify({ method: "tools/call", ... }) })
-const result = await t.action(components.mcpGateway.dispatch.callTool, {
-  name: "invoices.list",
-  args: {},
-});
-```
-
-These are the same code paths the JSON-RPC handler invokes, just
-without the JSON-RPC envelope. The HTTP wrapper itself is a few lines
-of envelope handling; the heavy lifting lives in the dispatch actions
-and is fully testable.
-
-End-to-end coverage of the JSON-RPC envelope is best done via curl
-against a local backend (`pnpm local:start`) or in CI integration
-tests, not in unit tests.
-
-## Swapping the authorizer per test
-
-For tests that need a specific authorizer behavior (e.g. one that
-throws, one that asserts on `mode`, one that always denies), define
-extra internal queries in your test fixture and swap them in via
-`setAuthorizer`:
-
-```ts
-// example/convex/mcp.ts
-export const modeAssertingAuthorizer = internalQuery({
-  args: mcpAuthorizerArgs,
-  returns: mcpAuthorizerReturns,
-  handler: (async (_ctx, { mode }) => {
-    if (mode === "list") return { allowed: true };
-    return { allowed: false, reason: `Forbidden in ${mode} mode` };
-  }) satisfies McpAuthorizerHandler,
-});
-```
-
-```ts
-// in the test
-import { createFunctionHandle } from "convex/server";
-
-await t.run(async (ctx) => {
-  const handle = await createFunctionHandle(internal.mcp.modeAssertingAuthorizer);
-  await ctx.runMutation(components.mcpGateway.registry.setAuthorizer, {
-    authorizerHandle: handle,
-  });
-});
-
-// Now listVisibleTools allows everything, callTool denies.
-```
-
-This is the same mechanism the production setup uses; the
-gateway has no special test-mode hook because none is needed.
+If a test really needs a custom callback, define a separate
+`httpAction` in the test fixture that calls `gateway.handleMcpRequest`
+with the test callback, route it under a different path
+(e.g. `/test/mcp/`), and `t.fetch("/test/mcp/", ...)`.
 
 ## Asserting on the audit log
 
@@ -178,11 +296,12 @@ await t.run(async (ctx) => {
 
 ## Real-client smoke test (MCP Inspector)
 
-`convex-test` exercises the dispatch and registry actions, but it does
-not run the component's HTTP route or the Streamable HTTP envelope. To
-verify the protocol surface end-to-end, drive the gateway with the
-official [MCP Inspector](https://github.com/modelcontextprotocol/inspector)
-in CLI mode against the local backend.
+`convex-test` exercises the full pipeline including HTTP, but it does
+not prove the deployed cloud build behaves identically. To verify the
+protocol surface end-to-end against a real Convex backend, drive the
+gateway with the official
+[MCP Inspector](https://github.com/modelcontextprotocol/inspector) in
+CLI mode.
 
 ```sh
 # Terminal 1: local backend (in this repo)
@@ -192,12 +311,12 @@ npx convex dev --once
 npx convex run mcp:registerDefaults
 # Terminal 3: smoke tests
 npx @modelcontextprotocol/inspector --cli \
-  http://127.0.0.1:3311/mcp/ \
+  http://127.0.0.1:3211/mcp/ \
   --transport http \
   --method tools/list
 
 npx @modelcontextprotocol/inspector --cli \
-  http://127.0.0.1:3311/mcp/ \
+  http://127.0.0.1:3211/mcp/ \
   --transport http \
   --method tools/call \
   --tool-name notes.count
@@ -205,7 +324,7 @@ npx @modelcontextprotocol/inspector --cli \
 
 What to verify:
 
-- `tools/list` returns the catalog the **anonymous** authorizer
+- `tools/list` returns the catalog the **anonymous** authorize callback
   permits (Inspector does not pass any Bearer token by default).
 - `tools/call` on a public tool returns `content: [{type:"text", ...}]`.
 - `tools/call` on a private tool fails with `-32001 Unauthorized` (and
@@ -231,7 +350,7 @@ For an interactive smoke test against Anthropic's own client:
    `https://<your-deployment>.convex.site/mcp/`.
 3. Restart Claude Desktop. The configured tools appear under the
    integrations panel; calling them goes through the full session +
-   authorizer + audit pipeline.
+   authorize + audit pipeline.
 
 If your deployment requires OAuth, Claude Desktop follows the
 `WWW-Authenticate` header to your authorization server and runs the
@@ -243,15 +362,15 @@ configured via `gateway.setOAuthConfig`.
 - **Forgetting `registerComponent`.** Without it, `components.mcpGateway`
   resolves to `undefined` and tests fail with "Cannot read property
   'dispatch' of undefined".
-- **Calling `t.fetch("/mcp/", ...)`.** Returns `404 No HttpAction routed
-  for /mcp/`. Use `t.action(components.mcpGateway.dispatch.callTool, ...)`
-  instead.
-- **Asserting on identity propagation through HTTP.** Identity in
-  `convex-test` flows through `t.withIdentity(...)` regardless of the
-  request transport. The HTTP layer doesn't need to be involved for
-  the authorizer to see the synthesized identity.
+- **Missing host `http.ts`.** `t.fetch("/mcp/", ...)` returns
+  `404 No HttpAction routed for /mcp/` if the host hasn't mounted the
+  route. Make sure your test's host fixture wires
+  `gateway.handleMcpRequest` into `httpRouter`.
+- **Calling `dispatch.runTool` without `auditIdentitySubject`.** It is
+  required (the audit row needs *some* value, even `null`). The host's
+  `handleMcpRequest` always passes one; tests must too.
 - **Stale registry between tests.** Convex-test gives each test a fresh
-  in-memory database, so this isn't an issue inside a single test file.
-  But registering tools across tests in the same `describe` block needs
+  in-memory database, so this isn't an issue across files. But
+  registering tools across tests in the same `describe` block needs
   `gateway.register(ctx, [...], { replace: true })` to avoid cross-test
   contamination.

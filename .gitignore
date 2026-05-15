@@ -9,3 +9,4 @@ coverage
 .remember
 .tools
 .claude
+.playwright-cli

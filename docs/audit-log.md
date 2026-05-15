@@ -16,7 +16,7 @@ caller sees.
 | `toolKind` | `"query" \| "mutation" \| "action"` | |
 | `args` | `any` | Caller args, or `null` if `metadata.auditArgs === false` on the tool |
 | `outcome` | `"allowed" \| "denied" \| "error"` | (indexed) |
-| `identitySubject` | `string \| null` | `ctx.auth.getUserIdentity().subject` or null for anonymous |
+| `identitySubject` | `string \| null` | Caller's `identity.subject` resolved by the host's `/mcp/` `httpAction`, or null for anonymous |
 | `durationMs` | `number` | Wall-clock time from dispatch start to finish |
 | `errorCode` | `number` (optional) | JSON-RPC code on `denied` / `error` outcomes |
 | `errorMessage` | `string` (optional) | Human-readable reason |
@@ -78,16 +78,15 @@ entries are the wrong outcome.
 ## Redacting secret arguments
 
 If a tool's argument schema can carry credentials or PII, the
-`metadata.auditArgs` setting controls what reaches the log. Three
-modes, all declarative (functions can't be transmitted to Convex):
+`metadata.auditArgs` setting controls what reaches the log. Three modes,
+all declarative (functions can't be transmitted to Convex):
 
 ```ts
-// 1. Default: store args verbatim.
+// 1. Default: store args verbatim. (omit metadata.auditArgs)
 defineMcpMutation({
   name: "invoices.markPaid",
   fn: api.invoices.markPaid,
   args: { id: v.id("invoices") },
-  // metadata: { auditArgs: true }  — implicit
 }),
 
 // 2. Drop args entirely (audit row still records caller, outcome, duration).
@@ -98,7 +97,7 @@ defineMcpMutation({
   metadata: { auditArgs: false },
 }),
 
-// 3. Field-level redaction: listed keys are replaced with "[redacted]".
+// 3. Field-level redaction: listed top-level keys become "[redacted]".
 defineMcpMutation({
   name: "users.create",
   fn: api.users.create,

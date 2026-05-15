@@ -40,41 +40,22 @@ import { defineApp } from "convex/server";
 import mcpGateway from "@convex-dev/mcp-gateway/convex.config";
 
 const app = defineApp();
-app.use(mcpGateway, { httpPrefix: "/mcp" });
+app.use(mcpGateway);
 export default app;
 ```
 
 ```ts
-// convex/mcp.ts
+// convex/mcp.ts — register tools
 import { v } from "convex/values";
-import {
-  McpGateway,
-  defineMcpQuery,
-  mcpAuthorizerArgs,
-  mcpAuthorizerReturns,
-  type McpAuthorizerHandler,
-} from "@convex-dev/mcp-gateway";
-import { api, components, internal } from "./_generated/api.js";
-import { internalMutation, internalQuery } from "./_generated/server.js";
+import { McpGateway, defineMcpQuery } from "@convex-dev/mcp-gateway";
+import { api, components } from "./_generated/api.js";
+import { internalMutation } from "./_generated/server.js";
 
 const gateway = new McpGateway(components.mcpGateway);
-
-export const authorize = internalQuery({
-  args: mcpAuthorizerArgs,
-  returns: mcpAuthorizerReturns,
-  handler: (async (ctx, { toolMetadata }) => {
-    const meta = (toolMetadata ?? {}) as { public?: boolean };
-    if (meta.public) return { allowed: true };
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) return { allowed: false, reason: "Unauthorized" };
-    return { allowed: true };
-  }) satisfies McpAuthorizerHandler,
-});
 
 export const registerDefaults = internalMutation({
   args: {},
   handler: async (ctx) => {
-    await gateway.setAuthorizer(ctx, internal.mcp.authorize);
     await gateway.register(
       ctx,
       [
@@ -98,18 +79,57 @@ export const registerDefaults = internalMutation({
 });
 ```
 
+```ts
+// convex/http.ts — mount the gateway with your authorize callback
+import { httpRouter } from "convex/server";
+import {
+  McpGateway,
+  type McpAuthorizerHandler,
+} from "@convex-dev/mcp-gateway";
+import { components } from "./_generated/api.js";
+import { httpAction } from "./_generated/server.js";
+
+const gateway = new McpGateway(components.mcpGateway);
+
+const authorize: McpAuthorizerHandler = async (ctx, { toolMetadata }) => {
+  const meta = (toolMetadata ?? {}) as { public?: boolean };
+  if (meta.public) return { allowed: true };
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) return { allowed: false, reason: "Unauthorized" };
+  return { allowed: true };
+};
+
+const http = httpRouter();
+const mcp = httpAction(async (ctx, req) =>
+  gateway.handleMcpRequest(ctx, req, { authorize }),
+);
+http.route({ path: "/mcp/", method: "POST", handler: mcp });
+http.route({ path: "/mcp/", method: "GET", handler: mcp });
+http.route({ path: "/mcp/", method: "DELETE", handler: mcp });
+export default http;
+```
+
 ```sh
 npx convex dev --once
 npx convex run mcp:registerDefaults
 
+# Talk to it (Streamable HTTP — initialize first, then send commands).
+SESSION=$(curl -sSD - -X POST "$CONVEX_SITE_URL/mcp/" \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+  | awk '/^[Mm]cp-[Ss]ession-[Ii]d:/ {print $2}' | tr -d '\r')
+
 curl -X POST "$CONVEX_SITE_URL/mcp/" \
   -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+  -H "mcp-session-id: $SESSION" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 ```
 
 The anonymous client sees only `invoices.summary` (the `public: true`
 tool); calling `invoices.list` without a Bearer returns HTTP 401 with a
-`WWW-Authenticate` header pointing at your discovery endpoint. See
+`WWW-Authenticate` header pointing at your discovery endpoint. Real MCP
+clients (Claude Desktop, MCP Inspector) handle the session and OAuth
+handshakes automatically. See
 [Getting Started](./docs/getting-started.md) for the full walkthrough.
 
 ## Documentation

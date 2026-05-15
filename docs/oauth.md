@@ -66,14 +66,14 @@ await gateway.setOAuthConfig(ctx, {
 
 ### 2. Mount the discovery handler
 
-The gateway component cannot mount this route itself: RFC 9728 §3.1
-mandates the metadata at
-`<origin>/.well-known/oauth-protected-resource<path>`, which is
-*outside* the component's `httpPrefix`. The host adds it to its own
-`httpRouter`:
+The host owns every gateway-related route, including discovery. RFC 9728
+§3.1 mandates the metadata at
+`<origin>/.well-known/oauth-protected-resource<path>`, so the host adds
+it next to the `/mcp/` route already mounted in
+[Getting Started step 4](./getting-started.md#4-mount-mcp-with-your-authorize-callback):
 
 ```ts
-// convex/http.ts
+// convex/http.ts (extending the router from getting-started.md step 4)
 import { httpRouter } from "convex/server";
 import { McpGateway } from "@convex-dev/mcp-gateway";
 import { components } from "./_generated/api.js";
@@ -81,6 +81,8 @@ import { httpAction } from "./_generated/server.js";
 
 const gateway = new McpGateway(components.mcpGateway);
 const http = httpRouter();
+
+// /mcp/ routes from getting-started step 4 here ...
 
 // Exact-path route: serves the canonical metadata for the /mcp resource.
 http.route({
@@ -160,16 +162,18 @@ export default {
 
 Convex fetches the JWKS from the issuer's `/.well-known/jwks.json` and
 validates the `Authorization: Bearer <jwt>` header on every inbound
-request. If validation passes, `ctx.auth.getUserIdentity()` returns the
-JWT claims (subject, scopes, roles, etc.). If validation fails, the
-identity is `null` and your authorizer rejects the call.
+request. If validation passes, `ctx.auth.getUserIdentity()` (called
+inside the host's `/mcp/` `httpAction`) returns the JWT claims (subject,
+scopes, roles, etc.). If validation fails, the identity is `null` and
+the authorize callback rejects the call.
 
 ## Multi-tenant deployments
 
-For per-tenant isolation, mount one gateway component per tenant prefix
-(e.g. `/mcp/tenants/acme/`, `/mcp/tenants/beta/`) and set `resourceUrl`
-explicitly per tenant so the discovery metadata reports the right
-resource identifier:
+For per-tenant isolation, mount one `/mcp/` route per tenant prefix
+(e.g. `/mcp/tenants/acme/`, `/mcp/tenants/beta/`) in the host's `http.ts`
+(each route invokes the same `handleMcpRequest` with a tenant-aware
+authorize callback), and set `resourceUrl` explicitly per tenant so the
+discovery metadata reports the right resource identifier:
 
 ```ts
 await gateway.setOAuthConfig(ctx, {
