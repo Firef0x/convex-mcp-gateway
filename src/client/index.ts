@@ -91,10 +91,10 @@ interface McpToolConfigBase<
   args: ArgsV;
   /**
    * Free-form metadata stored alongside the tool registration. The
-   * component never inspects this; it is forwarded to the host's
-   * authorizer (via `mcpAuthorizerArgs.toolMetadata`) so per-tool
-   * scope/role checks can stay declarative. Use whatever shape your
-   * authorizer expects, e.g. `{ scopes: ["finance:read"], roles: [...] }`.
+   * component never inspects this; it is surfaced to the host's
+   * authorize callback as `args.toolMetadata` so per-tool scope/role
+   * checks stay declarative. Use whatever shape your callback expects,
+   * e.g. `{ scopes: ["finance:read"], roles: [...] }`.
    */
   metadata?: Record<string, unknown>;
 }
@@ -126,9 +126,10 @@ function build<
  * drift between the registered Convex function and the tool descriptor
  * cannot ship undetected.
  *
- * Authorization is *not* configured per-tool. The host registers a single
- * authorizer via `McpGateway#setAuthorizer`; it sees every `tools/call` and
- * decides whether to allow it.
+ * Authorization is *not* configured per-tool. The host passes a single
+ * `authorize` callback to `gateway.handleMcpRequest({ authorize })`; it
+ * sees every `tools/call` (and every `tools/list` filter) and decides
+ * whether to allow it.
  */
 export function defineMcpQuery<
   Ref extends ToolFunctionReference<"query">,
@@ -390,10 +391,12 @@ export class McpGateway {
    * export default http;
    * ```
    *
-   * The component cannot mount this route itself: Convex components only
-   * own routes under their own `httpPrefix` (e.g. `/mcp`), but RFC 9728
-   * §3.1 mandates the metadata at `<origin>/.well-known/oauth-protected-resource<path>`,
-   * which lives outside the component's prefix.
+   * The host mounts this route alongside the `/mcp/` route from
+   * `handleMcpRequest`; RFC 9728 §3.1 mandates the metadata at
+   * `<origin>/.well-known/oauth-protected-resource<path>`. The
+   * component itself does not own any HTTP routes (Convex does not
+   * propagate `ctx.auth` into component code, so all routes live in
+   * the host).
    *
    * Returns `404` when no OAuth config has been set via `setOAuthConfig`.
    */

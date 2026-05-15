@@ -190,8 +190,9 @@ curl http://127.0.0.1:3311/.well-known/oauth-protected-resource/mcp | jq
 ```
 
 returns the metadata JSON. End-to-end testing with a real MCP client
-(Claude Desktop, MCP Inspector) requires a real issuer the client trusts;
-local-only OAuth requires a local AS or a tunneled deployment.
+requires a real issuer the client trusts; local-only OAuth requires
+either a local AS or a tunneled deployment so the IdP can reach the
+callback URL.
 
 ## What's not yet covered
 
@@ -205,5 +206,6 @@ plays nice with anything OAuth 2.1 / OIDC.
 
 If your IdP doesn't support Dynamic Client Registration (RFC 7591)
 and an MCP client demands it, register a single shared client at the
-IdP and have all MCP clients use that client id; Claude Desktop, MCP
-Inspector, and Cursor all support pre-registered clients.
+IdP and configure each MCP client to use that fixed client id. Most
+spec-compliant clients (the official MCP Inspector, IDE plugins,
+agent runtimes) support pre-registered clients.

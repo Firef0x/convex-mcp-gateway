@@ -29,7 +29,7 @@ describe("parseAuthorizerDecision", () => {
   });
 
   test("treats extra fields as non-breaking schema evolution", () => {
-    // Adding optional keys to mcpAuthorizerReturns later must not break
+    // Adding optional keys to McpAuthorizerDecision later must not break
     // the runtime parser. Extra fields are silently dropped.
     expect(
       parseAuthorizerDecision({ allowed: true, futureField: "ignored" }),

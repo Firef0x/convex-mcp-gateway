@@ -267,8 +267,9 @@ export type {
  * testable independently of any framework.
  *
  * Spec: RFC 9728 §3.1 ("Well-Known URI"). The host is expected to mount
- * the discovery handler at exactly this path; the gateway does not
- * (cannot) own routes outside its own `httpPrefix`.
+ * the discovery handler at exactly this path; the gateway component
+ * does not own any HTTP routes (Convex doesn't propagate `ctx.auth`
+ * into component code, so all routes live in the host).
  */
 export function buildProtectedResourceMetadataUrl(
   origin: string,

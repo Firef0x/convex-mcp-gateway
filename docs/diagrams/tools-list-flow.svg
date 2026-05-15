@@ -107,7 +107,7 @@
         text-anchor="middle" letter-spacing="0.08em">EXT</text>
   <text x="80" y="100" fill="#0b0d0b" font-size="12" font-weight="600" text-anchor="middle">MCP Client</text>
   <text x="80" y="116" fill="#52534e" font-size="9" font-family="'Geist Mono', ui-monospace, monospace"
-        text-anchor="middle">claude · cursor</text>
+        text-anchor="middle">any MCP client</text>
 
   <!-- H: /mcp/ httpAction -->
   <rect x="220" y="60" width="120" height="64" rx="6" fill="#f5f4ed"/>

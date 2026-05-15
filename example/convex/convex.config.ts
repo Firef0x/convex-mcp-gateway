@@ -2,8 +2,9 @@ import { defineApp } from "convex/server";
 import mcpGateway from "@convex-dev/mcp-gateway/convex.config";
 
 const app = defineApp();
-// `httpPrefix` mounts the component's `http.ts` routes under the host's
-// site origin. Without it, the component's `/mcp` route is not reachable.
-app.use(mcpGateway, { httpPrefix: "/mcp" });
+// The component owns four storage tables (tools, config, sessions, audit).
+// It does not mount HTTP routes; the host's http.ts mounts /mcp/ and the
+// OAuth discovery route via gateway.handleMcpRequest / serveProtectedResourceMetadata.
+app.use(mcpGateway);
 
 export default app;

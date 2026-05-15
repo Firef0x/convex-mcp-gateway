@@ -60,14 +60,6 @@ export default defineSchema({
   }),
 
   /**
-   * One row per `tools/call` dispatch. Captures who called what, the
-   * authorizer's verdict, and how long the underlying function ran. Args
-   * and the identity subject are stored verbatim; sensitive payloads must
-   * be filtered out by the host (e.g. by stripping fields before they
-   * reach the tool, or by wrapping `dispatch.callTool` in a redacting
-   * middleware in a future iteration).
-   */
-  /**
    * MCP Streamable HTTP sessions. Created on `initialize` if the client
    * negotiated session-aware transport, looked up on every subsequent
    * request, and deleted on explicit `DELETE` or after a server-side
@@ -84,6 +76,15 @@ export default defineSchema({
     lastSeenAt: v.number(),
   }).index("by_sessionId", ["sessionId"]),
 
+  /**
+   * One row per `tools/call` dispatch. Captures who called what, the
+   * outcome, and how long the underlying function ran. `identitySubject`
+   * is supplied by the host (resolved from `ctx.auth.getUserIdentity()`)
+   * and forwarded into `dispatch.runTool`; the component never reads
+   * identity directly. Arg storage respects `metadata.auditArgs`: full
+   * record by default, `null` when set to `false`, top-level keys
+   * replaced with `"[redacted]"` when set to `{ redact: [...] }`.
+   */
   audit: defineTable({
     toolName: v.string(),
     toolKind: toolKindValidator,

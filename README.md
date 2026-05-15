@@ -17,11 +17,12 @@
 
 ![Architecture overview](./docs/diagrams/architecture.svg)
 
-You write a single `internalQuery` (the *authorizer*) that decides per
-call whether the request goes through. The gateway handles the JSON-RPC
-envelope, the HTTP route, the OAuth discovery doc, the
-`WWW-Authenticate` headers, and the audit log. Your existing Convex
-auth (Clerk, Auth0, Pocket-ID, custom JWT issuer) just works.
+You mount the gateway in a single `httpAction` and pass an `authorize`
+JS callback that decides per call whether the request goes through.
+The gateway handles the JSON-RPC envelope, the Streamable-HTTP session
+lifecycle, the OAuth discovery doc, the `WWW-Authenticate` headers, and
+the audit log. Your existing Convex auth (Clerk, Auth0, Pocket-ID,
+custom JWT issuer) just works.
 
 A standalone editorial-styled version of the diagram is at
 [`docs/diagrams/architecture.html`](./docs/diagrams/architecture.html);
@@ -127,10 +128,11 @@ curl -X POST "$CONVEX_SITE_URL/mcp/" \
 
 The anonymous client sees only `invoices.summary` (the `public: true`
 tool); calling `invoices.list` without a Bearer returns HTTP 401 with a
-`WWW-Authenticate` header pointing at your discovery endpoint. Real MCP
-clients (Claude Desktop, MCP Inspector) handle the session and OAuth
-handshakes automatically. See
-[Getting Started](./docs/getting-started.md) for the full walkthrough.
+`WWW-Authenticate` header pointing at your discovery endpoint. Any
+spec-compliant MCP client (the official MCP Inspector, IDE plugins,
+agent runtimes) handles the session and OAuth handshakes
+automatically. See [Getting Started](./docs/getting-started.md) for
+the full walkthrough.
 
 ## Documentation
 
@@ -203,7 +205,7 @@ Phase 1 (in progress):
 - ⏳ Streamable-HTTP transport (SSE + `Mcp-Session-Id`)
 - ⏳ Audit pruning API (`gateway.pruneAuditEntries`)
 - ⏳ Field-level audit redaction hook (`redactArgs`)
-- ⏳ Real-client smoke test (MCP Inspector, Claude Desktop)
+- ⏳ Real-client smoke test (MCP Inspector + one IDE integration)
 - ⏳ NPM 0.1.0 release
 
 Phase 2:
@@ -220,10 +222,7 @@ Phase 3:
 - Smithery.ai listing
 - RFC 8693 token exchange for cross-domain identity
 
-See the [GitHub project](https://github.com/your-org/convex-mcp-gateway/projects)
-or
-[the planning task](https://dashboard.fohlmeister.org/kanban/task/mn7e33ettrsattthk5bdakgrj98666vj)
-for finer-grained tracking.
+See the repo's GitHub issues for finer-grained tracking.
 
 ## Security
 

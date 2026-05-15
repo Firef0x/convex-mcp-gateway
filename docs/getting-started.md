@@ -8,8 +8,9 @@ a local Convex backend.
 
 - A Convex project (`npx convex dev` works against your deployment)
 - Node 20+
-- Optional: an MCP client (Claude Desktop, MCP Inspector) to talk to the
-  gateway interactively
+- Optional: any spec-compliant MCP client (the official MCP Inspector
+  is the easiest option; IDE plugins and agent runtimes also work) to
+  talk to the gateway interactively
 
 ## 1. Install
 
@@ -172,9 +173,10 @@ recipes.
 
 ## 5. (Optional) Mount OAuth discovery
 
-If you want MCP clients (Claude Desktop, Inspector) to discover your
-authorization server automatically, configure it via the gateway and
-mount the RFC 9728 discovery route on your host's `httpRouter`:
+If you want MCP clients to discover your authorization server
+automatically (no hardcoded URL on the client side), configure it via
+the gateway and mount the RFC 9728 discovery route on your host's
+`httpRouter`:
 
 ```ts
 // convex/mcp.ts (in registerDefaults, before gateway.register)
@@ -231,8 +233,8 @@ they are allowed to invoke. Calling a private tool without a Bearer
 returns HTTP 401 with a `WWW-Authenticate` header pointing at your
 discovery endpoint, exactly what MCP clients expect.
 
-Real MCP clients (Claude Desktop, MCP Inspector, Cursor) handle the
-session handshake automatically; you only configure the URL.
+Spec-compliant MCP clients handle the session handshake automatically;
+you only configure the URL.
 
 ## Local development
 

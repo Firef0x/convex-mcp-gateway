@@ -339,23 +339,29 @@ For a UI-based test, run Inspector without `--cli`; it opens a web
 console where you can browse tools, edit args, and watch each
 JSON-RPC frame.
 
-## Real-client smoke test (Claude Desktop)
+## Real-client smoke test (any MCP-compatible client)
 
-For an interactive smoke test against Anthropic's own client:
+For an interactive smoke test against a real client (an IDE plugin,
+an agent runtime, or any chat app that speaks MCP over Streamable
+HTTP):
 
 1. Deploy the playground (or your host) to a Convex project that has a
    reachable HTTPS URL (`npx convex deploy`).
-2. Configure Claude Desktop's MCP server config (Settings →
-   Developer → Edit Config) with an HTTP-transport entry pointing at
-   `https://<your-deployment>.convex.site/mcp/`.
-3. Restart Claude Desktop. The configured tools appear under the
-   integrations panel; calling them goes through the full session +
-   authorize + audit pipeline.
+2. In the client's MCP-server configuration, add an HTTP-transport
+   entry pointing at `https://<your-deployment>.convex.site/mcp/`.
+   The exact UI varies by client (config file, settings panel, or
+   `mcp.json`), but the URL is the only required field for an
+   unauthenticated test.
+3. Reload the client. The registered tools appear in its integrations
+   surface; calling them goes through the full session + authorize +
+   audit pipeline.
 
-If your deployment requires OAuth, Claude Desktop follows the
+If your deployment requires OAuth, the client follows the
 `WWW-Authenticate` header to your authorization server and runs the
-PKCE flow. Make sure your `auth.config.ts` issuer matches what you
-configured via `gateway.setOAuthConfig`.
+PKCE flow itself. Make sure your `auth.config.ts` issuer matches what
+you configured via `gateway.setOAuthConfig`, and that the client is
+either pre-registered at the IdP or your IdP supports Dynamic Client
+Registration.
 
 ## Common pitfalls
 

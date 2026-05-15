@@ -5,7 +5,7 @@
 If you believe you have found a security vulnerability in
 `@convex-dev/mcp-gateway`, **please do not open a public GitHub issue**.
 
-Instead, email the maintainers at <thorben@fohlm.com> with:
+Instead, email the maintainers at <thorben@fohlmeister.com> with:
 
 - A description of the issue and its impact
 - Steps to reproduce, or a proof of concept
@@ -33,10 +33,11 @@ worth understanding when evaluating its security posture:
   component's public mutations (e.g. `audit.recordEntry`,
   `registry.replaceTools`). The component does not defend against a
   malicious or buggy host.
-- **The authorizer is the access boundary.** Until you register an
-  authorizer via `gateway.setAuthorizer`, every call returns
-  `-32011 No authorizer configured`. The component does not enforce
-  any other policy. A wrong authorizer is a wide-open gateway.
+- **The authorize callback is the access boundary.** Mounting the
+  gateway requires passing an `authorize` JS callback to
+  `gateway.handleMcpRequest({ authorize })`. Without it the handler
+  cannot be constructed (TypeScript-enforced). The component performs
+  no other policy check; a permissive callback is a wide-open gateway.
 - **JWT validation is Convex's job.** The gateway reads
   `ctx.auth.getUserIdentity()` and trusts whatever Convex resolved from
   your `auth.config.ts`. Misconfigured `auth.config.ts` (e.g. wrong
