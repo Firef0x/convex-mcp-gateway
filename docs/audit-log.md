@@ -77,67 +77,68 @@ entries are the wrong outcome.
 
 ## Redacting secret arguments
 
-If a tool's argument schema can carry credentials or PII, opt out per
-tool:
+If a tool's argument schema can carry credentials or PII, the
+`metadata.auditArgs` setting controls what reaches the log. Three
+modes, all declarative (functions can't be transmitted to Convex):
 
 ```ts
+// 1. Default: store args verbatim.
 defineMcpMutation({
-  name: "secrets.set",
-  description: "Set a secret value.",
-  fn: api.secrets.set,
-  args: { name: v.string(), value: v.string() },
+  name: "invoices.markPaid",
+  fn: api.invoices.markPaid,
+  args: { id: v.id("invoices") },
+  // metadata: { auditArgs: true }  — implicit
+}),
+
+// 2. Drop args entirely (audit row still records caller, outcome, duration).
+defineMcpMutation({
+  name: "secrets.import",
+  fn: api.secrets.import,
+  args: { blob: v.string() },
   metadata: { auditArgs: false },
+}),
+
+// 3. Field-level redaction: listed keys are replaced with "[redacted]".
+defineMcpMutation({
+  name: "users.create",
+  fn: api.users.create,
+  args: { email: v.string(), password: v.string(), name: v.string() },
+  metadata: { auditArgs: { redact: ["password"] } },
 }),
 ```
 
-The audit row still records who called the tool, when, with what
-outcome, and how long it took. Only `args` is replaced with `null`. This
-applies to every code path: `allowed`, `denied`, `error`. The default
-(no `auditArgs` key, or `auditArgs: true`) stores args verbatim.
-
-A future iteration may add a per-field redaction hook; today it is all
-or nothing per tool.
+Field-level redaction is shallow (top-level keys only). For deeper or
+shape-preserving transformation (e.g. truncate a long string, hash a
+PII field), use `auditArgs: false` and write a richer summary into your
+own table.
 
 ## Retention / pruning
 
-The component does not prune the audit table on its own. For
-production deployments, run a scheduled function that drops anything
-older than a chosen retention window:
+The component does not prune the audit table on its own; the host
+schedules a periodic prune via `gateway.pruneAuditEntries`. The
+component walks its own table once and drops everything older than the
+cutoff:
 
 ```ts
+// convex/audit.ts
 import { internalMutation } from "./_generated/server.js";
+import { McpGateway } from "@convex-dev/mcp-gateway";
 import { components } from "./_generated/api.js";
-import { v } from "convex/values";
 
-export const pruneAudit = internalMutation({
-  args: { retainDays: v.number() },
-  handler: async (ctx, args) => {
-    const cutoff = Date.now() - args.retainDays * 24 * 60 * 60 * 1000;
-    let deleted = 0;
-    // Walk newest-first via the default index. Stop once we cross the cutoff.
-    for await (const entry of ctx.runQuery(
-      components.mcpGateway.audit.listEntries,
-      { limit: 1000 },
-    )) {
-      // The component's listEntries returns rows; older ones come last in
-      // pagination. For large tables, switch to a direct withIndex walk
-      // on the component side via a custom internal query.
-      if (entry._creationTime >= cutoff) continue;
-      await ctx.runMutation(/* component-side delete; not currently exposed */);
-      deleted++;
-    }
-    return { deleted };
+const gateway = new McpGateway(components.mcpGateway);
+
+export const runPrune = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const RETAIN_30_DAYS = 30 * 24 * 60 * 60 * 1000;
+    const deleted = await gateway.pruneAuditEntries(ctx, RETAIN_30_DAYS);
+    console.info(`audit cleanup: pruned ${deleted} entries`);
+    return deleted;
   },
 });
 ```
 
-> **Note**: the public component API does not currently expose an audit
-> delete mutation. Until it does, the easiest path is a one-time scripted
-> cleanup using the dashboard or `npx convex run` against an internal
-> deletion query the host adds. This is a known gap; track it in
-> [the roadmap](https://dashboard.fohlmeister.org/kanban/task/mn7e33ettrsattthk5bdakgrj98666vj).
-
-Schedule the cleanup with `convex/crons.ts`:
+Schedule it with `convex/crons.ts`:
 
 ```ts
 import { cronJobs } from "convex/server";
@@ -147,11 +148,15 @@ const crons = cronJobs();
 crons.daily(
   "audit cleanup",
   { hourUTC: 3, minuteUTC: 0 },
-  internal.audit.pruneAudit,
-  { retainDays: 30 },
+  internal.audit.runPrune,
 );
 export default crons;
 ```
+
+For very large tables the prune walk is O(n) and runs in a single
+mutation; if your `audit` table has millions of rows, run a paginated
+prune across multiple mutations (the public `pruneOlderThan` mutation
+returns the deleted count so you can loop until it returns zero).
 
 ## Privacy considerations
 

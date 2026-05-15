@@ -3,7 +3,7 @@ import { convexTest } from "convex-test";
 import { createFunctionHandle } from "convex/server";
 import { describe, expect, test } from "vitest";
 import schema from "./schema.js";
-import { components, internal } from "./_generated/api.js";
+import { api, components, internal } from "./_generated/api.js";
 
 const modules = import.meta.glob(["./**/*.ts", "./**/*.js", "!**/*.test.ts"]);
 const componentModules = import.meta.glob([
@@ -437,6 +437,80 @@ describe("dispatch + authorizer", () => {
     });
     expect(entries.length).toBeGreaterThanOrEqual(1);
     expect(entries[0]!.errorCode).toBe(-32603);
+  });
+
+  test("metadata.auditArgs.redact replaces listed top-level fields with [redacted]", async () => {
+    const t = newTest();
+
+    // Register a mutation tagged for field-level redaction.
+    await t.run(async (ctx) => {
+      const handle = await createFunctionHandle(api.invoices.markPaid);
+      await ctx.runMutation(components.mcpGateway.registry.replaceTools, {
+        tools: [
+          {
+            name: "secret.write",
+            description: "Demo of declarative field redaction.",
+            kind: "mutation",
+            functionHandle: handle,
+            inputSchema: { type: "object" },
+            metadata: { auditArgs: { redact: ["password", "token"] } },
+          },
+        ],
+      });
+      const authorizerHandle = await createFunctionHandle(
+        internal.mcp.authorize,
+      );
+      await ctx.runMutation(components.mcpGateway.registry.setAuthorizer, {
+        authorizerHandle,
+      });
+    });
+
+    // We don't need the call to succeed; we just need an audit row.
+    // The default authorizer denies anonymous, so the deny path runs
+    // and writes an audit row with the redacted args.
+    await t.action(components.mcpGateway.dispatch.callTool, {
+      name: "secret.write",
+      args: { password: "p@ss", token: "t0k3n", username: "alice" },
+    });
+
+    const entries = await t.run(async (ctx) => {
+      return await ctx.runQuery(
+        components.mcpGateway.audit.listEntries,
+        { toolName: "secret.write" },
+      );
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.args).toEqual({
+      password: "[redacted]",
+      token: "[redacted]",
+      username: "alice",
+    });
+  });
+
+  test("audit pruning drops rows older than the cutoff", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+
+    await t.run(async (ctx) => {
+      // Insert one ancient + one fresh entry directly.
+      await ctx.runMutation(components.mcpGateway.audit.recordEntry, {
+        toolName: "old.tool",
+        toolKind: "query",
+        args: null,
+        outcome: "allowed",
+        identitySubject: null,
+        durationMs: 1,
+      });
+    });
+
+    // Prune everything older than ten minutes from now (ancient row
+    // qualifies; freshly inserted row above does not).
+    const farFuture = Date.now() + 10 * 60 * 1000;
+    const deleted = await t.mutation(
+      components.mcpGateway.audit.pruneOlderThan,
+      { cutoffMs: farFuture },
+    );
+    expect(deleted).toBeGreaterThanOrEqual(1);
   });
 
   test("audit dispatch is not aborted when the audit write itself fails", async () => {

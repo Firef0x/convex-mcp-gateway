@@ -278,6 +278,44 @@ export class McpGateway {
     return await ctx.runQuery(this.component.audit.listEntries, args);
   }
 
+  /**
+   * Drop MCP sessions that have not been touched within `idleMs`. The
+   * component does not garbage-collect sessions on its own; schedule
+   * this from `crons.ts` if you want time-based cleanup. Returns the
+   * number of session rows deleted.
+   */
+  async pruneSessions(
+    ctx: RunMutationCtx,
+    idleMs: number,
+  ): Promise<number> {
+    return await ctx.runMutation(this.component.sessions.pruneSessions, {
+      olderThanMs: idleMs,
+    });
+  }
+
+  /**
+   * Drop audit entries older than `retentionMs`. Returns the number of
+   * rows deleted. Schedule from `crons.ts` for time-based retention:
+   *
+   * ```ts
+   * crons.daily("audit cleanup", { hourUTC: 3, minuteUTC: 0 },
+   *   internal.audit.runPrune, {});
+   *
+   * export const runPrune = internalMutation({
+   *   args: {},
+   *   handler: async (ctx) => gateway.pruneAuditEntries(ctx, 30 * 24 * 60 * 60 * 1000),
+   * });
+   * ```
+   */
+  async pruneAuditEntries(
+    ctx: RunMutationCtx,
+    retentionMs: number,
+  ): Promise<number> {
+    return await ctx.runMutation(this.component.audit.pruneOlderThan, {
+      cutoffMs: Date.now() - retentionMs,
+    });
+  }
+
   async clearAll(ctx: RunMutationCtx): Promise<void> {
     await ctx.runMutation(this.component.registry.clearAll, {});
   }

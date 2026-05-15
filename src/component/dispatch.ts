@@ -141,7 +141,7 @@ export const callTool = action({
       };
     }
 
-    const auditArgs = shouldAuditArgs(tool) ? request.args : null;
+    const auditArgs = redactArgsForAudit(tool, request.args);
 
     const authorizerHandle = await ctx.runQuery(
       api.registry.getAuthorizer,
@@ -278,14 +278,44 @@ export const callTool = action({
 });
 
 /**
- * Hosts opt out of arg storage by setting `metadata.auditArgs = false` on
- * a tool definition. Useful for tools whose argument schema can carry
- * secrets (API keys, tokens, PII): the audit row still records the call,
- * but `args` is stored as `null`.
+ * Hosts shape what gets stored in the audit log via `metadata.auditArgs`:
+ *
+ *   - `auditArgs: true`              (or omitted) → store args verbatim
+ *   - `auditArgs: false`                          → store `null`
+ *   - `auditArgs: { redact: [...] }`              → store args with the
+ *     listed top-level fields replaced by the string `"[redacted]"`
+ *
+ * Field-level redaction is shallow: nested fields are not walked. For
+ * deep redaction or transformation, drop the whole payload with
+ * `auditArgs: false` and write a richer summary into your tool's own
+ * audit table.
  */
-function shouldAuditArgs(tool: RegisteredTool): boolean {
-  const meta = tool.metadata as { auditArgs?: unknown } | null | undefined;
-  return meta?.auditArgs !== false;
+function redactArgsForAudit(tool: RegisteredTool, args: unknown): unknown {
+  const meta = tool.metadata as
+    | { auditArgs?: false | true | { redact?: string[] } }
+    | null
+    | undefined;
+  const setting = meta?.auditArgs;
+
+  if (setting === false) return null;
+  if (setting === undefined || setting === true) return args;
+
+  const redactList = setting.redact ?? [];
+  if (
+    redactList.length === 0 ||
+    typeof args !== "object" ||
+    args === null ||
+    Array.isArray(args)
+  ) {
+    return args;
+  }
+  const out: Record<string, unknown> = { ...(args as Record<string, unknown>) };
+  for (const field of redactList) {
+    if (Object.prototype.hasOwnProperty.call(out, field)) {
+      out[field] = "[redacted]";
+    }
+  }
+  return out;
 }
 
 async function safeRecordAudit(
@@ -315,12 +345,22 @@ async function safeRecordAudit(
   }
 }
 
-function parseAuthorizerDecision(decision: unknown): {
+/**
+ * Runtime validation of the authorizer's return value. The shape here
+ * MUST stay in sync with `mcpAuthorizerReturns` in `../shared.ts`,
+ * which is the validator hosts attach to their `internalQuery`. The
+ * Convex framework already enforces the validator at the function
+ * boundary, but we re-check here because a misconfigured host could
+ * forget the validator and return arbitrary JSON, and an invalid shape
+ * must produce deny rather than crash.
+ *
+ * Lenient on extra fields (a schema evolution that adds optional keys
+ * is non-breaking); strict on the required `allowed` boolean.
+ */
+export function parseAuthorizerDecision(decision: unknown): {
   allowed: boolean;
   reason?: string;
 } {
-  // The handle is opaque so we can't statically type the return. Validate
-  // shape at runtime; reject anything else as a misconfigured authorizer.
   if (
     typeof decision !== "object" ||
     decision === null ||

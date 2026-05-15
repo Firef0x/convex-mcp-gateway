@@ -93,3 +93,30 @@ export const listEntries = query({
     return await ctx.db.query("audit").order("desc").take(limit);
   },
 });
+
+/**
+ * Drop audit rows older than `cutoffMs` (Date.now() - retentionMs in
+ * the typical caller). Walks the table once via the default index.
+ *
+ * Hosts schedule this from a `crons.daily(...)` job; the component
+ * runs no background work itself. The mutation uses `_creationTime`
+ * (always present, indexed implicitly) so callers don't need to pass
+ * a timestamp field name.
+ *
+ * Returns the number of rows actually deleted, useful for
+ * observability dashboards or cron-job logs.
+ */
+export const pruneOlderThan = mutation({
+  args: { cutoffMs: v.number() },
+  returns: v.number(),
+  handler: async (ctx, args) => {
+    let deleted = 0;
+    for await (const row of ctx.db.query("audit")) {
+      if (row._creationTime < args.cutoffMs) {
+        await ctx.db.delete("audit", row._id);
+        deleted++;
+      }
+    }
+    return deleted;
+  },
+});
