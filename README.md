@@ -164,6 +164,16 @@ See [docs/testing.md](./docs/testing.md) for `convex-test` patterns and
 
 ## Roadmap
 
+**Auth model: bring your own IdP.** Any OAuth 2.1 / OIDC issuer that
+Convex's `auth.config.ts` can validate against (Pocket-ID, Auth0,
+Clerk, Keycloak, AWS Cognito, Authentik, custom JWT issuer) plugs in
+without code changes. We deliberately do **not** ship a bundled
+authorization server: building DCR + PKCE + token issuance + key
+rotation duplicates what every IdP already does, and an MCP gateway
+that's also an IdP would be two security-critical surfaces in one
+component. The gateway only implements the resource-server side of
+MCP's OAuth profile (RFC 9728 discovery, RFC 6750 `WWW-Authenticate`).
+
 Phase 1 (in progress):
 - ✅ Resource-server endpoints (RFC 9728 metadata, `WWW-Authenticate`)
 - ✅ `tools/list` scope filter via authorizer `mode: "list"`
@@ -171,14 +181,18 @@ Phase 1 (in progress):
 - ✅ `defineMcp{Query,Mutation,Action}` typesafe helpers
 - ✅ Convex validator → JSON Schema (covers all standard types)
 - ⏳ Streamable-HTTP transport (SSE + `Mcp-Session-Id`)
-- ⏳ Built-in authorization-server bridge (DCR + PKCE)
+- ⏳ Audit pruning API (`gateway.pruneAuditEntries`)
+- ⏳ Field-level audit redaction hook (`redactArgs`)
+- ⏳ Real-client smoke test (MCP Inspector, Claude Desktop)
 - ⏳ NPM 0.1.0 release
 
 Phase 2:
-- OIDC pass-through for Pocket-ID, Auth0, Clerk
-- Capability tokens for agent-spawning workflows
+- Capability tokens for agent-spawning workflows (small JWT helper, not
+  a full AS: `gateway.signCapabilityToken({ tools, runId, ttl })`
+  plus authorizer-side validation)
 - `mcpResource` and `mcpPrompt` MCP primitives
-- Multi-tenant pre-baked patterns
+- Multi-tenant pre-baked patterns (per-tenant URL, RFC 8707 audience
+  binding)
 - Audit log UI
 
 Phase 3:

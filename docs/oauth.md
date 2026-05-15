@@ -207,8 +207,15 @@ local-only OAuth requires a local AS or a tunneled deployment.
 
 ## What's not yet covered
 
-The gateway today implements **resource-server** discovery only. The
-roadmap (Phase 2) includes a built-in **authorization-server bridge**
-that handles Dynamic Client Registration (DCR), PKCE, and
-token-issuance via OIDC pass-through, so you don't need a separate AS
-deployment for simple cases. Until then, hosts BYO their AS.
+The gateway today implements **resource-server** discovery only.
+There is no plan to ship a bundled authorization server: building DCR
++ PKCE + token issuance + key rotation reproduces what every modern
+IdP already does, and folding an AS into the same component would be
+two security-critical surfaces sharing a release cycle. The official
+position is **bring your own IdP**, and the resource-server side
+plays nice with anything OAuth 2.1 / OIDC.
+
+If your IdP doesn't support Dynamic Client Registration (RFC 7591)
+and an MCP client demands it, register a single shared client at the
+IdP and have all MCP clients use that client id; Claude Desktop, MCP
+Inspector, and Cursor all support pre-registered clients.
