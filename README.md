@@ -204,29 +204,24 @@ rotation duplicates what every IdP already does, and an MCP gateway
 that's also an IdP would be two security-critical surfaces in one
 component. The gateway only implements the resource-server side of
 MCP's OAuth profile (RFC 9728 discovery, RFC 6750 `WWW-Authenticate`).
+A separate bridge mode (RFC 8414 metadata + RFC 7591 DCR wrap) lets
+hosts whose upstream IdP doesn't speak DCR still serve browser MCP
+clients — see [docs/oauth-bridge.md](./docs/oauth-bridge.md).
 
-Phase 1 (in progress):
-- ✅ Resource-server endpoints (RFC 9728 metadata, `WWW-Authenticate`)
-- ✅ `tools/list` scope filter via authorizer `mode: "list"`
-- ✅ Audit log with per-tool `auditArgs: false` opt-out
-- ✅ `defineMcp{Query,Mutation,Action}` typesafe helpers
-- ✅ Convex validator → JSON Schema (covers all standard types)
-- ✅ Streamable-HTTP transport (SSE + `Mcp-Session-Id`)
-- ✅ Audit pruning API (`gateway.pruneAuditEntries`)
-- ✅ Field-level audit redaction (`metadata.auditArgs.redact`)
-- ⏳ Real-client smoke test (MCP Inspector + one IDE integration)
-- ⏳ NPM 0.1.0 release
+### Before 0.1.0
 
-Phase 2:
-- Capability tokens for agent-spawning workflows (small JWT helper, not
-  a full AS: `gateway.signCapabilityToken({ tools, runId, ttl })`
+- Real-client smoke test (MCP Inspector + one IDE integration)
+- npm publish (`pnpm release`)
+
+### Future
+
+- Capability tokens for agent-spawning workflows (small JWT helper,
+  not a full AS: `gateway.signCapabilityToken({ tools, runId, ttl })`
   plus authorizer-side validation)
 - `mcpResource` and `mcpPrompt` MCP primitives
 - Multi-tenant pre-baked patterns (per-tenant URL, RFC 8707 audience
   binding)
-- Audit log UI
-
-Phase 3:
+- Audit-log UI
 - Reverse direction (consume external MCP servers as Convex tools)
 - Smithery.ai listing
 - RFC 8693 token exchange for cross-domain identity
