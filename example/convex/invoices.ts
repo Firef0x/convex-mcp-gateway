@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 
 export const seed = mutation({
@@ -56,17 +56,30 @@ export const summary = query({
 });
 
 /**
- * Test-only fixture: always throws. Used by mcp.test.ts to verify that
- * the gateway returns tool execution failures as MCP `result.isError:
- * true` (not as a JSON-RPC error), and that the audit row captures
- * `outcome: "error"` with the message. Not registered by
- * `registerDefaults`; tests insert it via `replaceTools` directly.
+ * Test-only fixture: always throws a plain Error. The gateway treats
+ * this as an unexpected internal failure — the wire response carries
+ * a generic "Tool execution failed" message, while the audit row
+ * keeps the verbose "boom" string for operator debugging.
  */
 export const throwsAlways = query({
   args: {},
   returns: v.null(),
   handler: async () => {
-    throw new Error("boom");
+    throw new Error("boom — should not reach the wire");
+  },
+});
+
+/**
+ * Test-only fixture: throws a `ConvexError`, the deliberate
+ * user-facing error channel. The gateway forwards the message
+ * verbatim to the wire (so the LLM can reason about the error) AND
+ * to the audit row.
+ */
+export const throwsConvexError = query({
+  args: {},
+  returns: v.null(),
+  handler: async () => {
+    throw new ConvexError("Invoice not found");
   },
 });
 

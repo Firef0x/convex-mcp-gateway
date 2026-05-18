@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import type { FunctionHandle } from "convex/server";
 import { internalAction, internalMutation } from "./_generated/server.js";
 import { internal } from "./_generated/api.js";
@@ -62,7 +62,17 @@ export const runTool = internalAction({
 
     const auditArgs = redactArgsForAudit(tool, request.args);
     let data: unknown;
-    let toolError: { code: number; message: string } | null = null;
+    // Errors come in two flavours:
+    //   - `wire`: what the MCP caller sees in `result.isError` /
+    //     JSON-RPC error envelope. Generic for any error that isn't a
+    //     deliberate ConvexError, because tool authors can't be
+    //     trusted to omit secrets from arbitrary thrown messages
+    //     (e.g. fetch errors that quote URLs containing credentials).
+    //   - `audit`: what lands in the audit table. Always verbose —
+    //     operators need the full text to debug regressions, and the
+    //     audit table is server-side (no leak risk by default).
+    let wireError: { code: number; message: string } | null = null;
+    let auditError: { code: number; message: string } | null = null;
     try {
       const handle = tool.functionHandle as FunctionHandle<
         "query" | "mutation" | "action"
@@ -88,10 +98,27 @@ export const runTool = internalAction({
           break;
       }
     } catch (err) {
-      toolError = {
-        code: -32000,
-        message: err instanceof Error ? err.message : String(err),
-      };
+      const fullMessage = err instanceof Error ? err.message : String(err);
+      // ConvexError is the deliberate user-facing channel: hosts
+      // throw it when they want a specific message to reach the LLM
+      // (e.g. "Invoice not found"). Anything else is treated as an
+      // unexpected internal error and the wire gets a generic
+      // message; the audit row still records the full text.
+      //
+      // The instanceof check covers the in-process case; the
+      // `name === "ConvexError"` fallback catches the case where the
+      // error crossed a Convex function boundary (ctx.runQuery /
+      // runMutation / runAction reconstruct the error with the
+      // proper `name` but the class identity can differ across
+      // module resolution boundaries inside convex-test).
+      const isConvexError =
+        err instanceof ConvexError ||
+        (err instanceof Error && err.name === "ConvexError");
+      const wireMessage = isConvexError
+        ? fullMessage
+        : "Tool execution failed";
+      wireError = { code: -32000, message: wireMessage };
+      auditError = { code: -32000, message: fullMessage };
     }
 
     // Audit happens AFTER the handler resolves and OUTSIDE the tool's
@@ -103,16 +130,16 @@ export const runTool = internalAction({
       toolName: tool.name,
       toolKind: tool.kind,
       args: auditArgs,
-      outcome: toolError ? "error" : "allowed",
+      outcome: auditError ? "error" : "allowed",
       identitySubject: request.auditIdentitySubject,
       durationMs: Date.now() - start,
-      ...(toolError
-        ? { errorCode: toolError.code, errorMessage: toolError.message }
+      ...(auditError
+        ? { errorCode: auditError.code, errorMessage: auditError.message }
         : {}),
     });
 
-    if (toolError) {
-      return { ok: false as const, error: toolError };
+    if (wireError) {
+      return { ok: false as const, error: wireError };
     }
     return { ok: true as const, data };
   },

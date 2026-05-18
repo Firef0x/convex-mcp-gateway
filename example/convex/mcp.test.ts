@@ -902,7 +902,7 @@ describe("argument redaction", () => {
 // =================================================================
 
 describe("tool execution failures", () => {
-  test("component dispatch returns ok:false with the thrown message", async () => {
+  test("plain Error thrown by handler: wire gets generic, audit keeps verbose", async () => {
     const t = newTest();
     await t.run(async (ctx) => {
       const handle = await createFunctionHandle(api.invoices.throwsAlways);
@@ -926,8 +926,12 @@ describe("tool execution failures", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
+      // Wire message is the generic placeholder — the verbose
+      // "boom — should not reach the wire" string stays out of the
+      // unauthenticated caller's response.
       expect(result.error.code).toBe(-32000);
-      expect(result.error.message).toContain("boom");
+      expect(result.error.message).toBe("Tool execution failed");
+      expect(result.error.message).not.toContain("boom");
     }
 
     const entries = await t.run(async (ctx) =>
@@ -937,6 +941,40 @@ describe("tool execution failures", () => {
     );
     expect(entries[0]?.outcome).toBe("error");
     expect(entries[0]?.errorCode).toBe(-32000);
+    // Audit row retains the full message so operators can debug.
+    expect(entries[0]?.errorMessage).toContain("boom");
+  });
+
+  test("ConvexError thrown by handler: full message reaches the wire", async () => {
+    const t = newTest();
+    await t.run(async (ctx) => {
+      const handle = await createFunctionHandle(api.invoices.throwsConvexError);
+      await ctx.runMutation(components.mcpGateway.registry.replaceTools, {
+        tools: [
+          {
+            name: "user_facing_throw",
+            description: "throws ConvexError",
+            kind: "query",
+            functionHandle: handle,
+            inputSchema: { type: "object" },
+          },
+        ],
+      });
+    });
+
+    const result = await t.action(components.mcpGateway.dispatch.runTool, {
+      name: "user_facing_throw",
+      args: {},
+      auditIdentitySubject: null,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe(-32000);
+      // ConvexError is the deliberate user-facing channel; its
+      // message reaches the wire so the LLM can reason about
+      // "Invoice not found" and react.
+      expect(result.error.message).toContain("Invoice not found");
+    }
   });
 
   test("tools/call surfaces handler throw as result.isError:true (not JSON-RPC error)", async () => {
@@ -979,7 +1017,9 @@ describe("tool execution failures", () => {
     expect(body.error).toBeUndefined();
     expect(body.result?.isError).toBe(true);
     expect(body.result?.content?.[0]?.type).toBe("text");
-    expect(body.result?.content?.[0]?.text).toContain("boom");
+    // The wire content is the sanitized generic message; "boom"
+    // stays in the audit log only.
+    expect(body.result?.content?.[0]?.text).toBe("Tool execution failed");
   });
 });
 

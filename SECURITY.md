@@ -44,7 +44,15 @@ worth understanding when evaluating its security posture:
   issuer, no JWKS) makes every caller anonymous.
 - **The audit log can carry secrets.** By default, `args` are stored
   verbatim. Use `metadata: { auditArgs: false }` on tools whose
-  argument schema accepts credentials, tokens, or PII.
+  argument schema accepts credentials, tokens, or PII; the
+  `{ redact: [...] }` form supports nested dotted paths
+  (`"credentials.token"`).
+- **Thrown tool errors are split between wire and audit.** A plain
+  `throw new Error("...")` from a tool handler is replaced with a
+  generic `"Tool execution failed"` on the wire, while the audit
+  row keeps the verbose message. Use `throw new ConvexError("...")`
+  when you want a specific message to reach the MCP caller — that
+  is the deliberate user-facing channel.
 - **The audit log is unbounded.** No automatic retention. Add a cron
   job that prunes rows older than your retention window. See
   [docs/audit-log.md](./docs/audit-log.md).
