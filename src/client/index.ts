@@ -512,6 +512,24 @@ export class McpGateway {
       upstreamIssuer: string;
       /** Path to your `handleClientRegistration` route. Default: `/oauth/register` */
       registrationPath?: string;
+      /**
+       * Fields to override in the bridged metadata. Useful for:
+       *
+       * - Removing `openid` from `scopes_supported` (when the client
+       *   would otherwise request an `id_token` and reject it because
+       *   the upstream's `iss` claim won't match the bridge's
+       *   advertised `issuer`).
+       * - Restricting `response_types_supported` to `["code"]` to
+       *   force pure-OAuth code flow (no `id_token` hybrid).
+       * - Setting `issuer` to the upstream issuer instead of the
+       *   bridge origin, if the client refuses to accept the
+       *   mismatch (technically violates RFC 8414 §2 but works with
+       *   stricter clients).
+       *
+       * Any key set here replaces the bridged value verbatim. Keys
+       * not set fall through to the upstream's value (or our default).
+       */
+      overrides?: Record<string, unknown>;
     },
   ): Promise<Response> {
     const corsHeaders = {
@@ -548,7 +566,7 @@ export class McpGateway {
         },
       );
     }
-    const body = {
+    const body: Record<string, unknown> = {
       issuer: url.origin,
       authorization_endpoint: upstream.authorization_endpoint,
       token_endpoint: upstream.token_endpoint,
@@ -563,6 +581,7 @@ export class McpGateway {
       // upstream and never round-trip through here.
       token_endpoint_auth_methods_supported: ["none"],
       registration_endpoint: `${url.origin}${registrationPath}`,
+      ...(options.overrides ?? {}),
     };
     return new Response(JSON.stringify(body), {
       status: 200,
