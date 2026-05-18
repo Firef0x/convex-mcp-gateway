@@ -104,6 +104,7 @@ type RegisteredTool = {
   kind: "query" | "mutation" | "action";
   functionHandle: string;
   inputSchema: unknown;
+  outputSchema?: unknown;
   metadata?: unknown;
 };
 
@@ -494,6 +495,12 @@ async function handlePost(
             name: tool.name,
             description: tool.description,
             inputSchema: tool.inputSchema,
+            // Only emit `outputSchema` when the tool actually declared
+            // one — some MCP clients (Inspector older versions) are
+            // strict about the field being absent vs null vs {}.
+            ...(tool.outputSchema !== undefined
+              ? { outputSchema: tool.outputSchema }
+              : {}),
           });
         }
       }
@@ -610,6 +617,12 @@ async function handlePost(
         );
         break;
       }
+      // Always ship the text-JSON `content` block for backwards-compat
+      // with clients that don't know `structuredContent`. When the tool
+      // declared an `outputSchema` (via `defineMcp*({ returns })`), MCP
+      // 2025-06-18 §tools/call mandates ALSO sending the typed value
+      // as `structuredContent`. Spec-compliant clients (claude.ai,
+      // recent Inspector) prefer the structured form when present.
       body = jsonResultEnvelope(message.id, {
         content: [
           {
@@ -617,6 +630,9 @@ async function handlePost(
             text: JSON.stringify(dispatched.data, null, 2),
           },
         ],
+        ...(tool.outputSchema !== undefined
+          ? { structuredContent: dispatched.data }
+          : {}),
         isError: false,
       });
       break;

@@ -61,6 +61,14 @@ export interface McpToolDefinition {
   kind: McpToolKind;
   functionReference: unknown;
   inputSchema: JsonSchema;
+  /**
+   * Optional MCP `outputSchema` (JSON Schema). When set, the gateway
+   * also includes `structuredContent` in every `tools/call` response
+   * for this tool, alongside the existing text-JSON `content` block.
+   * Most commonly populated by passing `returns:` to
+   * `defineMcp{Query,Mutation,Action}`.
+   */
+  outputSchema?: JsonSchema;
   metadata?: Record<string, unknown>;
 }
 

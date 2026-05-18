@@ -93,6 +93,24 @@ digits, underscore, hyphen, up to 64 chars. Dotted names like
 style) are rejected by most MCP clients and will throw at
 registration time. Use `invoices_list` instead.
 
+**Typed return values (optional)**: pass `returns:` with a Convex
+validator and the gateway advertises an MCP `outputSchema` plus
+ships `structuredContent` in every `tools/call` response. The
+validator is type-checked against the Convex function's actual
+return type at compile time:
+
+```ts
+defineMcpQuery({
+  name: "invoices_summary",
+  fn: api.invoices.summary,
+  args: {},
+  returns: v.object({ total: v.float64() }),  // ← compile-checked
+}),
+```
+
+Tools without `returns:` keep their pre-existing wire format
+unchanged — backwards-compatible for any registration that exists today.
+
 `gateway.register` always replaces the registry atomically: tools no
 longer in the array are removed in the same Convex mutation. This is
 deliberate — incremental upserts leak stale registrations across

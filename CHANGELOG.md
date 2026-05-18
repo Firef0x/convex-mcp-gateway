@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Added (typed tool returns)
+
+- Optional `returns:` parameter on `defineMcp{Query,Mutation,Action}`.
+  Pass a Convex validator (`v.object({...})`, `v.id("notes")`,
+  `v.union(...)`, `v.array(...)`, `v.null()`, etc.) and the gateway:
+  - advertises a JSON-Schema `outputSchema` for the tool in
+    `tools/list`, and
+  - includes a typed `structuredContent` block in every `tools/call`
+    response alongside the existing text-JSON `content` (per MCP
+    2025-06-18 §tools/call).
+  Tools without `returns:` keep their pre-existing wire format —
+  `outputSchema` is OMITTED (not null, not `{}`), `structuredContent`
+  is OMITTED. No breaking change for bestehende registrations.
+- Compile-time `ValidateReturns` constraint mirrors the existing
+  `ValidateArgs`: drift between the registered Convex function's
+  return type and the declared `returns:` surfaces as a
+  `_typeMismatch` on the config object, exactly like a wrong `args:`.
+- Component `tools` schema gets `outputSchema: v.optional(v.any())`;
+  existing rows without the column remain valid.
+- `v.bytes()` is intentionally NOT supported as a `returns:` value
+  yet — the JSON-Schema mapping is fine but base64-encoding runtime
+  values for `structuredContent` adds enough nuance to defer until
+  there's demand.
+
 ### Added (OAuth bridge mode)
 
 - Three opt-in helpers for hosts whose upstream IdP doesn't support

@@ -46,6 +46,11 @@ export const registerDefaults = internalMutation({
           description: "Return the total number of invoices. Public.",
           fn: api.invoices.summary,
           args: {},
+          // Declaring `returns` makes the gateway advertise an MCP
+          // `outputSchema` for this tool and ship a `structuredContent`
+          // block in every tools/call response. Type-checked against
+          // the Convex function's actual return type at compile time.
+          returns: v.object({ total: v.float64() }),
           // The host's authorize callback in http.ts treats `public:
           // true` as the opt-in for unauthenticated calls.
           metadata: { public: true },

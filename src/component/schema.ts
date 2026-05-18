@@ -20,6 +20,13 @@ export default defineSchema({
     kind: toolKindValidator,
     functionHandle: v.string(),
     inputSchema: v.any(),
+    /**
+     * Optional MCP `outputSchema` (JSON Schema). When set, tools/list
+     * advertises it and tools/call wraps results in `structuredContent`
+     * alongside the text-JSON `content`. Pre-existing rows without the
+     * column stay valid courtesy of `v.optional`.
+     */
+    outputSchema: v.optional(v.any()),
     metadata: v.optional(v.any()),
   }).index("by_name", ["name"]),
 

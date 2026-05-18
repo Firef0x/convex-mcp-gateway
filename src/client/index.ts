@@ -4,7 +4,12 @@ import {
   type FunctionReference,
   type FunctionReturnType,
 } from "convex/server";
-import type { ObjectType, PropertyValidators } from "convex/values";
+import type {
+  GenericValidator,
+  Infer,
+  ObjectType,
+  PropertyValidators,
+} from "convex/values";
 import type { ComponentApi } from "../component/_generated/component.js";
 import {
   buildResourceUrl,
@@ -85,14 +90,57 @@ type ValidateArgs<Ref extends AnyToolFunctionReference, ArgsV> =
         }
     : { _typeMismatch: "args must be a Convex property validators object" };
 
+/**
+ * Mirror of `ValidateArgs` for the optional `returns:` validator.
+ * When the host omits `returns`, ReturnsV resolves to `undefined` and
+ * validation is bypassed (no constraint). When provided, the validator's
+ * inferred type must equal the function's actual return type — drift
+ * between them surfaces as a `_typeMismatch` on the config object.
+ */
+type ValidateReturns<Ref extends AnyToolFunctionReference, ReturnsV> =
+  ReturnsV extends undefined
+    ? unknown
+    : ReturnsV extends GenericValidator
+      ? Infer<ReturnsV> extends FunctionReturnType<Ref>
+        ? FunctionReturnType<Ref> extends Infer<ReturnsV>
+          ? unknown
+          : {
+              _typeMismatch: "returns validator does not match the function's return type";
+              expected: FunctionReturnType<Ref>;
+              received: Infer<ReturnsV>;
+            }
+        : {
+            _typeMismatch: "returns validator does not match the function's return type";
+            expected: FunctionReturnType<Ref>;
+            received: Infer<ReturnsV>;
+          }
+      : { _typeMismatch: "returns must be a Convex validator" };
+
 interface McpToolConfigBase<
   Ref extends AnyToolFunctionReference,
   ArgsV extends PropertyValidators,
+  ReturnsV extends GenericValidator | undefined = undefined,
 > {
   name: string;
   description: string;
   fn: Ref;
   args: ArgsV;
+  /**
+   * Optional Convex return-validator. When set, the tool advertises an
+   * MCP `outputSchema` and every `tools/call` response includes a
+   * `structuredContent` field with the typed value alongside the
+   * text-JSON `content` block (per MCP 2025-06-18).
+   *
+   * Type-checked against `FunctionReturnType<typeof fn>` at compile
+   * time, so a drift between the registered Convex function and the
+   * MCP-advertised return shape can't ship undetected.
+   *
+   * Bytes (`v.bytes()`) are intentionally NOT supported in the first
+   * cut — the JSON-Schema mapping is fine but base64-encoding the
+   * runtime value in `structuredContent` adds enough nuance that we
+   * defer it until there's demand.
+   */
+  returns?: ReturnsV;
   /**
    * Free-form metadata stored alongside the tool registration. The
    * component never inspects this; it is surfaced to the host's
@@ -121,9 +169,10 @@ function build<
   Kind extends McpToolKind,
   Ref extends ToolFunctionReference<Kind>,
   ArgsV extends PropertyValidators,
+  ReturnsV extends GenericValidator | undefined,
 >(
   kind: Kind,
-  config: McpToolConfigBase<Ref, ArgsV>,
+  config: McpToolConfigBase<Ref, ArgsV, ReturnsV>,
 ): McpToolDefinition & { fn: Ref; kind: Kind } {
   if (!MCP_TOOL_NAME_PATTERN.test(config.name)) {
     throw new Error(
@@ -141,6 +190,9 @@ function build<
     fn: config.fn,
     functionReference: config.fn,
     inputSchema: convexValidatorToJsonSchema(config.args),
+    ...(config.returns !== undefined
+      ? { outputSchema: convexValidatorToJsonSchema(config.returns) }
+      : {}),
     ...(config.metadata !== undefined ? { metadata: config.metadata } : {}),
   } as McpToolDefinition & { fn: Ref; kind: Kind };
 }
@@ -161,28 +213,46 @@ function build<
 export function defineMcpQuery<
   Ref extends ToolFunctionReference<"query">,
   ArgsV extends PropertyValidators,
+  ReturnsV extends GenericValidator | undefined = undefined,
 >(
-  config: McpToolConfigBase<Ref, ArgsV> & ValidateArgs<Ref, ArgsV>,
+  config: McpToolConfigBase<Ref, ArgsV, ReturnsV> &
+    ValidateArgs<Ref, ArgsV> &
+    ValidateReturns<Ref, ReturnsV>,
 ): McpToolDefinition & { fn: Ref; kind: "query" } {
-  return build("query", config as unknown as McpToolConfigBase<Ref, ArgsV>);
+  return build(
+    "query",
+    config as unknown as McpToolConfigBase<Ref, ArgsV, ReturnsV>,
+  );
 }
 
 export function defineMcpMutation<
   Ref extends ToolFunctionReference<"mutation">,
   ArgsV extends PropertyValidators,
+  ReturnsV extends GenericValidator | undefined = undefined,
 >(
-  config: McpToolConfigBase<Ref, ArgsV> & ValidateArgs<Ref, ArgsV>,
+  config: McpToolConfigBase<Ref, ArgsV, ReturnsV> &
+    ValidateArgs<Ref, ArgsV> &
+    ValidateReturns<Ref, ReturnsV>,
 ): McpToolDefinition & { fn: Ref; kind: "mutation" } {
-  return build("mutation", config as unknown as McpToolConfigBase<Ref, ArgsV>);
+  return build(
+    "mutation",
+    config as unknown as McpToolConfigBase<Ref, ArgsV, ReturnsV>,
+  );
 }
 
 export function defineMcpAction<
   Ref extends ToolFunctionReference<"action">,
   ArgsV extends PropertyValidators,
+  ReturnsV extends GenericValidator | undefined = undefined,
 >(
-  config: McpToolConfigBase<Ref, ArgsV> & ValidateArgs<Ref, ArgsV>,
+  config: McpToolConfigBase<Ref, ArgsV, ReturnsV> &
+    ValidateArgs<Ref, ArgsV> &
+    ValidateReturns<Ref, ReturnsV>,
 ): McpToolDefinition & { fn: Ref; kind: "action" } {
-  return build("action", config as unknown as McpToolConfigBase<Ref, ArgsV>);
+  return build(
+    "action",
+    config as unknown as McpToolConfigBase<Ref, ArgsV, ReturnsV>,
+  );
 }
 
 /**
@@ -235,6 +305,9 @@ export class McpGateway {
       kind: tool.kind,
       functionHandle: handle,
       inputSchema: tool.inputSchema,
+      ...(tool.outputSchema !== undefined
+        ? { outputSchema: tool.outputSchema }
+        : {}),
       ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
     });
   }
@@ -265,6 +338,9 @@ export class McpGateway {
         kind: tool.kind,
         functionHandle: await createFunctionHandle(tool.fn as any),
         inputSchema: tool.inputSchema,
+        ...(tool.outputSchema !== undefined
+          ? { outputSchema: tool.outputSchema }
+          : {}),
         ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
       })),
     );

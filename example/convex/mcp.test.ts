@@ -484,6 +484,122 @@ describe("authorize callback (host's http.ts)", () => {
   });
 });
 
+describe("outputSchema / structuredContent (MCP returns)", () => {
+  test("tools/list includes outputSchema for tools registered with returns", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    const session = await initialize(t);
+
+    const res = await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    });
+    const body = (await res.json()) as {
+      result: {
+        tools: Array<{
+          name: string;
+          outputSchema?: { type?: string };
+        }>;
+      };
+    };
+    const summary = body.result.tools.find(
+      (t) => t.name === "invoices_summary",
+    );
+    expect(summary?.outputSchema).toEqual({
+      type: "object",
+      properties: { total: { type: "number" } },
+      required: ["total"],
+      additionalProperties: false,
+    });
+  });
+
+  test("tools/list omits outputSchema for tools without returns", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+
+    const tAuth = t.withIdentity({ subject: "alice" }) as ReturnType<
+      typeof newTest
+    >;
+    const session = await initialize(tAuth);
+    const res = await tAuth.fetch("/mcp/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "mcp-session-id": session,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
+    });
+    const body = (await res.json()) as {
+      result: {
+        tools: Array<{ name: string; outputSchema?: unknown }>;
+      };
+    };
+    const list = body.result.tools.find((t) => t.name === "invoices_list");
+    // Tools without `returns:` MUST NOT have outputSchema at all
+    // (not null, not {}; spec-strict clients reject those forms).
+    expect(list).toBeDefined();
+    expect("outputSchema" in (list ?? {})).toBe(false);
+  });
+
+  test("tools/call ships structuredContent when outputSchema declared", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    await t.run(async (ctx) => {
+      await ctx.db.insert("invoices", { status: "open", amount: 12 });
+      await ctx.db.insert("invoices", { status: "paid", amount: 7 });
+    });
+
+    const session = await initialize(t);
+    const res = await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "invoices_summary", arguments: {} },
+    });
+    const body = (await res.json()) as {
+      result: {
+        content: Array<{ type: string; text?: string }>;
+        structuredContent?: { total?: number };
+      };
+    };
+    // Both representations: text-JSON for legacy clients ...
+    expect(body.result.content[0]?.type).toBe("text");
+    expect(body.result.content[0]?.text).toContain('"total": 2');
+    // ... and the typed `structuredContent` per MCP 2025-06-18.
+    expect(body.result.structuredContent).toEqual({ total: 2 });
+  });
+
+  test("tools/call omits structuredContent when no outputSchema", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    await t.run(async (ctx) => {
+      await ctx.db.insert("invoices", { status: "open", amount: 1 });
+    });
+
+    const tAuth = t.withIdentity({ subject: "alice" }) as ReturnType<
+      typeof newTest
+    >;
+    const session = await initialize(tAuth);
+    const res = await tAuth.fetch("/mcp/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "mcp-session-id": session,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: "invoices_list", arguments: {} },
+      }),
+    });
+    const body = (await res.json()) as { result: Record<string, unknown> };
+    expect(body.result.content).toBeDefined();
+    expect("structuredContent" in body.result).toBe(false);
+  });
+});
+
 describe("OAuth bridge mode (DCR + AS metadata + resolveIdentity)", () => {
   test("handleClientRegistration returns the configured upstream client_id", async () => {
     const t = newTest();

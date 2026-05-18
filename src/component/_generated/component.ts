@@ -117,6 +117,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           kind: "query" | "mutation" | "action";
           metadata?: any;
           name: string;
+          outputSchema?: any;
         } | null,
         Name
       >;
@@ -133,6 +134,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           kind: "query" | "mutation" | "action";
           metadata?: any;
           name: string;
+          outputSchema?: any;
         }>,
         Name
       >;
@@ -146,6 +148,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           kind: "query" | "mutation" | "action";
           metadata?: any;
           name: string;
+          outputSchema?: any;
         },
         string,
         Name
@@ -161,6 +164,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             kind: "query" | "mutation" | "action";
             metadata?: any;
             name: string;
+            outputSchema?: any;
           }>;
         },
         null,
