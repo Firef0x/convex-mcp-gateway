@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { internalMutation, internalQuery } from "./_generated/server.js";
+import { mutation, query } from "./_generated/server.js";
 
 const sessionValidator = v.object({
   _id: v.id("sessions"),
@@ -21,7 +21,7 @@ const sessionValidator = v.object({
  * the session to a specific user so DELETE can verify the teardown
  * caller matches the creator.
  */
-export const createSession = internalMutation({
+export const createSession = mutation({
   args: {
     sessionId: v.string(),
     protocolVersion: v.string(),
@@ -45,7 +45,7 @@ export const createSession = internalMutation({
  * already terminated; the HTTP handler responds with 404 in that case
  * so the client knows to start a new session per MCP 2025-06-18.
  */
-export const getSession = internalQuery({
+export const getSession = query({
   args: { sessionId: v.string() },
   returns: v.union(sessionValidator, v.null()),
   handler: async (ctx, args) => {
@@ -62,7 +62,7 @@ export const getSession = internalQuery({
  * can distinguish active from idle sessions. Best-effort: failures are
  * non-fatal and the HTTP handler swallows them.
  */
-export const touchSession = internalMutation({
+export const touchSession = mutation({
   args: { sessionId: v.string() },
   returns: v.boolean(),
   handler: async (ctx, args) => {
@@ -101,7 +101,7 @@ const deleteSessionResultValidator = v.union(
  * behaviour for forward-compat; new rows always have the field and
  * always check.
  */
-export const deleteSession = internalMutation({
+export const deleteSession = mutation({
   args: {
     sessionId: v.string(),
     callerIdentitySubject: v.union(v.string(), v.null()),
@@ -137,7 +137,7 @@ export const deleteSession = internalMutation({
  */
 const PRUNE_BATCH = 200;
 
-export const pruneSessions = internalMutation({
+export const pruneSessions = mutation({
   args: { olderThanMs: v.number() },
   returns: v.number(),
   handler: async (ctx, args) => {

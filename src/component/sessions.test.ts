@@ -2,20 +2,20 @@ import { convexTest } from "convex-test";
 import { describe, expect, test, vi } from "vitest";
 import schema from "./schema.js";
 import { modules } from "./setup.test.js";
-import { internal } from "./_generated/api.js";
+import { api } from "./_generated/api.js";
 
 describe("sessions", () => {
   test("createSession + getSession round-trip", async () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
-      const id = await ctx.runMutation(internal.sessions.createSession, {
+      const id = await ctx.runMutation(api.sessions.createSession, {
         sessionId: "deadbeef",
         protocolVersion: "2025-06-18",
         identitySubject: null,
       });
       expect(id).toBeTypeOf("string");
 
-      const session = await ctx.runQuery(internal.sessions.getSession, {
+      const session = await ctx.runQuery(api.sessions.getSession, {
         sessionId: "deadbeef",
       });
       expect(session?.sessionId).toBe("deadbeef");
@@ -29,7 +29,7 @@ describe("sessions", () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
       expect(
-        await ctx.runQuery(internal.sessions.getSession, {
+        await ctx.runQuery(api.sessions.getSession, {
           sessionId: "nope",
         }),
       ).toBeNull();
@@ -42,22 +42,22 @@ describe("sessions", () => {
       // Establish a session, then advance the wall clock and touch it.
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
-      await ctx.runMutation(internal.sessions.createSession, {
+      await ctx.runMutation(api.sessions.createSession, {
         sessionId: "s1",
         protocolVersion: "2025-06-18",
         identitySubject: null,
       });
-      const before = await ctx.runQuery(internal.sessions.getSession, {
+      const before = await ctx.runQuery(api.sessions.getSession, {
         sessionId: "s1",
       });
 
       vi.setSystemTime(new Date("2026-01-01T00:05:00Z"));
-      const touched = await ctx.runMutation(internal.sessions.touchSession, {
+      const touched = await ctx.runMutation(api.sessions.touchSession, {
         sessionId: "s1",
       });
       expect(touched).toBe(true);
 
-      const after = await ctx.runQuery(internal.sessions.getSession, {
+      const after = await ctx.runQuery(api.sessions.getSession, {
         sessionId: "s1",
       });
       expect(after?.lastSeenAt).toBeGreaterThan(before!.lastSeenAt);
@@ -66,7 +66,7 @@ describe("sessions", () => {
 
       // Touching an unknown session is a no-op that reports false.
       expect(
-        await ctx.runMutation(internal.sessions.touchSession, {
+        await ctx.runMutation(api.sessions.touchSession, {
           sessionId: "ghost",
         }),
       ).toBe(false);
@@ -76,22 +76,22 @@ describe("sessions", () => {
   test("deleteSession returns 'deleted' for an anonymous match", async () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
-      await ctx.runMutation(internal.sessions.createSession, {
+      await ctx.runMutation(api.sessions.createSession, {
         sessionId: "tmp",
         protocolVersion: "2025-06-18",
         identitySubject: null,
       });
       expect(
-        await ctx.runMutation(internal.sessions.deleteSession, {
+        await ctx.runMutation(api.sessions.deleteSession, {
           sessionId: "tmp",
           callerIdentitySubject: null,
         }),
       ).toBe("deleted");
       expect(
-        await ctx.runQuery(internal.sessions.getSession, { sessionId: "tmp" }),
+        await ctx.runQuery(api.sessions.getSession, { sessionId: "tmp" }),
       ).toBeNull();
       expect(
-        await ctx.runMutation(internal.sessions.deleteSession, {
+        await ctx.runMutation(api.sessions.deleteSession, {
           sessionId: "tmp",
           callerIdentitySubject: null,
         }),
@@ -102,7 +102,7 @@ describe("sessions", () => {
   test("deleteSession returns 'forbidden' when caller subject mismatches", async () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
-      await ctx.runMutation(internal.sessions.createSession, {
+      await ctx.runMutation(api.sessions.createSession, {
         sessionId: "alice-sess",
         protocolVersion: "2025-06-18",
         identitySubject: "alice",
@@ -110,7 +110,7 @@ describe("sessions", () => {
 
       // Anonymous caller tries to delete alice's session: refused.
       expect(
-        await ctx.runMutation(internal.sessions.deleteSession, {
+        await ctx.runMutation(api.sessions.deleteSession, {
           sessionId: "alice-sess",
           callerIdentitySubject: null,
         }),
@@ -118,7 +118,7 @@ describe("sessions", () => {
 
       // Mallory tries to delete alice's session: also refused.
       expect(
-        await ctx.runMutation(internal.sessions.deleteSession, {
+        await ctx.runMutation(api.sessions.deleteSession, {
           sessionId: "alice-sess",
           callerIdentitySubject: "mallory",
         }),
@@ -126,7 +126,7 @@ describe("sessions", () => {
 
       // Alice herself: deletion goes through.
       expect(
-        await ctx.runMutation(internal.sessions.deleteSession, {
+        await ctx.runMutation(api.sessions.deleteSession, {
           sessionId: "alice-sess",
           callerIdentitySubject: "alice",
         }),
@@ -139,7 +139,7 @@ describe("sessions", () => {
     await t.run(async (ctx) => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
-      await ctx.runMutation(internal.sessions.createSession, {
+      await ctx.runMutation(api.sessions.createSession, {
         sessionId: "old",
         protocolVersion: "2025-06-18",
         identitySubject: null,
@@ -147,22 +147,22 @@ describe("sessions", () => {
 
       // Advance 2 hours; 'old' is now stale, create a 'fresh' session.
       vi.setSystemTime(new Date("2026-01-01T02:00:00Z"));
-      await ctx.runMutation(internal.sessions.createSession, {
+      await ctx.runMutation(api.sessions.createSession, {
         sessionId: "fresh",
         protocolVersion: "2025-06-18",
         identitySubject: null,
       });
 
       // Prune anything older than 1 hour.
-      const deleted = await ctx.runMutation(internal.sessions.pruneSessions, {
+      const deleted = await ctx.runMutation(api.sessions.pruneSessions, {
         olderThanMs: 60 * 60 * 1000,
       });
       expect(deleted).toBe(1);
       expect(
-        await ctx.runQuery(internal.sessions.getSession, { sessionId: "old" }),
+        await ctx.runQuery(api.sessions.getSession, { sessionId: "old" }),
       ).toBeNull();
       expect(
-        await ctx.runQuery(internal.sessions.getSession, { sessionId: "fresh" }),
+        await ctx.runQuery(api.sessions.getSession, { sessionId: "fresh" }),
       ).not.toBeNull();
       vi.useRealTimers();
     });

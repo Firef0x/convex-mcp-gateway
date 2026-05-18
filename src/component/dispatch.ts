@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import type { FunctionHandle } from "convex/server";
-import { internalAction, internalMutation } from "./_generated/server.js";
-import { internal } from "./_generated/api.js";
+import { action, mutation } from "./_generated/server.js";
+import { api, internal } from "./_generated/api.js";
 
 const dispatchResultValidator = v.union(
   v.object({ ok: v.literal(true), data: v.any() }),
@@ -37,7 +37,7 @@ type RegisteredTool = {
  * anonymous calls. Nothing about the policy decision crosses the
  * component boundary.
  */
-export const runTool = internalAction({
+export const runTool = action({
   args: {
     name: v.string(),
     args: v.any(),
@@ -47,7 +47,7 @@ export const runTool = internalAction({
   handler: async (ctx, request) => {
     const start = Date.now();
 
-    const tool = (await ctx.runQuery(internal.registry.getTool, {
+    const tool = (await ctx.runQuery(api.registry.getTool, {
       name: request.name,
     })) as RegisteredTool | null;
     if (!tool) {
@@ -156,7 +156,7 @@ export const runTool = internalAction({
  * work. Hosts invoke via `ctx.runMutation`, one round-trip instead
  * of the previous action-wrapping-mutation pattern.
  */
-export const recordAuthDenial = internalMutation({
+export const recordAuthDenial = mutation({
   args: {
     name: v.string(),
     args: v.any(),

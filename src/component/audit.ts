@@ -1,5 +1,9 @@
 import { v } from "convex/values";
-import { internalMutation, internalQuery } from "./_generated/server.js";
+import {
+  internalMutation,
+  mutation,
+  query,
+} from "./_generated/server.js";
 import { auditOutcomeValidator, toolKindValidator } from "./schema.js";
 
 const auditEntryValidator = v.object({
@@ -17,14 +21,10 @@ const auditEntryValidator = v.object({
 
 /**
  * Component-internal mutation that appends one row to the audit log.
- * `internalMutation` keeps it off the client API surface and forces
- * hosts to go through `gateway.listAuditEntries` (server-side) or
- * call `components.mcpGateway.audit.recordEntry` explicitly via
- * `ctx.runMutation` if they want to log custom audit events. At
- * runtime, the component's `internal.*` and `api.*` references both
- * resolve to the same `anyApi` proxy; the internal marker is a
- * TypeScript-level guard against accidentally exposing it to
- * client-side callers.
+ * Declared as `internalMutation` because only `dispatch.runTool`
+ * (inside this component) ever writes audit entries — hosts that
+ * want to log custom audit events should wrap the public
+ * `gateway.listAuditEntries` reader instead.
  */
 export const recordEntry = internalMutation({
   args: {
@@ -54,7 +54,7 @@ export const recordEntry = internalMutation({
  * silently miss matches when most of the recent prefix doesn't match the
  * outcome (e.g. lots of recent `allowed` entries hiding older `error`s).
  */
-export const listEntries = internalQuery({
+export const listEntries = query({
   args: {
     toolName: v.optional(v.string()),
     outcome: v.optional(auditOutcomeValidator),
@@ -111,7 +111,7 @@ export const listEntries = internalQuery({
  */
 const PRUNE_BATCH = 200;
 
-export const pruneOlderThan = internalMutation({
+export const pruneOlderThan = mutation({
   args: { cutoffMs: v.number() },
   returns: v.number(),
   handler: async (ctx, args) => {

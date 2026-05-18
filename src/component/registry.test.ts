@@ -2,14 +2,14 @@ import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "./schema.js";
 import { modules } from "./setup.test.js";
-import { internal } from "./_generated/api.js";
+import { api } from "./_generated/api.js";
 
 describe("registry", () => {
   test("registerTool inserts and is idempotent on name", async () => {
     const t = convexTest(schema, modules);
 
     await t.run(async (ctx) => {
-      await ctx.runMutation(internal.registry.registerTool, {
+      await ctx.runMutation(api.registry.registerTool, {
         name: "invoices_list",
         description: "first",
         kind: "query",
@@ -17,11 +17,11 @@ describe("registry", () => {
         inputSchema: { type: "object" },
       });
 
-      let tools = await ctx.runQuery(internal.registry.listTools, {});
+      let tools = await ctx.runQuery(api.registry.listTools, {});
       expect(tools).toHaveLength(1);
       expect(tools[0]!.description).toBe("first");
 
-      await ctx.runMutation(internal.registry.registerTool, {
+      await ctx.runMutation(api.registry.registerTool, {
         name: "invoices_list",
         description: "second",
         kind: "query",
@@ -29,7 +29,7 @@ describe("registry", () => {
         inputSchema: { type: "object" },
       });
 
-      tools = await ctx.runQuery(internal.registry.listTools, {});
+      tools = await ctx.runQuery(api.registry.listTools, {});
       expect(tools).toHaveLength(1);
       expect(tools[0]!.description).toBe("second");
       expect(tools[0]!.functionHandle).toBe("fakehandle-2");
@@ -39,7 +39,7 @@ describe("registry", () => {
   test("getTool returns null for unknown names", async () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
-      const tool = await ctx.runQuery(internal.registry.getTool, {
+      const tool = await ctx.runQuery(api.registry.getTool, {
         name: "does-not-exist",
       });
       expect(tool).toBeNull();
@@ -49,7 +49,7 @@ describe("registry", () => {
   test("unregisterTool removes the row and reports whether it existed", async () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
-      await ctx.runMutation(internal.registry.registerTool, {
+      await ctx.runMutation(api.registry.registerTool, {
         name: "tmp_tool",
         description: "tmp",
         kind: "mutation",
@@ -58,18 +58,18 @@ describe("registry", () => {
       });
 
       const removedExisting = await ctx.runMutation(
-        internal.registry.unregisterTool,
+        api.registry.unregisterTool,
         { name: "tmp_tool" },
       );
       expect(removedExisting).toBe(true);
 
       const removedMissing = await ctx.runMutation(
-        internal.registry.unregisterTool,
+        api.registry.unregisterTool,
         { name: "tmp_tool" },
       );
       expect(removedMissing).toBe(false);
 
-      const tools = await ctx.runQuery(internal.registry.listTools, {});
+      const tools = await ctx.runQuery(api.registry.listTools, {});
       expect(tools).toHaveLength(0);
     });
   });
@@ -77,14 +77,14 @@ describe("registry", () => {
   test("internalListTools is callable via internal", async () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
-      await ctx.runMutation(internal.registry.registerTool, {
+      await ctx.runMutation(api.registry.registerTool, {
         name: "a",
         description: "a",
         kind: "query",
         functionHandle: "fakehandle",
         inputSchema: { type: "object" },
       });
-      const tools = await ctx.runQuery(internal.registry.listTools, {});
+      const tools = await ctx.runQuery(api.registry.listTools, {});
       expect(tools).toHaveLength(1);
     });
   });
@@ -93,7 +93,7 @@ describe("registry", () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
       await expect(
-        ctx.runMutation(internal.registry.replaceTools, {
+        ctx.runMutation(api.registry.replaceTools, {
           tools: [
             {
               name: "dup",
@@ -119,7 +119,7 @@ describe("registry", () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
       for (const name of ["one", "two", "three"]) {
-        await ctx.runMutation(internal.registry.registerTool, {
+        await ctx.runMutation(api.registry.registerTool, {
           name,
           description: name,
           kind: "query",
@@ -127,16 +127,16 @@ describe("registry", () => {
           inputSchema: { type: "object" },
         });
       }
-      expect(await ctx.runQuery(internal.registry.listTools, {})).toHaveLength(3);
-      await ctx.runMutation(internal.registry.clearAllTools, {});
-      expect(await ctx.runQuery(internal.registry.listTools, {})).toHaveLength(0);
+      expect(await ctx.runQuery(api.registry.listTools, {})).toHaveLength(3);
+      await ctx.runMutation(api.registry.clearAllTools, {});
+      expect(await ctx.runQuery(api.registry.listTools, {})).toHaveLength(0);
     });
   });
 
   test("registerTool clears metadata when the upsert omits it (db.replace, not patch)", async () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
-      await ctx.runMutation(internal.registry.registerTool, {
+      await ctx.runMutation(api.registry.registerTool, {
         name: "scoped",
         description: "with scopes",
         kind: "query",
@@ -144,19 +144,19 @@ describe("registry", () => {
         inputSchema: { type: "object" },
         metadata: { scopes: ["finance:read"] },
       });
-      let tool = await ctx.runQuery(internal.registry.getTool, { name: "scoped" });
+      let tool = await ctx.runQuery(api.registry.getTool, { name: "scoped" });
       expect(tool?.metadata).toEqual({ scopes: ["finance:read"] });
 
       // Re-register the same name without metadata: the prior scopes must
       // not silently survive (regression for db.patch ignoring missing fields).
-      await ctx.runMutation(internal.registry.registerTool, {
+      await ctx.runMutation(api.registry.registerTool, {
         name: "scoped",
         description: "no longer scoped",
         kind: "query",
         functionHandle: "h",
         inputSchema: { type: "object" },
       });
-      tool = await ctx.runQuery(internal.registry.getTool, { name: "scoped" });
+      tool = await ctx.runQuery(api.registry.getTool, { name: "scoped" });
       expect(tool?.description).toBe("no longer scoped");
       expect(tool?.metadata).toBeUndefined();
     });
@@ -165,7 +165,7 @@ describe("registry", () => {
   test("replaceTools round-trips metadata and clears it when omitted", async () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
-      await ctx.runMutation(internal.registry.replaceTools, {
+      await ctx.runMutation(api.registry.replaceTools, {
         tools: [
           {
             name: "x",
@@ -177,11 +177,11 @@ describe("registry", () => {
           },
         ],
       });
-      let row = await ctx.runQuery(internal.registry.getTool, { name: "x" });
+      let row = await ctx.runQuery(api.registry.getTool, { name: "x" });
       expect(row?.metadata).toEqual({ scopes: ["s"], roles: ["r"] });
 
       // Re-register x without metadata: db.replace must clear it.
-      await ctx.runMutation(internal.registry.replaceTools, {
+      await ctx.runMutation(api.registry.replaceTools, {
         tools: [
           {
             name: "x",
@@ -192,7 +192,7 @@ describe("registry", () => {
           },
         ],
       });
-      row = await ctx.runQuery(internal.registry.getTool, { name: "x" });
+      row = await ctx.runQuery(api.registry.getTool, { name: "x" });
       expect(row?.description).toBe("v2");
       expect(row?.metadata).toBeUndefined();
     });
@@ -202,7 +202,7 @@ describe("registry", () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
       for (const name of ["alpha", "beta", "gamma"]) {
-        await ctx.runMutation(internal.registry.registerTool, {
+        await ctx.runMutation(api.registry.registerTool, {
           name,
           description: "stale",
           kind: "query",
@@ -210,9 +210,9 @@ describe("registry", () => {
           inputSchema: { type: "object" },
         });
       }
-      expect(await ctx.runQuery(internal.registry.listTools, {})).toHaveLength(3);
+      expect(await ctx.runQuery(api.registry.listTools, {})).toHaveLength(3);
 
-      await ctx.runMutation(internal.registry.replaceTools, {
+      await ctx.runMutation(api.registry.replaceTools, {
         tools: [
           {
             name: "beta",
@@ -231,7 +231,7 @@ describe("registry", () => {
         ],
       });
 
-      const after = await ctx.runQuery(internal.registry.listTools, {});
+      const after = await ctx.runQuery(api.registry.listTools, {});
       const names = after.map((t) => t.name).sort();
       expect(names).toEqual(["beta", "delta"]);
       const beta = after.find((t) => t.name === "beta")!;
@@ -245,42 +245,42 @@ describe("registry", () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
       expect(
-        await ctx.runQuery(internal.registry.getOAuthConfig, {}),
+        await ctx.runQuery(api.registry.getOAuthConfig, {}),
       ).toBeNull();
 
-      await ctx.runMutation(internal.registry.setOAuthConfig, {
+      await ctx.runMutation(api.registry.setOAuthConfig, {
         authServerUrl: "https://idp.example.com/",
       });
-      const justAS = await ctx.runQuery(internal.registry.getOAuthConfig, {});
+      const justAS = await ctx.runQuery(api.registry.getOAuthConfig, {});
       expect(justAS).toEqual({
         authServerUrl: "https://idp.example.com/",
         resourceUrl: null,
       });
 
-      await ctx.runMutation(internal.registry.setOAuthConfig, {
+      await ctx.runMutation(api.registry.setOAuthConfig, {
         authServerUrl: "https://idp.example.com/",
         resourceUrl: "https://app.example.com/mcp/",
       });
-      const both = await ctx.runQuery(internal.registry.getOAuthConfig, {});
+      const both = await ctx.runQuery(api.registry.getOAuthConfig, {});
       expect(both).toEqual({
         authServerUrl: "https://idp.example.com/",
         resourceUrl: "https://app.example.com/mcp/",
       });
 
       // Disable discovery again.
-      await ctx.runMutation(internal.registry.setOAuthConfig, {
+      await ctx.runMutation(api.registry.setOAuthConfig, {
         authServerUrl: null,
       });
       expect(
-        await ctx.runQuery(internal.registry.getOAuthConfig, {}),
+        await ctx.runQuery(api.registry.getOAuthConfig, {}),
       ).toBeNull();
 
       // Re-enabling without resourceUrl must NOT resurrect the previously
       // set resourceUrl (regression for db.patch ignoring undefined).
-      await ctx.runMutation(internal.registry.setOAuthConfig, {
+      await ctx.runMutation(api.registry.setOAuthConfig, {
         authServerUrl: "https://idp2.example.com/",
       });
-      const reEnabled = await ctx.runQuery(internal.registry.getOAuthConfig, {});
+      const reEnabled = await ctx.runQuery(api.registry.getOAuthConfig, {});
       expect(reEnabled).toEqual({
         authServerUrl: "https://idp2.example.com/",
         resourceUrl: null,
@@ -292,13 +292,13 @@ describe("registry", () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
       await expect(
-        ctx.runMutation(internal.registry.setOAuthConfig, {
+        ctx.runMutation(api.registry.setOAuthConfig, {
           authServerUrl: "not-a-url",
         }),
       ).rejects.toThrow(/authServerUrl/);
 
       await expect(
-        ctx.runMutation(internal.registry.setOAuthConfig, {
+        ctx.runMutation(api.registry.setOAuthConfig, {
           authServerUrl: "https://idp.example.com/",
           resourceUrl: "also-bad",
         }),
@@ -306,7 +306,7 @@ describe("registry", () => {
 
       // Non-http schemes are also rejected.
       await expect(
-        ctx.runMutation(internal.registry.setOAuthConfig, {
+        ctx.runMutation(api.registry.setOAuthConfig, {
           authServerUrl: "javascript:alert(1)",
         }),
       ).rejects.toThrow(/http or https/);
