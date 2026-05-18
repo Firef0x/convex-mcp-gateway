@@ -144,7 +144,7 @@ Tool registration:
 
 ```ts
 defineMcpMutation({
-  name: "invoices.markPaid",
+  name: "invoices_markPaid",
   description: "Mark an invoice as paid.",
   fn: api.invoices.markPaid,
   args: { id: v.id("invoices") },
@@ -201,7 +201,7 @@ const authorize: McpAuthorizerHandler = async (ctx, { toolName, args, mode }) =>
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) return { allowed: false, reason: "Unauthorized" };
 
-  if (toolName === "invoices.markPaid") {
+  if (toolName === "invoices_markPaid") {
     const inv = await ctx.runQuery(api.invoices.get, {
       id: args.id as Id<"invoices">,
     });
@@ -252,7 +252,7 @@ cannot be transmitted to Convex, so all configuration is declarative):
 ```ts
 // 1. Default: store args verbatim. (metadata.auditArgs implicit true)
 defineMcpMutation({
-  name: "invoices.markPaid",
+  name: "invoices_markPaid",
   fn: api.invoices.markPaid,
   args: { id: v.id("invoices") },
 }),

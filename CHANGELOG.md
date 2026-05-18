@@ -32,6 +32,16 @@
 
 ### Fixed
 
+- `defineMcpQuery` / `defineMcpMutation` / `defineMcpAction` now
+  validate the tool name against `^[a-zA-Z0-9_-]{1,64}$` at
+  registration time and throw a helpful error. MCP clients (notably
+  claude.ai) reject the entire tool catalog when any single tool name
+  violates this regex, even for tools the caller never invokes —
+  catching the bad name at registration is much easier to debug than
+  a silent "couldn't connect" later. Dotted names like
+  `invoices.list` are the common gotcha (mirroring
+  `api.invoices.list` reference style); rename to `invoices_list`.
+  All example tool names renamed accordingly.
 - Mount `/mcp` AND `/mcp/` in the example host and docs. claude.ai
   (and likely other clients) strip the trailing slash from the
   configured server URL before they POST, so a single-path Convex

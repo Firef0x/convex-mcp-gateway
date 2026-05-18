@@ -11,7 +11,7 @@ const gateway = new McpGateway(components.mcpGateway);
 /**
  * Authorize callback used by the example host. Public tools opt in via
  * `metadata.public: true`; everything else needs an identity. The
- * `invoices.markPaid` mutation additionally requires the
+ * `invoices_markPaid` mutation additionally requires the
  * `finance.admin` role to be present in the JWT claims.
  */
 export const authorize: McpAuthorizerHandler = async (ctx, args) => {
@@ -26,7 +26,7 @@ export const authorize: McpAuthorizerHandler = async (ctx, args) => {
     validatorIdentity ?? (await ctx.auth.getUserIdentity().catch(() => null));
   if (!identity) return { allowed: false, reason: "Unauthorized" };
 
-  if (toolName === "invoices.markPaid") {
+  if (toolName === "invoices_markPaid") {
     const idObj = identity as { claims?: unknown; roles?: unknown };
     const claims = (idObj.claims ?? idObj) as { roles?: unknown };
     const roles = claims.roles;

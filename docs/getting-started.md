@@ -62,20 +62,20 @@ export const registerDefaults = internalMutation({
       ctx,
       [
         defineMcpQuery({
-          name: "invoices.summary",
+          name: "invoices_summary",
           description: "Total number of invoices. Public.",
           fn: api.invoices.summary,
           args: {},
           metadata: { public: true },
         }),
         defineMcpQuery({
-          name: "invoices.list",
+          name: "invoices_list",
           description: "List invoices for the authenticated user.",
           fn: api.invoices.list,
           args: { status: v.optional(v.string()) },
         }),
         defineMcpMutation({
-          name: "invoices.markPaid",
+          name: "invoices_markPaid",
           description: "Mark an invoice as paid.",
           fn: api.invoices.markPaid,
           args: { id: v.id("invoices") },
@@ -87,6 +87,12 @@ export const registerDefaults = internalMutation({
   },
 });
 ```
+
+**Naming**: tool names must match `^[a-zA-Z0-9_-]{1,64}$` — letters,
+digits, underscore, hyphen, up to 64 chars. Dotted names like
+`invoices.list` (mirroring Convex's `api.invoices.list` reference
+style) are rejected by most MCP clients and will throw at
+registration time. Use `invoices_list` instead.
 
 `{ replace: true }` makes the registry mirror this list exactly: any tool
 no longer in the array is removed in the same Convex mutation. Without

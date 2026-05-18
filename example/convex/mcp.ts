@@ -26,7 +26,7 @@ export const registerDefaults = internalMutation({
       ctx,
       [
         defineMcpQuery({
-          name: "invoices.list",
+          name: "invoices_list",
           description: "List invoices, optionally filtered by status.",
           fn: api.invoices.list,
           args: {
@@ -36,13 +36,13 @@ export const registerDefaults = internalMutation({
           },
         }),
         defineMcpMutation({
-          name: "invoices.markPaid",
+          name: "invoices_markPaid",
           description: "Mark an invoice as paid.",
           fn: api.invoices.markPaid,
           args: { id: v.id("invoices") },
         }),
         defineMcpQuery({
-          name: "invoices.summary",
+          name: "invoices_summary",
           description: "Return the total number of invoices. Public.",
           fn: api.invoices.summary,
           args: {},

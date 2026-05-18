@@ -58,7 +58,7 @@ test("runs a registered tool and returns its data", async () => {
   });
 
   const result = await t.action(components.mcpGateway.dispatch.runTool, {
-    name: "invoices.summary",
+    name: "invoices_summary",
     args: {},
     auditIdentitySubject: "alice",
   });
@@ -96,7 +96,7 @@ test("recordAuthDenial writes a denied audit row", async () => {
   await t.mutation(internal.mcp.registerDefaults, {});
 
   await t.action(components.mcpGateway.dispatch.recordAuthDenial, {
-    name: "invoices.list",
+    name: "invoices_list",
     args: { status: "open" },
     auditIdentitySubject: null,
     outcome: "denied",
@@ -108,7 +108,7 @@ test("recordAuthDenial writes a denied audit row", async () => {
   const entries = await t.run(async (ctx) =>
     ctx.runQuery(components.mcpGateway.audit.listEntries, {}),
   );
-  expect(entries.find((e) => e.toolName === "invoices.list")).toMatchObject({
+  expect(entries.find((e) => e.toolName === "invoices_list")).toMatchObject({
     outcome: "denied",
     errorCode: -32001,
   });
@@ -176,7 +176,7 @@ test("anonymous tools/list shows only public tools", async () => {
     result: { tools: Array<{ name: string }> };
   };
   expect(body.result.tools.map((tool) => tool.name)).toEqual([
-    "invoices.summary",
+    "invoices_summary",
   ]);
 });
 
@@ -194,7 +194,7 @@ test("anonymous private call returns 401 + WWW-Authenticate", async () => {
     jsonrpc: "2.0",
     id: 3,
     method: "tools/call",
-    params: { name: "invoices.list", arguments: {} },
+    params: { name: "invoices_list", arguments: {} },
   });
   expect(res.status).toBe(401);
   expect(res.headers.get("www-authenticate")).toMatch(/^Bearer /);
@@ -223,9 +223,9 @@ test("admin sees the role-gated mutation", async () => {
     result: { tools: Array<{ name: string }> };
   };
   expect(body.result.tools.map((t) => t.name).sort()).toEqual([
-    "invoices.list",
-    "invoices.markPaid",
-    "invoices.summary",
+    "invoices_list",
+    "invoices_markPaid",
+    "invoices_summary",
   ]);
 });
 ```
@@ -319,7 +319,7 @@ npx @modelcontextprotocol/inspector --cli \
   http://127.0.0.1:3211/mcp/ \
   --transport http \
   --method tools/call \
-  --tool-name notes.count
+  --tool-name notes_count
 ```
 
 What to verify:

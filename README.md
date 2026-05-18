@@ -61,14 +61,14 @@ export const registerDefaults = internalMutation({
       ctx,
       [
         defineMcpQuery({
-          name: "invoices.summary",
+          name: "invoices_summary",
           description: "Public invoice counter.",
           fn: api.invoices.summary,
           args: {},
           metadata: { public: true },
         }),
         defineMcpQuery({
-          name: "invoices.list",
+          name: "invoices_list",
           description: "List invoices for the authenticated user.",
           fn: api.invoices.list,
           args: { status: v.optional(v.string()) },
@@ -130,8 +130,8 @@ curl -X POST "$CONVEX_SITE_URL/mcp/" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 ```
 
-The anonymous client sees only `invoices.summary` (the `public: true`
-tool); calling `invoices.list` without a Bearer returns HTTP 401 with a
+The anonymous client sees only `invoices_summary` (the `public: true`
+tool); calling `invoices_list` without a Bearer returns HTTP 401 with a
 `WWW-Authenticate` header pointing at your discovery endpoint. Any
 spec-compliant MCP client (the official MCP Inspector, IDE plugins,
 agent runtimes) handles the session and OAuth handshakes

@@ -103,6 +103,20 @@ interface McpToolConfigBase<
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * MCP tool names must match `^[a-zA-Z0-9_-]{1,64}$` (letters, digits,
+ * underscore, hyphen; 1-64 chars). Some clients — notably claude.ai's
+ * frontend — reject the entire tool list with a validation error
+ * when any single name violates this, even for tools the caller
+ * never invokes. The MCP spec itself doesn't pin this regex, but
+ * it's the de-facto-enforced pattern across the major clients.
+ *
+ * Common gotcha: dotted names like `notes.list` or `invoices.create`
+ * (mirroring Convex's `api.notes.list` reference style) fail.
+ * Use `notes_list` / `invoices_create` instead.
+ */
+const MCP_TOOL_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
+
 function build<
   Kind extends McpToolKind,
   Ref extends ToolFunctionReference<Kind>,
@@ -111,6 +125,15 @@ function build<
   kind: Kind,
   config: McpToolConfigBase<Ref, ArgsV>,
 ): McpToolDefinition & { fn: Ref; kind: Kind } {
+  if (!MCP_TOOL_NAME_PATTERN.test(config.name)) {
+    throw new Error(
+      `MCP tool name "${config.name}" violates the required pattern ` +
+        `${MCP_TOOL_NAME_PATTERN.source}. Allowed: letters, digits, ` +
+        `underscore, hyphen; 1-64 chars. Dotted names like ` +
+        `"namespace.tool" are not allowed by most MCP clients — ` +
+        `use "namespace_tool" instead.`,
+    );
+  }
   return {
     name: config.name,
     description: config.description,

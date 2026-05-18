@@ -33,7 +33,7 @@ describe("dispatch.runTool", () => {
     });
 
     const result = await t.action(components.mcpGateway.dispatch.runTool, {
-      name: "invoices.summary",
+      name: "invoices_summary",
       args: {},
       auditIdentitySubject: null,
     });
@@ -67,7 +67,7 @@ describe("dispatch.runTool", () => {
     await t.mutation(internal.mcp.registerDefaults, {});
 
     await t.action(components.mcpGateway.dispatch.runTool, {
-      name: "invoices.summary",
+      name: "invoices_summary",
       args: {},
       auditIdentitySubject: "alice",
     });
@@ -75,7 +75,7 @@ describe("dispatch.runTool", () => {
     const entries = await t.run(async (ctx) =>
       ctx.runQuery(components.mcpGateway.audit.listEntries, {}),
     );
-    const row = entries.find((e) => e.toolName === "invoices.summary");
+    const row = entries.find((e) => e.toolName === "invoices_summary");
     expect(row).toBeDefined();
     expect(row?.outcome).toBe("allowed");
     expect(row?.identitySubject).toBe("alice");
@@ -100,7 +100,7 @@ describe("dispatch.runTool", () => {
       });
     });
 
-    // The dispatch will fail because invoices.markPaid expects an `id`,
+    // The dispatch will fail because invoices_markPaid expects an `id`,
     // but the audit row is written either way. We're testing redaction,
     // not success.
     await t.action(components.mcpGateway.dispatch.runTool, {
@@ -134,7 +134,7 @@ describe("dispatch.recordAuthDenial", () => {
     await t.mutation(internal.mcp.registerDefaults, {});
 
     await t.action(components.mcpGateway.dispatch.recordAuthDenial, {
-      name: "invoices.list",
+      name: "invoices_list",
       args: { status: "open" },
       auditIdentitySubject: null,
       outcome: "denied",
@@ -146,7 +146,7 @@ describe("dispatch.recordAuthDenial", () => {
     const entries = await t.run(async (ctx) =>
       ctx.runQuery(components.mcpGateway.audit.listEntries, {}),
     );
-    expect(entries.find((e) => e.toolName === "invoices.list")).toMatchObject({
+    expect(entries.find((e) => e.toolName === "invoices_list")).toMatchObject({
       outcome: "denied",
       errorCode: -32001,
       errorMessage: "Unauthorized",
@@ -310,7 +310,7 @@ describe("HTTP envelope (host-mounted /mcp/)", () => {
         jsonrpc: "2.0",
         id: 2,
         method: "tools/call",
-        params: { name: "invoices.summary", arguments: {} },
+        params: { name: "invoices_summary", arguments: {} },
       },
       { accept: "application/json, text/event-stream" },
     );
@@ -335,7 +335,7 @@ describe("authorize callback (host's http.ts)", () => {
       result: { tools: Array<{ name: string }> };
     };
     expect(body.result.tools.map((tool) => tool.name)).toEqual([
-      "invoices.summary",
+      "invoices_summary",
     ]);
   });
 
@@ -347,7 +347,7 @@ describe("authorize callback (host's http.ts)", () => {
       jsonrpc: "2.0",
       id: 3,
       method: "tools/call",
-      params: { name: "invoices.summary", arguments: {} },
+      params: { name: "invoices_summary", arguments: {} },
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { result: { content: unknown } };
@@ -369,7 +369,7 @@ describe("authorize callback (host's http.ts)", () => {
       jsonrpc: "2.0",
       id: 4,
       method: "tools/call",
-      params: { name: "invoices.list", arguments: {} },
+      params: { name: "invoices_list", arguments: {} },
     });
     expect(res.status).toBe(401);
     const wwwAuth = res.headers.get("www-authenticate") ?? "";
@@ -402,8 +402,8 @@ describe("authorize callback (host's http.ts)", () => {
     };
     // alice has no admin role → markPaid is hidden, list + summary visible.
     expect(body.result.tools.map((tool) => tool.name).sort()).toEqual([
-      "invoices.list",
-      "invoices.summary",
+      "invoices_list",
+      "invoices_summary",
     ]);
   });
 
@@ -434,9 +434,9 @@ describe("authorize callback (host's http.ts)", () => {
       result: { tools: Array<{ name: string }> };
     };
     expect(body.result.tools.map((tool) => tool.name).sort()).toEqual([
-      "invoices.list",
-      "invoices.markPaid",
-      "invoices.summary",
+      "invoices_list",
+      "invoices_markPaid",
+      "invoices_summary",
     ]);
   });
 
@@ -449,14 +449,14 @@ describe("authorize callback (host's http.ts)", () => {
       jsonrpc: "2.0",
       id: 7,
       method: "tools/call",
-      params: { name: "invoices.list", arguments: {} },
+      params: { name: "invoices_list", arguments: {} },
     });
 
     const entries = await t.run(async (ctx) =>
       ctx.runQuery(components.mcpGateway.audit.listEntries, {}),
     );
     const denied = entries.find(
-      (e) => e.toolName === "invoices.list" && e.outcome === "denied",
+      (e) => e.toolName === "invoices_list" && e.outcome === "denied",
     );
     expect(denied).toBeDefined();
     expect(denied?.errorCode).toBe(-32001);
@@ -536,14 +536,14 @@ describe("OAuth bridge mode (DCR + AS metadata + tokenValidator)", () => {
         jsonrpc: "2.0",
         id: 5,
         method: "tools/call",
-        params: { name: "invoices.list", arguments: {} },
+        params: { name: "invoices_list", arguments: {} },
       }),
     });
     expect(res.status).toBe(200);
     const entries = await t.run(async (ctx) =>
       ctx.runQuery(components.mcpGateway.audit.listEntries, {}),
     );
-    const row = entries.find((e) => e.toolName === "invoices.list");
+    const row = entries.find((e) => e.toolName === "invoices_list");
     expect(row?.identitySubject).toBe("validator-resolved-sub");
   });
 });

@@ -10,7 +10,7 @@ describe("registry", () => {
 
     await t.run(async (ctx) => {
       await ctx.runMutation(api.registry.registerTool, {
-        name: "invoices.list",
+        name: "invoices_list",
         description: "first",
         kind: "query",
         functionHandle: "fakehandle-1",
@@ -22,7 +22,7 @@ describe("registry", () => {
       expect(tools[0]!.description).toBe("first");
 
       await ctx.runMutation(api.registry.registerTool, {
-        name: "invoices.list",
+        name: "invoices_list",
         description: "second",
         kind: "query",
         functionHandle: "fakehandle-2",

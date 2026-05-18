@@ -60,10 +60,10 @@ export const recentAudit = query({
 Filters:
 
 ```ts
-gateway.listAuditEntries(ctx, { toolName: "invoices.markPaid", limit: 100 });
+gateway.listAuditEntries(ctx, { toolName: "invoices_markPaid", limit: 100 });
 gateway.listAuditEntries(ctx, { outcome: "denied", limit: 100 });
 gateway.listAuditEntries(ctx, {
-  toolName: "invoices.markPaid",
+  toolName: "invoices_markPaid",
   outcome: "error",
   limit: 50,
 });
@@ -84,7 +84,7 @@ all declarative (functions can't be transmitted to Convex):
 ```ts
 // 1. Default: store args verbatim. (omit metadata.auditArgs)
 defineMcpMutation({
-  name: "invoices.markPaid",
+  name: "invoices_markPaid",
   fn: api.invoices.markPaid,
   args: { id: v.id("invoices") },
 }),
