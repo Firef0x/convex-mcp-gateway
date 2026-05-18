@@ -157,9 +157,6 @@ the full walkthrough.
   pruning
 - **[Testing](./docs/testing.md)** — convex-test patterns, identity
   injection, swappable authorizers
-- **[Follow-ups](./docs/follow-ups.md)** — deferred items from the
-  most recent code review (Convex internal refactor, session identity
-  binding, wire error sanitization, remaining test coverage)
 
 ## Design choices, briefly
 
