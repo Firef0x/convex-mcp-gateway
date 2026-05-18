@@ -311,12 +311,12 @@ npx convex dev --once
 npx convex run mcp:registerDefaults
 # Terminal 3: smoke tests
 npx @modelcontextprotocol/inspector --cli \
-  http://127.0.0.1:3211/mcp/ \
+  http://127.0.0.1:3311/mcp/ \
   --transport http \
   --method tools/list
 
 npx @modelcontextprotocol/inspector --cli \
-  http://127.0.0.1:3211/mcp/ \
+  http://127.0.0.1:3311/mcp/ \
   --transport http \
   --method tools/call \
   --tool-name notes_count

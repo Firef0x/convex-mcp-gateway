@@ -91,32 +91,42 @@ defineMcpMutation({
 
 // 2. Drop args entirely (audit row still records caller, outcome, duration).
 defineMcpMutation({
-  name: "secrets.import",
+  name: "secrets_import",
   fn: api.secrets.import,
   args: { blob: v.string() },
   metadata: { auditArgs: false },
 }),
 
-// 3. Field-level redaction: listed top-level keys become "[redacted]".
+// 3. Field-level redaction. Each entry is a dotted path: top-level
+//    keys like "password" redact the matching property; nested paths
+//    like "credentials.token" walk into nested objects and redact at
+//    the leaf. Arrays and missing intermediate keys are passed
+//    through unchanged (no insertion).
 defineMcpMutation({
-  name: "users.create",
+  name: "users_create",
   fn: api.users.create,
-  args: { email: v.string(), password: v.string(), name: v.string() },
-  metadata: { auditArgs: { redact: ["password"] } },
+  args: {
+    email: v.string(),
+    password: v.string(),
+    credentials: v.optional(v.object({ token: v.string() })),
+  },
+  metadata: {
+    auditArgs: { redact: ["password", "credentials.token"] },
+  },
 }),
 ```
 
-Field-level redaction is shallow (top-level keys only). For deeper or
-shape-preserving transformation (e.g. truncate a long string, hash a
-PII field), use `auditArgs: false` and write a richer summary into your
-own table.
+For shape-preserving transformation (e.g. truncate a long string,
+hash a PII field), use `auditArgs: false` and write a richer summary
+into your own table.
 
 ## Retention / pruning
 
 The component does not prune the audit table on its own; the host
-schedules a periodic prune via `gateway.pruneAuditEntries`. The
-component walks its own table once and drops everything older than the
-cutoff:
+schedules a periodic prune via `gateway.pruneAuditEntries`. Each
+call deletes up to ~200 rows in one mutation (bounded to stay
+inside Convex's per-mutation read/write limits) and returns the
+deleted count, so the caller loops until it returns `0`:
 
 ```ts
 // convex/audit.ts
@@ -130,9 +140,15 @@ export const runPrune = internalMutation({
   args: {},
   handler: async (ctx) => {
     const RETAIN_30_DAYS = 30 * 24 * 60 * 60 * 1000;
-    const deleted = await gateway.pruneAuditEntries(ctx, RETAIN_30_DAYS);
-    console.info(`audit cleanup: pruned ${deleted} entries`);
-    return deleted;
+    let total = 0;
+    // Drain until pruneAuditEntries returns 0.
+    for (;;) {
+      const n = await gateway.pruneAuditEntries(ctx, RETAIN_30_DAYS);
+      total += n;
+      if (n === 0) break;
+    }
+    console.info(`audit cleanup: pruned ${total} entries`);
+    return total;
   },
 });
 ```
@@ -152,10 +168,11 @@ crons.daily(
 export default crons;
 ```
 
-For very large tables the prune walk is O(n) and runs in a single
-mutation; if your `audit` table has millions of rows, run a paginated
-prune across multiple mutations (the public `pruneOlderThan` mutation
-returns the deleted count so you can loop until it returns zero).
+If a single cron tick can't drain the backlog (very busy
+deployment, long retention window followed by aggressive shortening),
+chain a follow-up via `ctx.scheduler.runAfter(0, internal.audit.runPrune, {})`
+inside the loop above. The per-call batch is fixed; calling more
+often is the right knob.
 
 ## Privacy considerations
 

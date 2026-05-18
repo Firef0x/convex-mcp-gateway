@@ -100,14 +100,14 @@ Tool registration:
 
 ```ts
 defineMcpQuery({
-  name: "stats.public",
+  name: "stats_public",
   description: "Public counters.",
   fn: api.stats.public,
   args: {},
   metadata: { public: true },
 }),
 defineMcpQuery({
-  name: "stats.private",
+  name: "stats_private",
   description: "Per-user counters.",
   fn: api.stats.private,
   args: {},
@@ -259,15 +259,18 @@ defineMcpMutation({
 
 // 2. Drop args entirely.
 defineMcpMutation({
-  name: "secrets.import",
+  name: "secrets_import",
   fn: api.secrets.import,
   args: { blob: v.string() },
   metadata: { auditArgs: false },
 }),
 
-// 3. Field-level redaction (top-level keys only).
+// 3. Field-level redaction. Dotted paths walk nested objects:
+//    "credentials.token" replaces the inner `token` leaving the
+//    rest of `credentials` intact. Missing intermediate keys and
+//    arrays are passed through unchanged.
 defineMcpMutation({
-  name: "users.create",
+  name: "users_create",
   fn: api.users.create,
   args: { email: v.string(), password: v.string(), name: v.string() },
   metadata: { auditArgs: { redact: ["password"] } },

@@ -30,8 +30,8 @@ pnpm test
 pnpm lint
 ```
 
-`pnpm check` runs all four (codegen + typecheck + test) but the codegen
-step requires a running local backend.
+`pnpm check` runs all four (codegen + typecheck + test + lint) but the
+codegen step requires a running local backend.
 
 ## Releasing
 
@@ -73,8 +73,12 @@ User-facing changes need a docs update. The relevant files live in
   `docs/architecture.md`
 - Audit-log shape change → `docs/audit-log.md`
 
-Keep diagrams as inline mermaid in the markdown so GitHub renders them
-without extra tooling.
+Diagrams live as editorial-styled SVGs in `docs/diagrams/`, referenced
+from the markdown via `![alt](./diagrams/foo.svg)`. The standalone
+HTML wrappers (`docs/diagrams/*.html`) provide a print-friendly view.
+SVGs are hand-authored; keep them small (no embedded fonts, no
+gradients beyond what's already in use) and check both the inline-in-
+markdown render and the HTML wrapper before pushing.
 
 ## Commit messages
 

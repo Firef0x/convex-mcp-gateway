@@ -5,7 +5,7 @@
 If you believe you have found a security vulnerability in
 `@tfohlmeister/convex-mcp-gateway`, **please do not open a public GitHub issue**.
 
-Instead, email the maintainers at <thorben@fohlmeister.com> with:
+Instead, email the maintainers at <thorben@fohlm.com> with:
 
 - A description of the issue and its impact
 - Steps to reproduce, or a proof of concept
@@ -55,9 +55,14 @@ worth understanding when evaluating its security posture:
 ## Known limitations vs. the MCP and OAuth specs
 
 - **No authorization server is built in (yet).** Hosts BYO their AS for
-  Bearer-token issuance. See [docs/oauth.md](./docs/oauth.md).
-- **No streamable-HTTP transport (yet).** Only single-shot JSON-RPC
-  POST is supported. SSE / `Mcp-Session-Id` are on the roadmap.
+  Bearer-token issuance. See [docs/oauth.md](./docs/oauth.md). An
+  optional OAuth-bridge mode wraps an upstream IdP's metadata and
+  proxies Dynamic Client Registration; see
+  [docs/oauth-bridge.md](./docs/oauth-bridge.md).
+- **Sessions table is unbounded by default.** Streamable-HTTP creates a
+  row per `initialize`. Clients that disconnect without DELETE leave
+  rows behind; schedule `gateway.pruneSessions(ctx, idleMs)` from a
+  cron to bound growth.
 - **No rate limiting in the component.** Combine with
   [`@convex-dev/rate-limiter`](https://www.npmjs.com/package/@convex-dev/rate-limiter)
   in your authorizer for public tools.

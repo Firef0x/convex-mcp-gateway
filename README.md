@@ -4,7 +4,7 @@
 > MCP tools. Bring your own JWT issuer, declare scopes/roles per tool,
 > get an audit log and OAuth 2.1 protected-resource discovery for free.
 
-[![tests](https://github.com/your-org/convex-mcp-gateway/actions/workflows/test.yml/badge.svg)](https://github.com/your-org/convex-mcp-gateway/actions/workflows/test.yml)
+[![tests](https://github.com/tfohlmeister/convex-mcp-gateway/actions/workflows/test.yml/badge.svg)](https://github.com/tfohlmeister/convex-mcp-gateway/actions/workflows/test.yml)
 [![npm](https://img.shields.io/npm/v/@tfohlmeister/convex-mcp-gateway.svg)](https://www.npmjs.com/package/@tfohlmeister/convex-mcp-gateway)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
@@ -120,11 +120,13 @@ npx convex run mcp:registerDefaults
 # Talk to it (Streamable HTTP — initialize first, then send commands).
 SESSION=$(curl -sSD - -X POST "$CONVEX_SITE_URL/mcp/" \
   -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
   | awk '/^[Mm]cp-[Ss]ession-[Ii]d:/ {print $2}' | tr -d '\r')
 
 curl -X POST "$CONVEX_SITE_URL/mcp/" \
   -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
   -H "mcp-session-id: $SESSION" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 ```
@@ -155,6 +157,9 @@ the full walkthrough.
   pruning
 - **[Testing](./docs/testing.md)** — convex-test patterns, identity
   injection, swappable authorizers
+- **[Follow-ups](./docs/follow-ups.md)** — deferred items from the
+  most recent code review (Convex internal refactor, session identity
+  binding, wire error sanitization, remaining test coverage)
 
 ## Design choices, briefly
 
@@ -209,9 +214,9 @@ Phase 1 (in progress):
 - ✅ Audit log with per-tool `auditArgs: false` opt-out
 - ✅ `defineMcp{Query,Mutation,Action}` typesafe helpers
 - ✅ Convex validator → JSON Schema (covers all standard types)
-- ⏳ Streamable-HTTP transport (SSE + `Mcp-Session-Id`)
-- ⏳ Audit pruning API (`gateway.pruneAuditEntries`)
-- ⏳ Field-level audit redaction hook (`redactArgs`)
+- ✅ Streamable-HTTP transport (SSE + `Mcp-Session-Id`)
+- ✅ Audit pruning API (`gateway.pruneAuditEntries`)
+- ✅ Field-level audit redaction (`metadata.auditArgs.redact`)
 - ⏳ Real-client smoke test (MCP Inspector + one IDE integration)
 - ⏳ NPM 0.1.0 release
 

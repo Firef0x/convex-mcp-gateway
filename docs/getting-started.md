@@ -280,12 +280,14 @@ pnpm local:start                      # in one shell
 # in another shell:
 npx convex dev --once
 npx convex run mcp:registerDefaults
-SESSION=$(curl -sSD - -X POST http://127.0.0.1:3211/mcp/ \
+SESSION=$(curl -sSD - -X POST http://127.0.0.1:3311/mcp/ \
   -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
   | awk '/^[Mm]cp-[Ss]ession-[Ii]d:/ {print $2}' | tr -d '\r')
-curl http://127.0.0.1:3211/mcp/ \
+curl http://127.0.0.1:3311/mcp/ \
   -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
   -H "mcp-session-id: $SESSION" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 ```
