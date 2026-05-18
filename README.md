@@ -104,9 +104,13 @@ const http = httpRouter();
 const mcp = httpAction(async (ctx, req) =>
   gateway.handleMcpRequest(ctx, req, { authorize }),
 );
-http.route({ path: "/mcp/", method: "POST", handler: mcp });
-http.route({ path: "/mcp/", method: "GET", handler: mcp });
-http.route({ path: "/mcp/", method: "DELETE", handler: mcp });
+// Mount both /mcp/ and /mcp — some clients (claude.ai) strip the
+// trailing slash from the configured URL before POSTing.
+for (const path of ["/mcp/", "/mcp"]) {
+  http.route({ path, method: "POST", handler: mcp });
+  http.route({ path, method: "GET", handler: mcp });
+  http.route({ path, method: "DELETE", handler: mcp });
+}
 export default http;
 ```
 
@@ -144,6 +148,10 @@ the full walkthrough.
   `mode: "list"` vs `"call"`, scope/role recipes
 - **[OAuth 2.1 setup](./docs/oauth.md)** — RFC 9728 discovery, host-side
   mount, multi-tenant
+- **[OAuth bridge mode](./docs/oauth-bridge.md)** — opt-in DCR + AS
+  metadata wrap + userinfo token validation, for browser MCP clients
+  (claude.ai) against IdPs that don't support Dynamic Client
+  Registration (Pocket-ID, etc.)
 - **[Audit log](./docs/audit-log.md)** — reading, filtering, redacting,
   pruning
 - **[Testing](./docs/testing.md)** — convex-test patterns, identity

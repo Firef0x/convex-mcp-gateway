@@ -154,9 +154,14 @@ const http = httpRouter();
 const mcpHandler = httpAction(async (ctx, request) =>
   gateway.handleMcpRequest(ctx, request, { authorize }),
 );
-http.route({ path: "/mcp/", method: "POST", handler: mcpHandler });
-http.route({ path: "/mcp/", method: "GET", handler: mcpHandler });
-http.route({ path: "/mcp/", method: "DELETE", handler: mcpHandler });
+// Mount both `/mcp/` and `/mcp`. Some MCP clients (e.g. claude.ai)
+// strip the trailing slash from the configured server URL before
+// POSTing, so a single-path mount silently 404s real traffic.
+for (const path of ["/mcp/", "/mcp"]) {
+  http.route({ path, method: "POST", handler: mcpHandler });
+  http.route({ path, method: "GET", handler: mcpHandler });
+  http.route({ path, method: "DELETE", handler: mcpHandler });
+}
 
 export default http;
 ```

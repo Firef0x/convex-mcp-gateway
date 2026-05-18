@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+### Added (OAuth bridge mode)
+
+- Three opt-in helpers for hosts whose upstream IdP doesn't support
+  Dynamic Client Registration (Pocket-ID, plain OIDC providers, some
+  older Authentik/Keycloak setups). Lets browser MCP clients
+  (claude.ai, Inspector) complete the OAuth flow against
+  non-DCR IdPs.
+  - `gateway.serveAuthorizationServerMetadata(ctx, req, options)`:
+    RFC 8414 metadata that wraps an upstream's openid-configuration
+    and substitutes the host's own `registration_endpoint`. In-proc
+    1h cache. `overrides` field lets the host patch any returned
+    field (commonly `issuer` to match upstream token claims).
+  - `gateway.handleClientRegistration(ctx, req, options)`: stateless
+    RFC 7591 DCR endpoint returning a fixed pre-registered upstream
+    `client_id` for every request. Required
+    `allowedRedirectPatterns` enforces an allowlist to prevent
+    open-redirect attacks.
+  - `tokenValidator` option on `handleMcpRequest`: host-supplied
+    callback typically calling the upstream's userinfo endpoint,
+    enabling opaque-token validation (most IdPs default to opaque
+    tokens). When set, replaces Convex's local JWT validation
+    entirely.
+  - `args.identity` plumbed into the authorize callback so it works
+    in both pure-JWT and bridge modes without re-fetching identity.
+- New `docs/oauth-bridge.md` walks through the bridge pattern with
+  a Pocket-ID concrete example plus debugged pitfalls (trailing-slash
+  URL normalisation, issuer mismatch, hardcoded client scopes, etc.).
+
+### Fixed
+
+- Mount `/mcp` AND `/mcp/` in the example host and docs. claude.ai
+  (and likely other clients) strip the trailing slash from the
+  configured server URL before they POST, so a single-path Convex
+  mount silently 404s real traffic. Discovered while integrating
+  the playground with claude.ai Custom Connectors.
+- `handleMcpRequest` no longer 500s when Convex's
+  `ctx.auth.getUserIdentity()` throws on an iss/aud mismatch. The
+  throw is now caught and treated as anonymous, so unknown-token
+  callers get a clean 401 + WWW-Authenticate (which lets the
+  client retry the OAuth handshake) instead of an HTTP 500.
+- Browser MCP clients now work: `handleMcpRequest` gained a `cors`
+  option (`true` / origin string(s) / matcher), short-circuits
+  OPTIONS preflight with correct CORS headers, and exposes
+  `Mcp-Session-Id` via `Access-Control-Expose-Headers`.
+  `serveProtectedResourceMetadata` always emits permissive CORS
+  (RFC 9728 §3 metadata is public anyway).
+
 ### Breaking changes
 
 - **Authorize is now a JS callback, not a registered Convex query.** The

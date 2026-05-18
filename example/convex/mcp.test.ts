@@ -240,6 +240,22 @@ describe("HTTP envelope (host-mounted /mcp/)", () => {
     expect(res.headers.get("allow")).toContain("POST");
   });
 
+  test("POST /mcp (no trailing slash) also works", async () => {
+    const t = newTest();
+    const res = await t.fetch("/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18" },
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("mcp-session-id")).toMatch(/^[0-9a-f]{32}$/);
+  });
+
   test("OPTIONS preflight returns CORS headers when cors: true", async () => {
     const t = newTest();
     const res = await t.fetch("/mcp/", {

@@ -61,12 +61,20 @@ const mcpHandler = httpAction(async (ctx, request) =>
     tokenValidator,
   }),
 );
-http.route({ path: "/mcp/", method: "POST", handler: mcpHandler });
-http.route({ path: "/mcp/", method: "GET", handler: mcpHandler });
-http.route({ path: "/mcp/", method: "DELETE", handler: mcpHandler });
-// CORS preflight: browser MCP clients (e.g. claude.ai) issue an
-// OPTIONS request before each cross-origin call.
-http.route({ path: "/mcp/", method: "OPTIONS", handler: mcpHandler });
+// Mount BOTH /mcp/ and /mcp (no trailing slash). claude.ai (and
+// likely other clients) normalise the configured server URL by
+// stripping the trailing slash before they POST, even when the user
+// typed the slash explicitly. Convex's exact-path routing matches
+// /mcp ≠ /mcp/, so a single-route deployment silently 404s those
+// calls and the OAuth flow appears to complete but the connector
+// "won't connect" — debugged the hard way.
+for (const path of ["/mcp/", "/mcp"]) {
+  http.route({ path, method: "POST", handler: mcpHandler });
+  http.route({ path, method: "GET", handler: mcpHandler });
+  http.route({ path, method: "DELETE", handler: mcpHandler });
+  // CORS preflight for browser MCP clients.
+  http.route({ path, method: "OPTIONS", handler: mcpHandler });
+}
 
 const discoveryHandler = httpAction(async (ctx, request) =>
   gateway.serveProtectedResourceMetadata(ctx, request),
