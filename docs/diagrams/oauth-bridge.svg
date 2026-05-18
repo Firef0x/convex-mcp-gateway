@@ -1,0 +1,247 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 700"
+     font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+  <defs>
+    <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="0.9" fill="rgba(11,13,11,0.10)"/>
+    </pattern>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#52534e"/>
+    </marker>
+    <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#f7591f"/>
+    </marker>
+    <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#1a70c7"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#f5f4ed"/>
+  <rect width="100%" height="100%" fill="url(#dots)" opacity="0.55"/>
+
+  <!-- ================================ -->
+  <!-- LIFELINES                         -->
+  <!-- Lifeline x-coords:                -->
+  <!--   C  (MCP Client) @ 140           -->
+  <!--   B  (Bridge / host) @ 520        -->
+  <!--   U  (Upstream IdP) @ 900         -->
+  <!-- ================================ -->
+  <line x1="140" y1="124" x2="140" y2="640"
+        stroke="rgba(11,13,11,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+  <line x1="520" y1="124" x2="520" y2="640"
+        stroke="rgba(11,13,11,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+  <line x1="900" y1="124" x2="900" y2="640"
+        stroke="rgba(11,13,11,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+
+  <!-- Phase eyebrows in the left margin -->
+  <text x="36" y="172" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" letter-spacing="1.5">1 · DISCOVER</text>
+  <text x="36" y="304" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" letter-spacing="1.5">2 · DCR</text>
+  <text x="36" y="412" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" letter-spacing="1.5">3 · OAUTH</text>
+  <text x="36" y="544" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" letter-spacing="1.5">4 · DISPATCH</text>
+
+  <!-- Phase dividers (faint horizontal lines) -->
+  <line x1="120" y1="148" x2="1040" y2="148" stroke="rgba(11,13,11,0.05)" stroke-width="0.8"/>
+  <line x1="120" y1="280" x2="1040" y2="280" stroke="rgba(11,13,11,0.05)" stroke-width="0.8"/>
+  <line x1="120" y1="388" x2="1040" y2="388" stroke="rgba(11,13,11,0.05)" stroke-width="0.8"/>
+  <line x1="120" y1="520" x2="1040" y2="520" stroke="rgba(11,13,11,0.05)" stroke-width="0.8"/>
+
+  <!-- ================================ -->
+  <!-- ARROWS                            -->
+  <!-- (drawn before activation bars)    -->
+  <!-- ================================ -->
+
+  <!-- 1. C → B: GET .well-known/oauth-protected-resource -->
+  <line x1="140" y1="184" x2="520" y2="184"
+        stroke="#1a70c7" stroke-width="1.4" marker-end="url(#arrow-link)"/>
+  <!-- 2. B ⇢ C: { authorization_servers: [<host>] } -->
+  <line x1="520" y1="208" x2="140" y2="208"
+        stroke="#1a70c7" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow-link)"/>
+  <!-- 3. C → B: GET .well-known/oauth-authorization-server -->
+  <line x1="140" y1="236" x2="520" y2="236"
+        stroke="#1a70c7" stroke-width="1.4" marker-end="url(#arrow-link)"/>
+  <!-- 4. B ⇢ C (FOCAL): metadata with our registration_endpoint -->
+  <line x1="520" y1="260" x2="140" y2="260"
+        stroke="#f7591f" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#arrow-accent)"/>
+
+  <!-- 5. C → B (FOCAL): POST /oauth/register -->
+  <line x1="140" y1="320" x2="520" y2="320"
+        stroke="#f7591f" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
+  <!-- 6. B ⇢ C: { client_id: <pre-registered upstream id> } -->
+  <line x1="520" y1="356" x2="140" y2="356"
+        stroke="#52534e" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+
+  <!-- 7. C → U: OAuth code flow (authorize + token, DIRECT, skips bridge) -->
+  <line x1="140" y1="424" x2="900" y2="424"
+        stroke="#52534e" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <!-- 8. U ⇢ C: access_token (opaque) -->
+  <line x1="900" y1="464" x2="140" y2="464"
+        stroke="#52534e" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+
+  <!-- 9. C → B: POST /mcp + Bearer -->
+  <line x1="140" y1="560" x2="520" y2="560"
+        stroke="#1a70c7" stroke-width="1.4" marker-end="url(#arrow-link)"/>
+  <!-- 10. B → U (FOCAL): tokenValidator → GET /userinfo + Bearer -->
+  <line x1="520" y1="588" x2="900" y2="588"
+        stroke="#f7591f" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
+  <!-- 11. U ⇢ B: { sub, email, groups, ... } -->
+  <line x1="900" y1="612" x2="520" y2="612"
+        stroke="#52534e" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+  <!-- 12. B ⇢ C: JSON-RPC result -->
+  <line x1="520" y1="636" x2="140" y2="636"
+        stroke="#1a70c7" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow-link)"/>
+
+  <!-- ================================ -->
+  <!-- ARROW LABELS (with paper masks)   -->
+  <!-- ================================ -->
+
+  <rect x="184" y="172" width="292" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="330" y="180" fill="#1a70c7" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">GET .WELL-KNOWN/OAUTH-PROTECTED-RESOURCE</text>
+
+  <rect x="220" y="200" width="220" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="330" y="208" fill="#1a70c7" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">authorization_servers: [&lt;host&gt;]</text>
+
+  <rect x="184" y="224" width="292" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="330" y="232" fill="#1a70c7" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">GET .WELL-KNOWN/OAUTH-AUTHORIZATION-SERVER</text>
+
+  <rect x="184" y="252" width="292" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="330" y="260" fill="#f7591f" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">registration_endpoint = host/oauth/register</text>
+
+  <rect x="232" y="308" width="196" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="330" y="316" fill="#f7591f" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">POST /OAUTH/REGISTER · DCR</text>
+
+  <rect x="220" y="344" width="220" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="330" y="352" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">client_id = upstream pre-registered</text>
+
+  <rect x="416" y="412" width="208" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="520" y="420" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">OAUTH CODE FLOW · DIRECT</text>
+
+  <rect x="448" y="452" width="144" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="520" y="460" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">ACCESS_TOKEN</text>
+
+  <rect x="240" y="548" width="180" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="330" y="556" fill="#1a70c7" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">POST /mcp · BEARER</text>
+
+  <rect x="620" y="576" width="200" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="710" y="584" fill="#f7591f" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">tokenValidator → /userinfo</text>
+
+  <rect x="620" y="600" width="200" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="710" y="608" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">{ sub, email, groups, … }</text>
+
+  <rect x="240" y="624" width="180" height="12" rx="2" fill="#f5f4ed"/>
+  <text x="330" y="632" fill="#1a70c7" font-size="8"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">JSON-RPC RESULT</text>
+
+  <!-- ================================ -->
+  <!-- LIFELINE HEADER BOXES             -->
+  <!-- ================================ -->
+
+  <!-- MCP Client (external, muted) -->
+  <rect x="60" y="52" width="160" height="72" rx="6" fill="#f5f4ed"/>
+  <rect x="60" y="52" width="160" height="72" rx="6"
+        fill="rgba(82,83,78,0.10)" stroke="#65655c" stroke-width="1"/>
+  <rect x="68" y="60" width="32" height="12" rx="2" fill="transparent"
+        stroke="rgba(101,101,92,0.40)" stroke-width="0.8"/>
+  <text x="84" y="69" fill="#65655c" font-size="7"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">EXT</text>
+  <text x="140" y="92" fill="#0b0d0b" font-size="12" font-weight="600"
+        text-anchor="middle">MCP Client</text>
+  <text x="140" y="108" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">any MCP-compliant</text>
+
+  <!-- Bridge / Host (FOCAL coral — this is the entire diagram subject) -->
+  <rect x="440" y="52" width="160" height="72" rx="6" fill="#f5f4ed"/>
+  <rect x="440" y="52" width="160" height="72" rx="6"
+        fill="rgba(247,89,31,0.08)" stroke="#f7591f" stroke-width="1.2"/>
+  <rect x="448" y="60" width="56" height="12" rx="2" fill="transparent"
+        stroke="rgba(247,89,31,0.50)" stroke-width="0.8"/>
+  <text x="476" y="69" fill="#f7591f" font-size="7"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">HOST · BRIDGE</text>
+  <text x="520" y="92" fill="#0b0d0b" font-size="12" font-weight="600"
+        text-anchor="middle">Gateway</text>
+  <text x="520" y="108" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">/mcp + DCR + AS metadata</text>
+
+  <!-- Upstream IdP (external, muted) -->
+  <rect x="820" y="52" width="160" height="72" rx="6" fill="#f5f4ed"/>
+  <rect x="820" y="52" width="160" height="72" rx="6"
+        fill="rgba(82,83,78,0.10)" stroke="#65655c" stroke-width="1"/>
+  <rect x="828" y="60" width="32" height="12" rx="2" fill="transparent"
+        stroke="rgba(101,101,92,0.40)" stroke-width="0.8"/>
+  <text x="844" y="69" fill="#65655c" font-size="7"
+        font-family="ui-monospace, monospace" text-anchor="middle"
+        letter-spacing="0.7">EXT</text>
+  <text x="900" y="92" fill="#0b0d0b" font-size="12" font-weight="600"
+        text-anchor="middle">Upstream IdP</text>
+  <text x="900" y="108" fill="#52534e" font-size="9"
+        font-family="ui-monospace, monospace" text-anchor="middle">no DCR · authorize · token · userinfo</text>
+
+  <!-- ================================ -->
+  <!-- Editorial aside                   -->
+  <!-- placed in the empty gap between   -->
+  <!-- phase 3's access_token return     -->
+  <!-- and phase 4's divider             -->
+  <!-- ================================ -->
+  <text x="200" y="492" fill="#52534e" font-size="11"
+        font-style="italic" font-family="Georgia, 'Times New Roman', serif">phase 3 is direct between client and IdP. The bridge never sees credentials.</text>
+
+  <!-- ================================ -->
+  <!-- LEGEND                            -->
+  <!-- ================================ -->
+  <line x1="40" y1="660" x2="1040" y2="660"
+        stroke="rgba(11,13,11,0.10)" stroke-width="0.8"/>
+  <text x="40" y="676" fill="#52534e" font-size="8"
+        font-family="ui-monospace, monospace" letter-spacing="1.5">LEGEND</text>
+
+  <rect x="40" y="688" width="14" height="10" rx="2"
+        fill="rgba(247,89,31,0.08)" stroke="#f7591f" stroke-width="1"/>
+  <text x="60" y="696" fill="#52534e" font-size="9">Bridge endpoints (focal)</text>
+
+  <rect x="240" y="688" width="14" height="10" rx="2"
+        fill="rgba(82,83,78,0.10)" stroke="#65655c" stroke-width="1"/>
+  <text x="260" y="696" fill="#52534e" font-size="9">External (client, IdP)</text>
+
+  <line x1="430" y1="694" x2="458" y2="694"
+        stroke="#1a70c7" stroke-width="1.4" marker-end="url(#arrow-link)"/>
+  <text x="466" y="696" fill="#52534e" font-size="9">HTTP request</text>
+
+  <line x1="600" y1="694" x2="628" y2="694"
+        stroke="#f7591f" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
+  <text x="636" y="696" fill="#52534e" font-size="9">Bridge value-add</text>
+
+  <line x1="780" y1="694" x2="808" y2="694"
+        stroke="#52534e" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="816" y="696" fill="#52534e" font-size="9">Direct / internal</text>
+
+  <line x1="930" y1="694" x2="958" y2="694"
+        stroke="#52534e" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+  <text x="966" y="696" fill="#52534e" font-size="9">Response</text>
+</svg>

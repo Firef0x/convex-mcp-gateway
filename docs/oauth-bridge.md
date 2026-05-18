@@ -12,33 +12,7 @@ working unchanged.
 
 ## What the bridge does
 
-```
-MCP client ──discover──> /.well-known/oauth-protected-resource/<mcp>
-                              │
-                              ▼
-                         { authorization_servers: [<host origin>] }
-                              │
-            ┌─────────────────┴─────────────────┐
-            │                                   │
-MCP client ──discover─────> /.well-known/oauth-authorization-server
-                              │
-                              ▼
-                         { issuer, registration_endpoint: <host>/oauth/register,
-                           authorize/token/userinfo: <upstream IdP> }
-                              │
-MCP client ──DCR─────────> POST /oauth/register
-                              │
-                              ▼
-                         { client_id: <pre-registered upstream id> }
-
-MCP client ──OAuth code flow───> upstream IdP   (direct, our bridge isn't on this path)
-                                       │
-                                       ▼
-                                  access_token
-
-MCP client ──Bearer──────> POST /mcp/                ──tokenValidator──> upstream userinfo
-                                                     ──identity──────────> authorize callback
-```
+![OAuth bridge mode end-to-end flow](./diagrams/oauth-bridge.svg)
 
 The host pre-registers **one** client at the upstream IdP. The bridge
 hands that same client id to every browser MCP client that DCRs,
