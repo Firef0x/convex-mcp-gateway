@@ -121,5 +121,69 @@ http.route({
     }),
   ),
 });
+// Mount GET to exercise the handler's internal 405 branch in tests.
+// Production hosts would not include this route.
+http.route({
+  path: "/oauth/register",
+  method: "GET",
+  handler: httpAction(async (ctx, request) =>
+    gateway.handleClientRegistration(ctx, request, {
+      upstreamClientId: "upstream-client-id-fixed",
+      allowedRedirectPatterns: [/^https:\/\/example\.com\//],
+    }),
+  ),
+});
+
+// AS metadata bridge (RFC 8414). Hosts in bridge mode wrap an
+// upstream IdP's openid-configuration document. The example mounts it
+// purely to give the test suite a target for
+// `serveAuthorizationServerMetadata`; the upstream issuer is unused
+// in tests because `globalThis.fetch` is stubbed.
+const asMetadataHandler = httpAction(async (ctx, request) =>
+  gateway.serveAuthorizationServerMetadata(ctx, request, {
+    upstreamIssuer: "https://upstream.example.com",
+  }),
+);
+http.route({
+  path: "/.well-known/oauth-authorization-server",
+  method: "GET",
+  handler: asMetadataHandler,
+});
+http.route({
+  path: "/.well-known/oauth-authorization-server",
+  method: "OPTIONS",
+  handler: asMetadataHandler,
+});
+
+// Test-only mount with a CORS array allowlist. Lets the test suite
+// exercise the `cors: string[]` branch of `McpCorsOption` without
+// adding more permissive defaults to the production /mcp/ mount.
+const mcpHandlerCorsArray = httpAction(async (ctx, request) =>
+  gateway.handleMcpRequest(ctx, request, {
+    authorize: async () => ({ allowed: true }),
+    cors: ["https://allowed.example.com", "https://also-allowed.example.com"],
+  }),
+);
+for (const method of ["POST", "GET", "DELETE", "OPTIONS"] as const) {
+  http.route({ path: "/mcp-cors-array/", method, handler: mcpHandlerCorsArray });
+}
+
+// Test-only mount with an authorize callback that always throws.
+// Verifies the gateway's `safeAuthorize` path maps the throw to
+// `-32603 INTERNAL_ERROR` with an audit row outcome of `"error"`.
+const mcpHandlerThrowingAuthorize = httpAction(async (ctx, request) =>
+  gateway.handleMcpRequest(ctx, request, {
+    authorize: async () => {
+      throw new Error("authorize callback boom");
+    },
+  }),
+);
+for (const method of ["POST", "GET", "DELETE", "OPTIONS"] as const) {
+  http.route({
+    path: "/mcp-throws/",
+    method,
+    handler: mcpHandlerThrowingAuthorize,
+  });
+}
 
 export default http;

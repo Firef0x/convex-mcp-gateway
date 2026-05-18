@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 import { convexTest } from "convex-test";
 import { createFunctionHandle } from "convex/server";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import schema from "./schema.js";
 import { api, components, internal } from "./_generated/api.js";
 
@@ -89,7 +89,7 @@ describe("dispatch.runTool", () => {
       await ctx.runMutation(components.mcpGateway.registry.replaceTools, {
         tools: [
           {
-            name: "secret.write",
+            name: "secret_write",
             description: "Demo of declarative field redaction.",
             kind: "mutation",
             functionHandle: handle,
@@ -104,14 +104,14 @@ describe("dispatch.runTool", () => {
     // but the audit row is written either way. We're testing redaction,
     // not success.
     await t.action(components.mcpGateway.dispatch.runTool, {
-      name: "secret.write",
+      name: "secret_write",
       args: { password: "p@ss", token: "t0k3n", username: "alice" },
       auditIdentitySubject: null,
     });
 
     const entries = await t.run(async (ctx) =>
       ctx.runQuery(components.mcpGateway.audit.listEntries, {
-        toolName: "secret.write",
+        toolName: "secret_write",
       }),
     );
     expect(entries).toHaveLength(1);
@@ -787,7 +787,7 @@ describe("audit listEntries (filter regression coverage)", () => {
     await t.mutation(internal.mcp.registerDefaults, {});
     await t.run(async (ctx) => {
       await ctx.runMutation(components.mcpGateway.audit.recordEntry, {
-        toolName: "old.tool",
+        toolName: "old_tool",
         toolKind: "query",
         args: null,
         outcome: "allowed",
@@ -1177,5 +1177,416 @@ describe("resolveIdentity branches", () => {
     // is that boom-token's thrown validator does NOT propagate as a
     // 500; it falls through to anonymous handling.
     expect(res.status).toBe(200);
+  });
+});
+
+// =================================================================
+// RFC 9728 protected-resource metadata: 404 without OAuth config,
+// auto-derived resource URL, explicit override, OPTIONS preflight.
+// Covers cluster G #24.
+// =================================================================
+
+describe("RFC 9728 protected-resource metadata", () => {
+  test("GET without OAuth config returns 404", async () => {
+    const t = newTest();
+    const res = await t.fetch(
+      "/.well-known/oauth-protected-resource/mcp",
+      { method: "GET" },
+    );
+    expect(res.status).toBe(404);
+  });
+
+  test("auto-derives resource URL from the request when no override is set", async () => {
+    const t = newTest();
+    await t.run(async (ctx) => {
+      await ctx.runMutation(components.mcpGateway.registry.setOAuthConfig, {
+        authServerUrl: "https://idp.example.com/",
+      });
+    });
+    const res = await t.fetch(
+      "/.well-known/oauth-protected-resource/mcp",
+      { method: "GET" },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      resource: string;
+      authorization_servers: string[];
+      bearer_methods_supported: string[];
+    };
+    expect(body.resource).toMatch(/\/mcp\/?$/);
+    expect(body.authorization_servers).toEqual(["https://idp.example.com/"]);
+    expect(body.bearer_methods_supported).toEqual(["header"]);
+  });
+
+  test("uses explicit resourceUrl override verbatim", async () => {
+    const t = newTest();
+    await t.run(async (ctx) => {
+      await ctx.runMutation(components.mcpGateway.registry.setOAuthConfig, {
+        authServerUrl: "https://idp.example.com/",
+        resourceUrl: "https://canonical.example.com/mcp/",
+      });
+    });
+    const res = await t.fetch(
+      "/.well-known/oauth-protected-resource/mcp",
+      { method: "GET" },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { resource: string };
+    expect(body.resource).toBe("https://canonical.example.com/mcp/");
+  });
+
+  test("OPTIONS preflight returns 204 with CORS allow-methods", async () => {
+    const t = newTest();
+    const res = await t.fetch(
+      "/.well-known/oauth-protected-resource/mcp",
+      {
+        method: "OPTIONS",
+        headers: {
+          origin: "https://claude.ai",
+          "access-control-request-method": "GET",
+        },
+      },
+    );
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(res.headers.get("access-control-allow-methods")).toContain("GET");
+  });
+});
+
+// =================================================================
+// OAuth bridge: handleClientRegistration branches. Covers #45 —
+// empty redirect_uris, malformed JSON, non-POST, OPTIONS preflight.
+// =================================================================
+
+describe("OAuth bridge: handleClientRegistration branches", () => {
+  test("missing redirect_uris field returns 400 invalid_redirect_uri", async () => {
+    const t = newTest();
+    const res = await t.fetch("/oauth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ client_name: "no-redirects" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("invalid_redirect_uri");
+  });
+
+  test("empty redirect_uris array returns 400 invalid_redirect_uri", async () => {
+    const t = newTest();
+    const res = await t.fetch("/oauth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ redirect_uris: [], client_name: "empty" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("invalid_redirect_uri");
+  });
+
+  test("malformed JSON body returns 400 invalid_client_metadata", async () => {
+    const t = newTest();
+    const res = await t.fetch("/oauth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not valid json",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("invalid_client_metadata");
+  });
+
+  test("GET on /oauth/register returns 405 with allow header", async () => {
+    const t = newTest();
+    const res = await t.fetch("/oauth/register", { method: "GET" });
+    expect(res.status).toBe(405);
+    expect(res.headers.get("allow")).toContain("POST");
+  });
+
+  test("OPTIONS preflight returns 204 with CORS allow-methods POST", async () => {
+    const t = newTest();
+    const res = await t.fetch("/oauth/register", {
+      method: "OPTIONS",
+      headers: {
+        origin: "https://claude.ai",
+        "access-control-request-method": "POST",
+      },
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(res.headers.get("access-control-allow-methods")).toContain("POST");
+  });
+
+  test("attacker payload of long redirect_uris is truncated in the error", async () => {
+    const t = newTest();
+    const longUri = "https://attacker.example.com/" + "A".repeat(1000);
+    const res = await t.fetch("/oauth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        redirect_uris: [longUri],
+        client_name: "evil",
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error_description: string };
+    // The echoed URI must be truncated; the raw 1000-char path must
+    // not appear verbatim in the response body.
+    expect(body.error_description.length).toBeLessThan(500);
+    expect(body.error_description).not.toContain("A".repeat(500));
+  });
+});
+
+// =================================================================
+// CORS `string[]` allowlist branch (#44). The example's main /mcp/
+// mount uses `cors: true`; this test exercises `cors: [...]` via the
+// test-only `/mcp-cors-array/` mount in http.ts.
+// =================================================================
+
+describe("CORS allowlist (string[] branch)", () => {
+  async function initializeCors(t: ReturnType<typeof newTest>, origin: string) {
+    const res = await t.fetch("/mcp-cors-array/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        origin,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18" },
+      }),
+    });
+    return res;
+  }
+
+  test("matching origin gets Access-Control-Allow-Origin echoed back", async () => {
+    const t = newTest();
+    const res = await initializeCors(t, "https://allowed.example.com");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("access-control-allow-origin")).toBe(
+      "https://allowed.example.com",
+    );
+  });
+
+  test("second allowlist entry also matches", async () => {
+    const t = newTest();
+    const res = await initializeCors(t, "https://also-allowed.example.com");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("access-control-allow-origin")).toBe(
+      "https://also-allowed.example.com",
+    );
+  });
+
+  test("non-matching origin gets no CORS headers (browser blocks)", async () => {
+    const t = newTest();
+    const res = await initializeCors(t, "https://attacker.example.com");
+    // The request still completes server-side; the response simply
+    // omits CORS headers, leaving the browser to enforce the policy.
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  test("OPTIONS preflight from matching origin echoes the allow methods", async () => {
+    const t = newTest();
+    const res = await t.fetch("/mcp-cors-array/", {
+      method: "OPTIONS",
+      headers: {
+        origin: "https://allowed.example.com",
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "content-type, authorization",
+      },
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBe(
+      "https://allowed.example.com",
+    );
+    expect(res.headers.get("access-control-allow-methods")).toContain("POST");
+  });
+});
+
+// =================================================================
+// Authorize-callback throws (#27): the gateway translates the throw
+// to `-32603 INTERNAL_ERROR`, audit row outcome "error" with
+// errorMessage matching /Authorizer threw/. Test uses the dedicated
+// `/mcp-throws/` mount whose authorize callback always throws.
+// =================================================================
+
+describe("authorize callback throws (end-to-end)", () => {
+  test("tools/call against a throwing authorize → -32603 + audit error row", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+
+    // initialize against the throwing-authorize route. The
+    // initialize method does not invoke authorize, so this succeeds.
+    const initRes = await t.fetch("/mcp-throws/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18" },
+      }),
+    });
+    expect(initRes.status).toBe(200);
+    const session = initRes.headers.get("mcp-session-id")!;
+
+    // tools/call DOES invoke authorize → it throws → -32603.
+    const callRes = await t.fetch("/mcp-throws/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-session-id": session,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "invoices_summary", arguments: {} },
+      }),
+    });
+    expect(callRes.status).toBe(200);
+    const callBody = (await callRes.json()) as {
+      error?: { code: number; message: string };
+    };
+    expect(callBody.error?.code).toBe(-32603);
+    expect(callBody.error?.message).toMatch(/Authorizer threw/);
+
+    // The denial path writes an audit row with outcome "error".
+    const entries = await t.run(async (ctx) =>
+      ctx.runQuery(components.mcpGateway.audit.listEntries, {
+        toolName: "invoices_summary",
+      }),
+    );
+    const errorEntry = entries.find((e) => e.outcome === "error");
+    expect(errorEntry).toBeDefined();
+    expect(errorEntry?.errorCode).toBe(-32603);
+    expect(errorEntry?.errorMessage).toMatch(/Authorizer threw/);
+  });
+
+  test("tools/list against a throwing authorize drops every tool silently (logged)", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+
+    const initRes = await t.fetch("/mcp-throws/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18" },
+      }),
+    });
+    const session = initRes.headers.get("mcp-session-id")!;
+
+    const listRes = await t.fetch("/mcp-throws/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-session-id": session,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/list",
+      }),
+    });
+    const listBody = (await listRes.json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    // Every tool gets dropped from the catalog when authorize throws
+    // for each entry — no client should see a tool it cannot invoke.
+    expect(listBody.result.tools).toEqual([]);
+  });
+});
+
+// =================================================================
+// AS metadata bridge (#23). Stubs `globalThis.fetch` so the
+// upstream OIDC discovery document is deterministic.
+// =================================================================
+
+describe("RFC 8414 AS metadata bridge", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // The OIDC cache is a module-level Map keyed by issuer; once a test
+  // primes it for `https://upstream.example.com`, subsequent tests
+  // hit the cache and bypass `fetch`. The 502 test must therefore
+  // run before the happy-path test (or use a distinct issuer).
+  // OPTIONS short-circuits before touching the cache, so its order
+  // is independent.
+
+  test("OPTIONS preflight returns 204 with CORS headers", async () => {
+    const t = newTest();
+    const res = await t.fetch("/.well-known/oauth-authorization-server", {
+      method: "OPTIONS",
+      headers: {
+        origin: "https://claude.ai",
+        "access-control-request-method": "GET",
+      },
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(res.headers.get("access-control-allow-methods")).toContain("GET");
+  });
+
+  test("upstream fetch failure returns 502 upstream_metadata_unreachable", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("Bad Gateway", { status: 502 }),
+    );
+
+    const t = newTest();
+    const res = await t.fetch("/.well-known/oauth-authorization-server", {
+      method: "GET",
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("upstream_metadata_unreachable");
+  });
+
+  test("happy path: substitutes registration_endpoint with bridge origin", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          issuer: "https://upstream.example.com",
+          authorization_endpoint: "https://upstream.example.com/authorize",
+          token_endpoint: "https://upstream.example.com/token",
+          userinfo_endpoint: "https://upstream.example.com/userinfo",
+          jwks_uri: "https://upstream.example.com/jwks",
+          scopes_supported: ["openid", "profile"],
+          response_types_supported: ["code"],
+          grant_types_supported: ["authorization_code"],
+          code_challenge_methods_supported: ["S256"],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const t = newTest();
+    const res = await t.fetch("/.well-known/oauth-authorization-server", {
+      method: "GET",
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    // The bridge advertises ITSELF as the issuer and substitutes the
+    // registration endpoint so MCP clients DCR against the gateway.
+    expect(body.token_endpoint).toBe("https://upstream.example.com/token");
+    expect(body.authorization_endpoint).toBe(
+      "https://upstream.example.com/authorize",
+    );
+    expect(body.registration_endpoint).toMatch(/\/oauth\/register$/);
+    // Public-client (PKCE) — secrets stay upstream.
+    expect(body.token_endpoint_auth_methods_supported).toEqual(["none"]);
   });
 });

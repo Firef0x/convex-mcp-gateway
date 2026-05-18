@@ -50,7 +50,7 @@ describe("registry", () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
       await ctx.runMutation(internal.registry.registerTool, {
-        name: "tmp.tool",
+        name: "tmp_tool",
         description: "tmp",
         kind: "mutation",
         functionHandle: "fakehandle",
@@ -59,13 +59,13 @@ describe("registry", () => {
 
       const removedExisting = await ctx.runMutation(
         internal.registry.unregisterTool,
-        { name: "tmp.tool" },
+        { name: "tmp_tool" },
       );
       expect(removedExisting).toBe(true);
 
       const removedMissing = await ctx.runMutation(
         internal.registry.unregisterTool,
-        { name: "tmp.tool" },
+        { name: "tmp_tool" },
       );
       expect(removedMissing).toBe(false);
 
