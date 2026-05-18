@@ -46,10 +46,16 @@ const http = httpRouter();
 
 // Test fixture for the userinfo-style resolveIdentity path. Real hosts
 // would call the upstream IdP's /userinfo endpoint here; the example
-// uses an in-memory map so tests don't need a network.
+// uses an in-memory map so tests don't need a network. `boom-token`
+// triggers a thrown validator so tests can verify the gateway treats
+// validator throws as anonymous (warn + null identity) rather than
+// 500ing the request.
 const resolveIdentity = async (token: string) => {
   if (token === "valid-userinfo-token") {
     return { subject: "validator-resolved-sub" };
+  }
+  if (token === "boom-token") {
+    throw new Error("simulated validator failure");
   }
   return null;
 };

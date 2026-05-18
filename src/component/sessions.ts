@@ -88,21 +88,30 @@ export const deleteSession = mutation({
 });
 
 /**
- * Drop sessions whose `lastSeenAt` is older than the given cutoff. The
- * host invokes this from a cron when it cares about idle cleanup; the
- * component does not run any background work itself.
+ * Drop sessions whose `lastSeenAt` is older than the given cutoff.
+ * Bounded per-call: up to `PRUNE_BATCH` rows are deleted in one
+ * mutation, so very busy deployments don't hit Convex's per-mutation
+ * read/write limits. Callers loop until the return value is `0` to
+ * fully drain. The host invokes this from a cron when it cares about
+ * idle cleanup; the component runs no background work itself.
  */
+const PRUNE_BATCH = 200;
+
 export const pruneSessions = mutation({
   args: { olderThanMs: v.number() },
   returns: v.number(),
   handler: async (ctx, args) => {
     const cutoff = Date.now() - args.olderThanMs;
+    // The `by_lastSeenAt` index lets us fetch exactly the eligible
+    // rows in one indexed read instead of scanning the full table.
+    const rows = await ctx.db
+      .query("sessions")
+      .withIndex("by_lastSeenAt", (q) => q.lt("lastSeenAt", cutoff))
+      .take(PRUNE_BATCH);
     let deleted = 0;
-    for await (const row of ctx.db.query("sessions")) {
-      if (row.lastSeenAt < cutoff) {
-        await ctx.db.delete("sessions", row._id);
-        deleted++;
-      }
+    for (const row of rows) {
+      await ctx.db.delete("sessions", row._id);
+      deleted++;
     }
     return deleted;
   },

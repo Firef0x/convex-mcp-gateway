@@ -410,10 +410,13 @@ export class McpGateway {
   }
 
   /**
-   * Drop MCP sessions that have not been touched within `idleMs`. The
-   * component does not garbage-collect sessions on its own; schedule
-   * this from `crons.ts` if you want time-based cleanup. Returns the
-   * number of session rows deleted.
+   * Drop MCP sessions that have not been touched within `idleMs`.
+   * Returns the number of rows deleted in this call (up to a
+   * bounded batch size, ~200, to stay inside Convex's per-mutation
+   * limits). Hosts on busy deployments loop until the return value
+   * is `0`, or schedule a follow-up mutation if a single tick is
+   * insufficient. The component does not garbage-collect sessions
+   * on its own.
    */
   async pruneSessions(
     ctx: RunMutationCtx,
@@ -425,8 +428,11 @@ export class McpGateway {
   }
 
   /**
-   * Drop audit entries older than `retentionMs`. Returns the number of
-   * rows deleted. Schedule from `crons.ts` for time-based retention:
+   * Drop audit entries older than `retentionMs`. Returns the number
+   * of rows deleted in this call (up to a bounded batch size, ~200,
+   * to stay inside Convex's per-mutation limits). Callers loop
+   * until the return value is `0` to fully drain. Schedule from
+   * `crons.ts` for time-based retention:
    *
    * ```ts
    * crons.daily("audit cleanup", { hourUTC: 3, minuteUTC: 0 },
@@ -434,7 +440,15 @@ export class McpGateway {
    *
    * export const runPrune = internalMutation({
    *   args: {},
-   *   handler: async (ctx) => gateway.pruneAuditEntries(ctx, 30 * 24 * 60 * 60 * 1000),
+   *   handler: async (ctx) => {
+   *     let total = 0;
+   *     for (;;) {
+   *       const n = await gateway.pruneAuditEntries(ctx, 30 * 24 * 60 * 60 * 1000);
+   *       total += n;
+   *       if (n === 0) break;
+   *     }
+   *     return total;
+   *   },
    * });
    * ```
    */
@@ -822,12 +836,20 @@ export class McpGateway {
       return !options.allowedRedirectPatterns.some((p) => p.test(u));
     });
     if (invalid.length > 0) {
-      return jsonError(
-        400,
-        "invalid_redirect_uri",
-        `One or more redirect_uris are not allowed: ${JSON.stringify(invalid)}`,
-        corsHeaders,
-      );
+      // Truncate each echoed URI to bound response size against an
+      // attacker probing the (public, unauthenticated) DCR endpoint
+      // with megabyte-scale payloads.
+      const sample = invalid
+        .slice(0, 5)
+        .map((u) => {
+          const s = typeof u === "string" ? u : JSON.stringify(u);
+          return s.length > 200 ? `${s.slice(0, 200)}...` : s;
+        });
+      const description =
+        invalid.length === 1
+          ? `redirect_uri not allowed: ${sample[0]}`
+          : `${invalid.length} redirect_uris not allowed (first ${sample.length}: ${sample.join(", ")})`;
+      return jsonError(400, "invalid_redirect_uri", description, corsHeaders);
     }
     return new Response(
       JSON.stringify({
@@ -864,6 +886,32 @@ const OIDC_CACHE_TTL_MS = 60 * 60 * 1000;
 async function fetchOidcConfigCached(
   issuer: string,
 ): Promise<Record<string, unknown>> {
+  // Defense-in-depth against hosts that wire `upstreamIssuer` from
+  // request input: reject anything that isn't an absolute http(s) URL,
+  // and reject plain http unless it points at localhost (dev).
+  // Without this, an attacker controlling the issuer string can turn
+  // the gateway into an SSRF primitive against internal services
+  // reachable from Convex's egress (e.g. cloud-metadata endpoints).
+  let parsed: URL;
+  try {
+    parsed = new URL(issuer);
+  } catch {
+    throw new Error(`upstreamIssuer is not a valid URL: ${issuer}`);
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error(
+      `upstreamIssuer must use http or https, got: ${parsed.protocol}`,
+    );
+  }
+  if (
+    parsed.protocol === "http:" &&
+    !["localhost", "127.0.0.1", "[::1]", "::1"].includes(parsed.hostname)
+  ) {
+    throw new Error(
+      `upstreamIssuer must use https for non-localhost hosts, got: ${issuer}`,
+    );
+  }
+
   const cached = oidcCache.get(issuer);
   if (cached && Date.now() - cached.fetchedAt < OIDC_CACHE_TTL_MS) {
     return cached.doc;
@@ -876,6 +924,14 @@ async function fetchOidcConfigCached(
     );
   }
   const doc = (await res.json()) as Record<string, unknown>;
+  // Soft cap on cache size: a host that ever calls this with many
+  // distinct issuers (multi-tenant bridge) shouldn't be able to grow
+  // the Map unboundedly. 32 entries comfortably covers every
+  // realistic deployment.
+  if (oidcCache.size >= 32 && !oidcCache.has(issuer)) {
+    const firstKey = oidcCache.keys().next().value;
+    if (firstKey !== undefined) oidcCache.delete(firstKey);
+  }
   oidcCache.set(issuer, { fetchedAt: Date.now(), doc });
   return doc;
 }

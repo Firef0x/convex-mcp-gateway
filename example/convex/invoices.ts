@@ -16,10 +16,13 @@ export const list = query({
     status: v.optional(v.union(v.literal("open"), v.literal("paid"))),
   },
   handler: async (ctx, args) => {
-    // Tools exposed via the MCP gateway can rely on Convex's auth pipeline:
-    // the gateway propagates the JWT-validated identity into this handler,
-    // so `ctx.auth.getUserIdentity()` returns the same identity the gateway
-    // already authorized against the tool's scope/role manifest.
+    // Tools invoked via the MCP gateway run inside the component's dispatch
+    // action; `ctx.auth` is NOT propagated across the component boundary.
+    // `getUserIdentity()` returns null here even when the gateway's
+    // authorize callback saw a valid JWT. If a tool needs the caller's
+    // identity, pass relevant claims as explicit args from the authorize
+    // callback. This example returns `caller: null` as the documented
+    // behaviour.
     const identity = await ctx.auth.getUserIdentity();
     const invoices = await ctx.db.query("invoices").collect();
     const filtered = args.status
@@ -39,8 +42,9 @@ export const markPaid = mutation({
 });
 
 /**
- * A public read-only summary that does not require authentication. Used in
- * the example to demonstrate `requireAuth: false`.
+ * A public read-only summary that does not require authentication. The
+ * example's authorize callback opts it out of authentication via
+ * `metadata: { public: true }` in convex/mcp.ts.
  */
 export const summary = query({
   args: {},
@@ -49,4 +53,30 @@ export const summary = query({
     const invoices = await ctx.db.query("invoices").collect();
     return { total: invoices.length };
   },
+});
+
+/**
+ * Test-only fixture: always throws. Used by mcp.test.ts to verify that
+ * the gateway returns tool execution failures as MCP `result.isError:
+ * true` (not as a JSON-RPC error), and that the audit row captures
+ * `outcome: "error"` with the message. Not registered by
+ * `registerDefaults`; tests insert it via `replaceTools` directly.
+ */
+export const throwsAlways = query({
+  args: {},
+  returns: v.null(),
+  handler: async () => {
+    throw new Error("boom");
+  },
+});
+
+/**
+ * Test-only fixture: accepts any payload under `args.payload`, returns
+ * null. Lets redaction tests pass arbitrarily-shaped args without
+ * tripping Convex's per-function arg validator.
+ */
+export const noopAny = query({
+  args: { payload: v.optional(v.any()) },
+  returns: v.null(),
+  handler: async () => null,
 });

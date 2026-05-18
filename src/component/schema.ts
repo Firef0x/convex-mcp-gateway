@@ -81,7 +81,9 @@ export default defineSchema({
     protocolVersion: v.string(),
     createdAt: v.number(),
     lastSeenAt: v.number(),
-  }).index("by_sessionId", ["sessionId"]),
+  })
+    .index("by_sessionId", ["sessionId"])
+    .index("by_lastSeenAt", ["lastSeenAt"]),
 
   /**
    * One row per `tools/call` dispatch. Captures who called what, the

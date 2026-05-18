@@ -115,7 +115,23 @@ export const replaceTools = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    // Reject duplicate names in the input array. Without this check,
+    // a typo registering two tools with the same name silently
+    // last-wins (the second overwrites the first), defeating the
+    // declarative "this is the full registry" semantics this
+    // mutation exists to provide.
     const incomingNames = new Set(args.tools.map((t) => t.name));
+    if (incomingNames.size !== args.tools.length) {
+      const seen = new Set<string>();
+      const dupes: string[] = [];
+      for (const t of args.tools) {
+        if (seen.has(t.name)) dupes.push(t.name);
+        seen.add(t.name);
+      }
+      throw new ConvexError(
+        `replaceTools received duplicate tool names: ${dupes.join(", ")}`,
+      );
+    }
     const existing = await ctx.db.query("tools").collect();
     for (const tool of existing) {
       if (!incomingNames.has(tool.name)) {

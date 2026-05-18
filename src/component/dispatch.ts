@@ -165,12 +165,14 @@ export const recordAuthDenial = action({
  *   - `auditArgs: true`              (or omitted) → store args verbatim
  *   - `auditArgs: false`                          → store `null`
  *   - `auditArgs: { redact: [...] }`              → store args with the
- *     listed top-level fields replaced by the string `"[redacted]"`
+ *     listed paths replaced by the string `"[redacted]"`
  *
- * Field-level redaction is shallow: nested fields are not walked. For
- * deep redaction or transformation, drop the whole payload with
- * `auditArgs: false` and write a richer summary into your tool's own
- * audit table.
+ * Each entry in `redact` is a dotted path: `"token"` redacts a
+ * top-level key, `"credentials.token"` redacts a nested key inside
+ * `credentials`. Arrays and missing intermediate keys are passed
+ * through unchanged (no insertion). Returned objects are fresh
+ * shallow clones at each touched level, so the caller's args object
+ * is never mutated.
  */
 function redactArgsForAudit(tool: RegisteredTool, args: unknown): unknown {
   const meta = tool.metadata as
@@ -183,21 +185,24 @@ function redactArgsForAudit(tool: RegisteredTool, args: unknown): unknown {
   if (setting === undefined || setting === true) return args;
 
   const redactList = setting.redact ?? [];
-  if (
-    redactList.length === 0 ||
-    typeof args !== "object" ||
-    args === null ||
-    Array.isArray(args)
-  ) {
-    return args;
-  }
-  const out: Record<string, unknown> = { ...(args as Record<string, unknown>) };
+  if (redactList.length === 0) return args;
+
+  let out = args;
   for (const field of redactList) {
-    if (Object.prototype.hasOwnProperty.call(out, field)) {
-      out[field] = "[redacted]";
-    }
+    out = applyRedactionPath(out, field.split("."));
   }
   return out;
+}
+
+function applyRedactionPath(value: unknown, path: string[]): unknown {
+  if (path.length === 0) return "[redacted]";
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return value;
+  }
+  const [head, ...rest] = path;
+  const obj = value as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(obj, head)) return value;
+  return { ...obj, [head]: applyRedactionPath(obj[head], rest) };
 }
 
 async function safeRecordAudit(

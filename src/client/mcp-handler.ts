@@ -27,6 +27,15 @@ import {
  * `Mcp-Session-Id` is automatically exposed via
  * `Access-Control-Expose-Headers` so JS clients can read it after
  * `initialize`.
+ *
+ * **Production note**: `cors: true` makes response bodies readable
+ * from any origin. The gateway carries auth via `Authorization:
+ * Bearer ...` (never cookies), so wildcard CORS does not transmit
+ * the user's credentials — but a webapp running in the user's
+ * browser with the Bearer in its own state can read responses
+ * cross-origin. Prefer an explicit allowlist
+ * (`cors: ["https://app.example.com"]`) for any deployment with
+ * non-trivial auth coupling.
  */
 export type McpCorsOption =
   | true
@@ -83,6 +92,15 @@ export interface HandleMcpRequestOptions {
    * validation via `ctx.auth.getUserIdentity()`.
    */
   resolveIdentity?: McpIdentityResolver;
+  /**
+   * Override the `serverInfo` returned in the `initialize` response.
+   * Defaults to `{ name: "convex-mcp-gateway", version: "0.0.0" }`.
+   * Hosts that white-label or want telemetry-grade version reporting
+   * can supply their own `{ name, version }` here — the constant
+   * baked into this package is intentionally static, because Convex
+   * doesn't expose `package.json` to the runtime.
+   */
+  serverInfo?: { name: string; version: string };
 }
 
 type HandlerCtx = {
@@ -200,7 +218,16 @@ function generateSessionId(): string {
 
 function clientWantsSse(request: Request): boolean {
   const accept = (request.headers.get("accept") ?? "").toLowerCase();
-  return accept.includes("text/event-stream");
+  const sseIdx = accept.indexOf("text/event-stream");
+  if (sseIdx === -1) return false;
+  const jsonIdx = accept.indexOf("application/json");
+  if (jsonIdx === -1) return true;
+  // MCP 2025-06-18 requires clients to list BOTH content types. When
+  // both are listed, the client signals preference by order: SSE is
+  // picked when it appears before application/json. This is a
+  // simpler heuristic than full RFC 9110 q-value parsing and lines
+  // up with what every real MCP client emits.
+  return sseIdx < jsonIdx;
 }
 
 function isJsonRpcRequest(message: JsonRpcMessage): boolean {
@@ -294,7 +321,7 @@ export async function handleMcpRequest(
     default:
       response = new Response("Method Not Allowed", {
         status: 405,
-        headers: { allow: "POST, GET, DELETE, OPTIONS" },
+        headers: { allow: "POST, DELETE, OPTIONS" },
       });
   }
   return withCors(response, options.cors, request);
@@ -321,17 +348,65 @@ async function handlePost(
   component: ComponentApi,
   options: HandleMcpRequestOptions,
 ): Promise<Response> {
-  let message: JsonRpcMessage;
+  // MCP 2025-06-18 §"Sending Messages to the Server": clients MUST set
+  // Accept to list both application/json and text/event-stream. Enforcing
+  // this surfaces interop bugs early instead of silently degrading to
+  // JSON-only.
+  const accept = (request.headers.get("accept") ?? "").toLowerCase();
+  if (
+    !accept.includes("application/json") ||
+    !accept.includes("text/event-stream")
+  ) {
+    return new Response(
+      "Not Acceptable: Accept header must list both application/json and text/event-stream",
+      { status: 406 },
+    );
+  }
+
+  let message: JsonRpcMessage | JsonRpcMessage[];
   try {
-    message = (await request.json()) as JsonRpcMessage;
+    message = (await request.json()) as JsonRpcMessage | JsonRpcMessage[];
   } catch {
+    // Per MCP §"Sending Messages": server SHOULD return an HTTP error
+    // status when it cannot accept the input. JSON-RPC body retained
+    // for clients that read it.
     return new Response(
       jsonErrorEnvelope(null, -32700, "Parse error"),
-      { status: 200, headers: { "content-type": "application/json" } },
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  // MCP forbids batched requests over Streamable HTTP. Clearer error
+  // than the previous "missing method or id" fall-through.
+  if (Array.isArray(message)) {
+    return new Response(
+      jsonErrorEnvelope(
+        null,
+        -32600,
+        "Batched JSON-RPC requests are not supported in MCP Streamable HTTP",
+      ),
+      { status: 400, headers: { "content-type": "application/json" } },
     );
   }
 
   const isInitialize = message.method === "initialize";
+
+  // MCP-Protocol-Version header: required on post-initialize requests
+  // by spec. Missing → silently default to 2025-03-26 (legacy clients).
+  // Unsupported value → MUST 400 per spec.
+  if (!isInitialize) {
+    const protoHeader = request.headers.get("mcp-protocol-version");
+    if (
+      protoHeader !== null &&
+      !(SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(protoHeader)
+    ) {
+      return new Response(
+        `Unsupported MCP-Protocol-Version: ${protoHeader}. ` +
+          `Supported: ${SUPPORTED_PROTOCOL_VERSIONS.join(", ")}`,
+        { status: 400 },
+      );
+    }
+  }
 
   // Session validation. Initialize creates a fresh session. All other
   // requests must carry a valid Mcp-Session-Id; missing is 400, unknown
@@ -342,6 +417,25 @@ async function handlePost(
   if (isInitialize) {
     sessionId = generateSessionId();
     issueSessionHeader = true;
+    // Best-effort: if the caller `initialize`s while carrying an old
+    // session id (buggy client reconnecting without DELETE first),
+    // drop the old row so the sessions table doesn't grow unbounded.
+    // The spec doesn't require this — pruning would also catch it
+    // eventually — but cleaning up here keeps the table tight without
+    // depending on the prune cadence.
+    const staleSessionId = request.headers.get("mcp-session-id");
+    if (staleSessionId) {
+      try {
+        await ctx.runMutation(component.sessions.deleteSession, {
+          sessionId: staleSessionId,
+        });
+      } catch (err) {
+        console.warn(
+          "[mcp-gateway] failed to clean up stale session on re-initialize",
+          err,
+        );
+      }
+    }
   } else {
     const headerSessionId = request.headers.get("mcp-session-id");
     if (!headerSessionId) {
@@ -358,8 +452,16 @@ async function handlePost(
       await ctx.runMutation(component.sessions.touchSession, {
         sessionId: headerSessionId,
       });
-    } catch {
-      /* best-effort */
+    } catch (err) {
+      // Touch is best-effort; a stuck lastSeenAt only matters for the
+      // session pruner, not for the current request. Log so a
+      // systematic failure (schema drift, recurring conflict) is
+      // discoverable in the deployment log.
+      console.warn(
+        "[mcp-gateway] touchSession failed (best-effort)",
+        headerSessionId,
+        err,
+      );
     }
   }
 
@@ -373,7 +475,7 @@ async function handlePost(
   if (!isJsonRpcRequest(message)) {
     return new Response(
       jsonErrorEnvelope(null, -32600, "Invalid Request: missing method or id"),
-      { status: 200, headers: { "content-type": "application/json" } },
+      { status: 400, headers: { "content-type": "application/json" } },
     );
   }
 
@@ -448,7 +550,10 @@ async function handlePost(
       });
       body = jsonResultEnvelope(message.id, {
         protocolVersion: negotiated,
-        serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
+        serverInfo: options.serverInfo ?? {
+          name: SERVER_NAME,
+          version: SERVER_VERSION,
+        },
         capabilities: { tools: {} },
       });
       break;
@@ -464,7 +569,7 @@ async function handlePost(
       )) as RegisteredTool[];
       const visible = [];
       for (const tool of allTools) {
-        const { decision } = await safeAuthorize(options.authorize, ctx, {
+        const { decision, threw } = await safeAuthorize(options.authorize, ctx, {
           toolName: tool.name,
           toolKind: tool.kind,
           args: {},
@@ -472,6 +577,17 @@ async function handlePost(
           toolMetadata: tool.metadata ?? null,
           identity,
         });
+        if (threw) {
+          // A buggy authorize callback drops only the offending tool,
+          // not the whole list. Surface to the deployment log so the
+          // shrinking tools/list response is discoverable; the tool
+          // stays hidden either way.
+          console.error(
+            "[mcp-gateway] authorize callback threw during tools/list for tool",
+            tool.name,
+            decision.reason,
+          );
+        }
         if (decision.allowed) {
           visible.push({
             name: tool.name,
@@ -544,8 +660,16 @@ async function handlePost(
             errorMessage: reason,
             durationMs: Date.now() - start,
           });
-        } catch {
-          /* audit best-effort */
+        } catch (err) {
+          // Match safeRecordAudit's pattern in dispatch.ts: audit must
+          // never alter the dispatch outcome, so swallow — but log so
+          // a recurring write failure (schema drift, validator
+          // mismatch) is visible to operators.
+          console.error(
+            "[mcp-gateway] failed to record auth denial",
+            tool.name,
+            err,
+          );
         }
         // 401 + WWW-Authenticate per RFC 6750 + RFC 9728 when an OAuth
         // server is configured. Bypasses the JSON-RPC envelope and uses
@@ -592,11 +716,25 @@ async function handlePost(
         auditIdentitySubject,
       });
       if (!dispatched.ok) {
-        body = jsonErrorEnvelope(
-          message.id,
-          dispatched.error.code,
-          dispatched.error.message,
-        );
+        // MCP 2025-06-18 §tools/call distinguishes:
+        //   - Protocol errors (unknown tool, invalid args) → JSON-RPC error
+        //   - Tool execution errors                        → result with isError:true
+        // The model uses the latter to reason about retries; protocol
+        // errors abort the call. Keep -32602 (unknown tool) as a
+        // JSON-RPC error; everything else is an execution error and
+        // surfaces as a tool result so the LLM can react.
+        if (dispatched.error.code === -32602) {
+          body = jsonErrorEnvelope(
+            message.id,
+            dispatched.error.code,
+            dispatched.error.message,
+          );
+        } else {
+          body = jsonResultEnvelope(message.id, {
+            content: [{ type: "text", text: dispatched.error.message }],
+            isError: true,
+          });
+        }
         break;
       }
       // Always ship the text-JSON `content` block for backwards-compat

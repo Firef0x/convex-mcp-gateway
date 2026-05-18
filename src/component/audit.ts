@@ -96,26 +96,35 @@ export const listEntries = query({
 
 /**
  * Drop audit rows older than `cutoffMs` (Date.now() - retentionMs in
- * the typical caller). Walks the table once via the default index.
+ * the typical caller). Bounded per-call: up to `PRUNE_BATCH` rows
+ * are scanned and deleted in one mutation, so very large audit
+ * tables don't hit Convex's per-mutation read/write limits.
  *
- * Hosts schedule this from a `crons.daily(...)` job; the component
- * runs no background work itself. The mutation uses `_creationTime`
- * (always present, indexed implicitly) so callers don't need to pass
- * a timestamp field name.
+ * Callers loop until the return value is `0` to drain. Hosts wire
+ * `gateway.pruneAuditEntries` from a `crons.daily(...)` job; the
+ * component runs no background work itself.
  *
  * Returns the number of rows actually deleted, useful for
  * observability dashboards or cron-job logs.
  */
+const PRUNE_BATCH = 200;
+
 export const pruneOlderThan = mutation({
   args: { cutoffMs: v.number() },
   returns: v.number(),
   handler: async (ctx, args) => {
+    // Iterate oldest-first by `_creationTime` (Convex's default
+    // ascending order). The first row whose creationTime >= cutoff
+    // means everything after is also too new — break early.
+    const candidates = await ctx.db
+      .query("audit")
+      .order("asc")
+      .take(PRUNE_BATCH);
     let deleted = 0;
-    for await (const row of ctx.db.query("audit")) {
-      if (row._creationTime < args.cutoffMs) {
-        await ctx.db.delete("audit", row._id);
-        deleted++;
-      }
+    for (const row of candidates) {
+      if (row._creationTime >= args.cutoffMs) break;
+      await ctx.db.delete("audit", row._id);
+      deleted++;
     }
     return deleted;
   },

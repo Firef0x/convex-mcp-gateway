@@ -164,7 +164,10 @@ describe("dispatch.recordAuthDenial", () => {
 async function initialize(t: ReturnType<typeof newTest>): Promise<string> {
   const res = await t.fetch("/mcp/", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    },
     body: JSON.stringify({
       jsonrpc: "2.0",
       id: 1,
@@ -188,6 +191,7 @@ async function rpc(
     method: "POST",
     headers: {
       "content-type": "application/json",
+      accept: "application/json, text/event-stream",
       "mcp-session-id": sessionId,
       ...headers,
     },
@@ -200,7 +204,10 @@ describe("HTTP envelope (host-mounted /mcp/)", () => {
     const t = newTest();
     const res = await t.fetch("/mcp/", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
@@ -208,6 +215,21 @@ describe("HTTP envelope (host-mounted /mcp/)", () => {
       }),
     });
     expect(res.status).toBe(400);
+  });
+
+  test("POST without Accept header returns 406", async () => {
+    const t = newTest();
+    const res = await t.fetch("/mcp/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18" },
+      }),
+    });
+    expect(res.status).toBe(406);
   });
 
   test("initialize returns Mcp-Session-Id header", async () => {
@@ -244,7 +266,10 @@ describe("HTTP envelope (host-mounted /mcp/)", () => {
     const t = newTest();
     const res = await t.fetch("/mcp", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
@@ -284,6 +309,7 @@ describe("HTTP envelope (host-mounted /mcp/)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
+        accept: "application/json, text/event-stream",
         origin: "https://claude.ai",
       },
       body: JSON.stringify({
@@ -299,10 +325,13 @@ describe("HTTP envelope (host-mounted /mcp/)", () => {
     );
   });
 
-  test("Accept: text/event-stream returns SSE-framed response", async () => {
+  test("Accept with SSE listed first returns SSE-framed response", async () => {
     const t = newTest();
     await t.mutation(internal.mcp.registerDefaults, {});
     const session = await initialize(t);
+    // Both content types are listed (spec-compliant) but the client
+    // signals SSE preference by listing it first. Reversing the
+    // order would give back a plain application/json response.
     const res = await rpc(
       t,
       session,
@@ -312,7 +341,7 @@ describe("HTTP envelope (host-mounted /mcp/)", () => {
         method: "tools/call",
         params: { name: "invoices_summary", arguments: {} },
       },
-      { accept: "application/json, text/event-stream" },
+      { accept: "text/event-stream, application/json" },
     );
     expect(res.headers.get("content-type")).toBe("text/event-stream");
     const text = await res.text();
@@ -389,6 +418,7 @@ describe("authorize callback (host's http.ts)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
+        accept: "application/json, text/event-stream",
         "mcp-session-id": session,
       },
       body: JSON.stringify({
@@ -422,6 +452,7 @@ describe("authorize callback (host's http.ts)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
+        accept: "application/json, text/event-stream",
         "mcp-session-id": session,
       },
       body: JSON.stringify({
@@ -526,6 +557,7 @@ describe("outputSchema / structuredContent (MCP returns)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
+        accept: "application/json, text/event-stream",
         "mcp-session-id": session,
       },
       body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
@@ -585,6 +617,7 @@ describe("outputSchema / structuredContent (MCP returns)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
+        accept: "application/json, text/event-stream",
         "mcp-session-id": session,
       },
       body: JSON.stringify({
@@ -645,6 +678,7 @@ describe("OAuth bridge mode (DCR + AS metadata + resolveIdentity)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
+        accept: "application/json, text/event-stream",
         "mcp-session-id": session,
         authorization: "Bearer valid-userinfo-token",
       },
@@ -725,5 +759,341 @@ describe("audit listEntries (filter regression coverage)", () => {
       { cutoffMs: farFuture },
     );
     expect(deleted).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// =================================================================
+// Argument redaction: covers auditArgs: false / true / nested-path
+// redaction added by Cluster C #11.
+// =================================================================
+
+describe("argument redaction", () => {
+  test("auditArgs: false drops the args entirely", async () => {
+    const t = newTest();
+    await t.run(async (ctx) => {
+      const handle = await createFunctionHandle(api.invoices.noopAny);
+      await ctx.runMutation(components.mcpGateway.registry.replaceTools, {
+        tools: [
+          {
+            name: "sensitive_drop",
+            description: "tool that opts out of arg storage",
+            kind: "query",
+            functionHandle: handle,
+            inputSchema: { type: "object" },
+            metadata: { auditArgs: false },
+          },
+        ],
+      });
+    });
+
+    await t.action(components.mcpGateway.dispatch.runTool, {
+      name: "sensitive_drop",
+      args: { payload: { password: "hunter2", token: "xyz" } },
+      auditIdentitySubject: "alice",
+    });
+
+    const entries = await t.run(async (ctx) =>
+      ctx.runQuery(components.mcpGateway.audit.listEntries, {
+        toolName: "sensitive_drop",
+      }),
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.args).toBeNull();
+    expect(entries[0]!.outcome).toBe("allowed");
+  });
+
+  test("auditArgs.redact walks nested dotted paths", async () => {
+    const t = newTest();
+    await t.run(async (ctx) => {
+      const handle = await createFunctionHandle(api.invoices.noopAny);
+      await ctx.runMutation(components.mcpGateway.registry.replaceTools, {
+        tools: [
+          {
+            name: "nested_redact",
+            description: "redact a nested path",
+            kind: "query",
+            functionHandle: handle,
+            inputSchema: { type: "object" },
+            metadata: {
+              auditArgs: {
+                redact: ["payload.credentials.token", "payload.topLevel"],
+              },
+            },
+          },
+        ],
+      });
+    });
+
+    await t.action(components.mcpGateway.dispatch.runTool, {
+      name: "nested_redact",
+      args: {
+        payload: {
+          topLevel: "should-vanish",
+          credentials: { token: "secret123", user: "alice" },
+          other: { keep: "me" },
+        },
+      },
+      auditIdentitySubject: null,
+    });
+
+    const entries = await t.run(async (ctx) =>
+      ctx.runQuery(components.mcpGateway.audit.listEntries, {
+        toolName: "nested_redact",
+      }),
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.outcome).toBe("allowed");
+    expect(entries[0]!.args).toEqual({
+      payload: {
+        topLevel: "[redacted]",
+        credentials: { token: "[redacted]", user: "alice" },
+        other: { keep: "me" },
+      },
+    });
+  });
+});
+
+// =================================================================
+// Tool-execution error envelope: covers Cluster D #19 (errors from
+// the tool handler surface as MCP `result.isError: true`, NOT as a
+// JSON-RPC error envelope) and the matching audit row outcome.
+// =================================================================
+
+describe("tool execution failures", () => {
+  test("component dispatch returns ok:false with the thrown message", async () => {
+    const t = newTest();
+    await t.run(async (ctx) => {
+      const handle = await createFunctionHandle(api.invoices.throwsAlways);
+      await ctx.runMutation(components.mcpGateway.registry.replaceTools, {
+        tools: [
+          {
+            name: "broken_query",
+            description: "always throws",
+            kind: "query",
+            functionHandle: handle,
+            inputSchema: { type: "object" },
+          },
+        ],
+      });
+    });
+
+    const result = await t.action(components.mcpGateway.dispatch.runTool, {
+      name: "broken_query",
+      args: {},
+      auditIdentitySubject: null,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe(-32000);
+      expect(result.error.message).toContain("boom");
+    }
+
+    const entries = await t.run(async (ctx) =>
+      ctx.runQuery(components.mcpGateway.audit.listEntries, {
+        toolName: "broken_query",
+      }),
+    );
+    expect(entries[0]?.outcome).toBe("error");
+    expect(entries[0]?.errorCode).toBe(-32000);
+  });
+
+  test("tools/call surfaces handler throw as result.isError:true (not JSON-RPC error)", async () => {
+    const t = newTest();
+    // Register the throwing tool AND wire authorize to allow it.
+    await t.run(async (ctx) => {
+      const handle = await createFunctionHandle(api.invoices.throwsAlways);
+      await ctx.runMutation(components.mcpGateway.registry.replaceTools, {
+        tools: [
+          {
+            name: "broken_query",
+            description: "always throws",
+            kind: "query",
+            functionHandle: handle,
+            inputSchema: { type: "object" },
+            metadata: { public: true },
+          },
+        ],
+      });
+    });
+
+    const session = await initialize(t);
+    const res = await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: { name: "broken_query", arguments: {} },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      result?: {
+        isError?: boolean;
+        content?: Array<{ type: string; text: string }>;
+      };
+      error?: { code: number; message: string };
+    };
+    // Spec: tool execution failures arrive as a `result` with
+    // `isError: true`, so the LLM can react. JSON-RPC `error`
+    // envelopes are reserved for protocol errors.
+    expect(body.error).toBeUndefined();
+    expect(body.result?.isError).toBe(true);
+    expect(body.result?.content?.[0]?.type).toBe("text");
+    expect(body.result?.content?.[0]?.text).toContain("boom");
+  });
+});
+
+// =================================================================
+// JSON-RPC envelope edge cases: parse error, notification, invalid
+// request. Covers Cluster D #20, #48 + Cluster G #26.
+// =================================================================
+
+describe("JSON-RPC envelope edge cases", () => {
+  test("parse error returns HTTP 400 with -32700 body", async () => {
+    const t = newTest();
+    const res = await t.fetch("/mcp/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: "{not valid json",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: number } };
+    expect(body.error.code).toBe(-32700);
+  });
+
+  test("notification (no id) returns HTTP 202 with no body", async () => {
+    const t = newTest();
+    const session = await initialize(t);
+    const res = await rpc(t, session, {
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+    });
+    expect(res.status).toBe(202);
+    expect(await res.text()).toBe("");
+  });
+
+  test("invalid request (no method, no id) returns HTTP 400 with -32600 body", async () => {
+    const t = newTest();
+    const session = await initialize(t);
+    const res = await rpc(t, session, { jsonrpc: "2.0" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: number } };
+    expect(body.error.code).toBe(-32600);
+  });
+
+  test("batched JSON-RPC array body returns HTTP 400", async () => {
+    const t = newTest();
+    const session = await initialize(t);
+    const res = await t.fetch("/mcp/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-session-id": session,
+      },
+      body: JSON.stringify([
+        { jsonrpc: "2.0", id: 1, method: "tools/list" },
+      ]),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toMatch(/[Bb]atched/);
+  });
+
+  test("unsupported MCP-Protocol-Version header returns 400", async () => {
+    const t = newTest();
+    const session = await initialize(t);
+    const res = await rpc(
+      t,
+      session,
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      { "mcp-protocol-version": "9999-01-01" },
+    );
+    expect(res.status).toBe(400);
+    expect(await res.text()).toMatch(/Unsupported MCP-Protocol-Version/);
+  });
+
+  test("initialize negotiates the supported protocol version in the response body", async () => {
+    const t = newTest();
+    const res = await t.fetch("/mcp/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "1999-01-01" },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      result: { protocolVersion: string };
+    };
+    // Server falls back to the default supported version when the
+    // client asks for something it doesn't speak.
+    expect(body.result.protocolVersion).toBe("2025-06-18");
+  });
+});
+
+// =================================================================
+// resolveIdentity branches: covers Cluster G #25. The example wires
+// `resolveIdentity` to (a) accept "valid-userinfo-token", (b) throw
+// on "boom-token", (c) return null otherwise. Together those cover
+// the gateway's three behaviours: identity attached, anonymous on
+// rejection, anonymous on throw (with a warn log).
+// =================================================================
+
+describe("resolveIdentity branches", () => {
+  test("unknown bearer is treated as anonymous (Unauthorized denial)", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    // Configure OAuth so an Unauthorized denial maps to HTTP 401 with
+    // WWW-Authenticate; without it the gateway still denies but
+    // wraps the response in a JSON-RPC error envelope on HTTP 200.
+    await t.run(async (ctx) => {
+      await ctx.runMutation(components.mcpGateway.registry.setOAuthConfig, {
+        authServerUrl: "https://idp.example.com/",
+      });
+    });
+    const session = await initialize(t);
+    const res = await rpc(
+      t,
+      session,
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "invoices_list", arguments: {} },
+      },
+      { authorization: "Bearer some-unknown-token" },
+    );
+    expect(res.status).toBe(401);
+    const wwwAuth = res.headers.get("www-authenticate") ?? "";
+    expect(wwwAuth).toMatch(/^Bearer /);
+  });
+
+  test("validator-throws is treated as anonymous (NOT 500)", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    const session = await initialize(t);
+    const res = await rpc(
+      t,
+      session,
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "invoices_summary", arguments: {} },
+      },
+      { authorization: "Bearer boom-token" },
+    );
+    // invoices_summary is public, so anonymous succeeds. The point
+    // is that boom-token's thrown validator does NOT propagate as a
+    // 500; it falls through to anonymous handling.
+    expect(res.status).toBe(200);
   });
 });

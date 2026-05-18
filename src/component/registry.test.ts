@@ -89,6 +89,32 @@ describe("registry", () => {
     });
   });
 
+  test("replaceTools rejects duplicate names in the input array", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      await expect(
+        ctx.runMutation(api.registry.replaceTools, {
+          tools: [
+            {
+              name: "dup",
+              description: "first",
+              kind: "query",
+              functionHandle: "handle-a",
+              inputSchema: { type: "object" },
+            },
+            {
+              name: "dup",
+              description: "second",
+              kind: "mutation",
+              functionHandle: "handle-b",
+              inputSchema: { type: "object" },
+            },
+          ],
+        }),
+      ).rejects.toThrow(/duplicate tool names/);
+    });
+  });
+
   test("clearAllTools removes all tools", async () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
