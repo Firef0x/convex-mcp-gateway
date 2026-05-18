@@ -210,7 +210,7 @@ export function defineMcpAction<
  * export const bootstrap = internalMutation({
  *   args: {},
  *   handler: async (ctx) => {
- *     await gateway.register(ctx, [defineMcpQuery({ ... })], { replace: true });
+ *     await gateway.register(ctx, [defineMcpQuery({ ... })]);
  *   },
  * });
  *
@@ -239,30 +239,38 @@ export class McpGateway {
     });
   }
 
+  /**
+   * Atomically replace the entire registry with the given list of
+   * tools. Any tool currently in the registry whose name isn't in
+   * `tools` is removed; named tools are upserted. Runs in a single
+   * Convex mutation, so concurrent `tools/list` / `tools/call`
+   * callers never observe a partial swap.
+   *
+   * Replace-always is the only semantics: an additive `register`
+   * leaks stale registrations across deploys (the old tool stays
+   * exposed forever unless you remember to call `unregisterTool`),
+   * which is exactly the kind of silent drift this API exists to
+   * prevent. If you need genuinely incremental upserts (e.g. plugin
+   * systems that register tools at runtime from disjoint codepaths),
+   * call `registerTool` directly per tool.
+   */
   async register(
     ctx: RunMutationCtx,
     tools: Array<McpToolDefinition & { fn: AnyToolFunctionReference }>,
-    options?: { replace?: boolean },
   ): Promise<void> {
-    if (options?.replace) {
-      const resolved = await Promise.all(
-        tools.map(async (tool) => ({
-          name: tool.name,
-          description: tool.description,
-          kind: tool.kind,
-          functionHandle: await createFunctionHandle(tool.fn as any),
-          inputSchema: tool.inputSchema,
-          ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
-        })),
-      );
-      await ctx.runMutation(this.component.registry.replaceTools, {
-        tools: resolved,
-      });
-      return;
-    }
-    for (const tool of tools) {
-      await this.registerTool(ctx, tool);
-    }
+    const resolved = await Promise.all(
+      tools.map(async (tool) => ({
+        name: tool.name,
+        description: tool.description,
+        kind: tool.kind,
+        functionHandle: await createFunctionHandle(tool.fn as any),
+        inputSchema: tool.inputSchema,
+        ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
+      })),
+    );
+    await ctx.runMutation(this.component.registry.replaceTools, {
+      tools: resolved,
+    });
   }
 
   async unregisterTool(ctx: RunMutationCtx, name: string): Promise<boolean> {

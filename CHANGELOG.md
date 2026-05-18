@@ -61,6 +61,18 @@
 
 ### Breaking changes
 
+- `gateway.register(ctx, tools)` no longer takes an `{ replace: true }`
+  option — replace is now the only (and default) behaviour. The old
+  upsert-only mode silently leaked stale registrations across deploys
+  (a renamed or removed tool stayed exposed forever unless the host
+  remembered to call `unregisterTool`). Migration: drop the
+  `{ replace: true }` argument; behaviour is unchanged.
+  For genuine per-item upsert (plugin systems registering tools at
+  runtime from disjoint codepaths), call `gateway.registerTool`
+  directly per tool — that's still upsert-only.
+
+
+
 - **Authorize is now a JS callback, not a registered Convex query.** The
   host passes an `authorize` function to `gateway.handleMcpRequest(ctx,
   request, { authorize })`; there is no `gateway.setAuthorizer`, no

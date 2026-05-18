@@ -82,7 +82,6 @@ export const registerDefaults = internalMutation({
           metadata: { roles: ["finance.admin"] },
         }),
       ],
-      { replace: true },
     );
   },
 });
@@ -94,9 +93,13 @@ digits, underscore, hyphen, up to 64 chars. Dotted names like
 style) are rejected by most MCP clients and will throw at
 registration time. Use `invoices_list` instead.
 
-`{ replace: true }` makes the registry mirror this list exactly: any tool
-no longer in the array is removed in the same Convex mutation. Without
-the flag, `register` is upsert-only and old tools survive.
+`gateway.register` always replaces the registry atomically: tools no
+longer in the array are removed in the same Convex mutation. This is
+deliberate — incremental upserts leak stale registrations across
+deploys (the old tool stays exposed forever unless you remember to
+`unregisterTool`), which is exactly what this API is meant to
+prevent. For plugin systems that need genuine per-item upserts, call
+`gateway.registerTool` directly per tool.
 
 `defineMcp{Query,Mutation,Action}` validates `args` against
 `FunctionArgs<typeof fn>` at compile time. Passing the wrong validator or

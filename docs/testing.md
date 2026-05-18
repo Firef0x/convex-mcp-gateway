@@ -376,7 +376,7 @@ Registration.
   required (the audit row needs *some* value, even `null`). The host's
   `handleMcpRequest` always passes one; tests must too.
 - **Stale registry between tests.** Convex-test gives each test a fresh
-  in-memory database, so this isn't an issue across files. But
-  registering tools across tests in the same `describe` block needs
-  `gateway.register(ctx, [...], { replace: true })` to avoid cross-test
-  contamination.
+  in-memory database, so this isn't an issue across files. Calling
+  `gateway.register(ctx, [...])` inside each test always replaces the
+  registry atomically, so cross-test contamination within a `describe`
+  block is also not a concern.

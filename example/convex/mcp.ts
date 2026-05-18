@@ -51,7 +51,6 @@ export const registerDefaults = internalMutation({
           metadata: { public: true },
         }),
       ],
-      { replace: true },
     );
     return null;
   },

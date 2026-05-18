@@ -74,7 +74,6 @@ export const registerDefaults = internalMutation({
           args: { status: v.optional(v.string()) },
         }),
       ],
-      { replace: true },
     );
   },
 });
