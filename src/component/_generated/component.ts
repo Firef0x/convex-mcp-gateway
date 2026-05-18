@@ -96,7 +96,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       >;
     };
     registry: {
-      clearAll: FunctionReference<"mutation", "internal", {}, null, Name>;
+      clearAllTools: FunctionReference<"mutation", "internal", {}, null, Name>;
       getOAuthConfig: FunctionReference<
         "query",
         "internal",

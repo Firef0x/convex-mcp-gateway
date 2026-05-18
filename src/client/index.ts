@@ -225,6 +225,12 @@ export function defineMcpQuery<
   );
 }
 
+/**
+ * Declare a Convex `mutation` function as an MCP tool. Mirrors
+ * `defineMcpQuery`; the `fn` reference must point to a mutation
+ * (passing a query or action is a compile error) and `args` is
+ * checked against `FunctionArgs<typeof fn>` at compile time.
+ */
 export function defineMcpMutation<
   Ref extends ToolFunctionReference<"mutation">,
   ArgsV extends PropertyValidators,
@@ -240,6 +246,14 @@ export function defineMcpMutation<
   );
 }
 
+/**
+ * Declare a Convex `action` function as an MCP tool. Mirrors
+ * `defineMcpQuery`; the `fn` reference must point to an action
+ * (passing a query or mutation is a compile error) and `args` is
+ * checked against `FunctionArgs<typeof fn>` at compile time. Use
+ * this for tools that perform external IO (fetch, third-party APIs)
+ * or non-transactional work.
+ */
 export function defineMcpAction<
   Ref extends ToolFunctionReference<"action">,
   ArgsV extends PropertyValidators,
@@ -294,6 +308,13 @@ export function defineMcpAction<
 export class McpGateway {
   constructor(public component: ComponentApi) {}
 
+  /**
+   * Upsert a single tool by name. Prefer `register(ctx, tools[])` for
+   * the declarative "this is the full registry" pattern; reach for
+   * `registerTool` only in plugin systems that register tools at
+   * runtime from disjoint code paths. Replacing a tool clears its
+   * `metadata` so a stale field can't survive a re-registration.
+   */
   async registerTool(
     ctx: RunMutationCtx,
     tool: McpToolDefinition & { fn: AnyToolFunctionReference },
@@ -349,12 +370,25 @@ export class McpGateway {
     });
   }
 
+  /**
+   * Remove a single tool by name. Returns `true` if a row was deleted,
+   * `false` if no tool with that name was registered. Prefer
+   * `register(ctx, tools[])` for declarative cleanup; this method is
+   * for runtime/plugin scenarios.
+   */
   async unregisterTool(ctx: RunMutationCtx, name: string): Promise<boolean> {
     return await ctx.runMutation(this.component.registry.unregisterTool, {
       name,
     });
   }
 
+  /**
+   * List every tool currently in the registry, raw rows from the
+   * component table. Useful for debugging or building admin UIs.
+   * For the spec-compliant, authorize-filtered catalog that MCP
+   * clients see, use the gateway's `tools/list` JSON-RPC method via
+   * `handleMcpRequest` instead.
+   */
   async listTools(ctx: RunQueryCtx) {
     return await ctx.runQuery(this.component.registry.listTools, {});
   }
@@ -413,8 +447,14 @@ export class McpGateway {
     });
   }
 
-  async clearAll(ctx: RunMutationCtx): Promise<void> {
-    await ctx.runMutation(this.component.registry.clearAll, {});
+  /**
+   * Wipe the entire tool registry. Does **not** touch `config`,
+   * `audit`, or `sessions` — only the `tools` table. Intended for
+   * tests and one-shot deploy resets where you want the next
+   * `register(ctx, [...])` to start from an empty registry.
+   */
+  async clearTools(ctx: RunMutationCtx): Promise<void> {
+    await ctx.runMutation(this.component.registry.clearAllTools, {});
   }
 
   /**

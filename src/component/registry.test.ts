@@ -89,7 +89,7 @@ describe("registry", () => {
     });
   });
 
-  test("clearAll removes all tools", async () => {
+  test("clearAllTools removes all tools", async () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
       for (const name of ["one", "two", "three"]) {
@@ -102,7 +102,7 @@ describe("registry", () => {
         });
       }
       expect(await ctx.runQuery(api.registry.listTools, {})).toHaveLength(3);
-      await ctx.runMutation(api.registry.clearAll, {});
+      await ctx.runMutation(api.registry.clearAllTools, {});
       expect(await ctx.runQuery(api.registry.listTools, {})).toHaveLength(0);
     });
   });

@@ -1,6 +1,7 @@
 import type { ComponentApi } from "../component/_generated/component.js";
 import {
   buildProtectedResourceMetadataUrl,
+  parseAuthorizerDecision,
   type McpAuthorizerArgs,
   type McpAuthorizerDecision,
   type McpAuthorizerHandler,
@@ -250,25 +251,6 @@ function jsonErrorEnvelope(
   });
 }
 
-function parseDecision(decision: unknown): McpAuthorizerDecision {
-  if (
-    typeof decision !== "object" ||
-    decision === null ||
-    typeof (decision as { allowed?: unknown }).allowed !== "boolean"
-  ) {
-    return {
-      allowed: false,
-      reason:
-        "Authorizer returned an invalid shape. Expected `{ allowed: boolean, reason?: string }`.",
-    };
-  }
-  const d = decision as { allowed: boolean; reason?: unknown };
-  return {
-    allowed: d.allowed,
-    reason: typeof d.reason === "string" ? d.reason : undefined,
-  };
-}
-
 async function safeAuthorize(
   authorize: McpAuthorizerHandler,
   ctx: HandlerCtx,
@@ -276,7 +258,7 @@ async function safeAuthorize(
 ): Promise<{ decision: McpAuthorizerDecision; threw: boolean }> {
   try {
     const result = await authorize(ctx, args);
-    return { decision: parseDecision(result), threw: false };
+    return { decision: parseAuthorizerDecision(result), threw: false };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {

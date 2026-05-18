@@ -79,7 +79,7 @@ export const getTool = query({
   },
 });
 
-export const clearAll = mutation({
+export const clearAllTools = mutation({
   args: {},
   returns: v.null(),
   handler: async (ctx) => {

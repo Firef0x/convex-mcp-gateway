@@ -122,6 +122,34 @@ export interface McpAuthorizerDecision {
 }
 
 /**
+ * Runtime validation of the host's authorize-callback return value.
+ * Lenient on extra fields (forward-compat); strict on the required
+ * `allowed` boolean. Lives in `shared.ts` so both the host (`mcp-handler`)
+ * and the component (`dispatch`, via re-export) can defend against
+ * authorize callbacks that return malformed shapes.
+ */
+export function parseAuthorizerDecision(
+  decision: unknown,
+): McpAuthorizerDecision {
+  if (
+    typeof decision !== "object" ||
+    decision === null ||
+    typeof (decision as { allowed?: unknown }).allowed !== "boolean"
+  ) {
+    return {
+      allowed: false,
+      reason:
+        "Authorizer returned an invalid shape. Expected `{ allowed: boolean, reason?: string }`.",
+    };
+  }
+  const d = decision as { allowed: boolean; reason?: unknown };
+  return {
+    allowed: d.allowed,
+    reason: typeof d.reason === "string" ? d.reason : undefined,
+  };
+}
+
+/**
  * Authorizer signature: a regular async (or sync) function. It runs in
  * the host's HTTP-action context, so `ctx.auth.getUserIdentity()`
  * returns the JWT-validated identity here.

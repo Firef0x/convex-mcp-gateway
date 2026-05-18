@@ -227,30 +227,8 @@ async function safeRecordAudit(
   }
 }
 
-/**
- * Runtime validation of the host's authorize-callback return value.
- * Lenient on extra fields (forward-compat); strict on the required
- * `allowed` boolean. Re-exported so the host's mcp-handler can defend
- * against authorize callbacks that return malformed shapes.
- */
-export function parseAuthorizerDecision(decision: unknown): {
-  allowed: boolean;
-  reason?: string;
-} {
-  if (
-    typeof decision !== "object" ||
-    decision === null ||
-    typeof (decision as { allowed?: unknown }).allowed !== "boolean"
-  ) {
-    return {
-      allowed: false,
-      reason:
-        "Authorizer returned an invalid shape. Expected `{ allowed: boolean, reason?: string }`.",
-    };
-  }
-  const d = decision as { allowed: boolean; reason?: unknown };
-  return {
-    allowed: d.allowed,
-    reason: typeof d.reason === "string" ? d.reason : undefined,
-  };
-}
+// Single source of truth lives in `src/shared.ts` so both the host's
+// `mcp-handler` and this component module can defend against malformed
+// authorize-callback return values without keeping two copies in sync.
+// Re-export keeps `dispatch.test.ts` and any host that imports it stable.
+export { parseAuthorizerDecision } from "../shared.js";
