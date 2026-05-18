@@ -63,6 +63,11 @@ worth understanding when evaluating its security posture:
   row per `initialize`. Clients that disconnect without DELETE leave
   rows behind; schedule `gateway.pruneSessions(ctx, idleMs)` from a
   cron to bound growth.
+- **Session DELETE is identity-bound.** The session row records the
+  caller's JWT subject at `initialize` time. `DELETE /mcp/` requires
+  the same subject (or both ends anonymous) and otherwise returns
+  HTTP 403, so a leaked session id alone cannot DoS an authenticated
+  user's session.
 - **No rate limiting in the component.** Combine with
   [`@convex-dev/rate-limiter`](https://www.npmjs.com/package/@convex-dev/rate-limiter)
   in your authorizer for public tools.

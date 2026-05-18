@@ -75,12 +75,21 @@ export default defineSchema({
    * `sessionId` is a 128-bit cryptographically random hex string,
    * matching the MCP 2025-06-18 requirement that it be globally unique
    * and consist of visible ASCII characters only.
+   *
+   * `identitySubject` records the JWT `sub` claim that initialised the
+   * session (or `null` for anonymous initialisation). It is set at
+   * create time and never changes; `DELETE /mcp/` requires the same
+   * subject to authorise teardown, so a leaked session id alone
+   * cannot DoS an authenticated user's session. Optional for
+   * forward-compat with pre-binding session rows: such rows skip the
+   * identity check on DELETE.
    */
   sessions: defineTable({
     sessionId: v.string(),
     protocolVersion: v.string(),
     createdAt: v.number(),
     lastSeenAt: v.number(),
+    identitySubject: v.optional(v.union(v.string(), v.null())),
   })
     .index("by_sessionId", ["sessionId"])
     .index("by_lastSeenAt", ["lastSeenAt"]),

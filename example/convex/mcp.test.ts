@@ -238,6 +238,48 @@ describe("HTTP envelope (host-mounted /mcp/)", () => {
     expect(session).toMatch(/^[0-9a-f]{32}$/);
   });
 
+  test("DELETE by an anonymous caller cannot tear down an authenticated session", async () => {
+    // Open a session as the userinfo-resolved subject (the example's
+    // resolveIdentity accepts `valid-userinfo-token` →
+    // "validator-resolved-sub"). The gateway binds the session row to
+    // that subject. An anonymous DELETE (no Bearer) must be refused
+    // with 403 — otherwise a leaked session id alone would suffice to
+    // DoS the authenticated user's session.
+    const t = newTest();
+    const initRes = await t.fetch("/mcp/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: "Bearer valid-userinfo-token",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18" },
+      }),
+    });
+    expect(initRes.status).toBe(200);
+    const session = initRes.headers.get("mcp-session-id")!;
+
+    const delAnon = await t.fetch("/mcp/", {
+      method: "DELETE",
+      headers: { "mcp-session-id": session },
+    });
+    expect(delAnon.status).toBe(403);
+
+    // The original caller (same Bearer) can still tear it down.
+    const delOwner = await t.fetch("/mcp/", {
+      method: "DELETE",
+      headers: {
+        "mcp-session-id": session,
+        authorization: "Bearer valid-userinfo-token",
+      },
+    });
+    expect(delOwner.status).toBe(200);
+  });
+
   test("DELETE terminates session, subsequent request returns 404", async () => {
     const t = newTest();
     const session = await initialize(t);

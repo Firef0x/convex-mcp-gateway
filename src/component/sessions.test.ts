@@ -11,6 +11,7 @@ describe("sessions", () => {
       const id = await ctx.runMutation(internal.sessions.createSession, {
         sessionId: "deadbeef",
         protocolVersion: "2025-06-18",
+        identitySubject: null,
       });
       expect(id).toBeTypeOf("string");
 
@@ -19,6 +20,7 @@ describe("sessions", () => {
       });
       expect(session?.sessionId).toBe("deadbeef");
       expect(session?.protocolVersion).toBe("2025-06-18");
+      expect(session?.identitySubject).toBeNull();
       expect(session?.createdAt).toBe(session?.lastSeenAt);
     });
   });
@@ -43,6 +45,7 @@ describe("sessions", () => {
       await ctx.runMutation(internal.sessions.createSession, {
         sessionId: "s1",
         protocolVersion: "2025-06-18",
+        identitySubject: null,
       });
       const before = await ctx.runQuery(internal.sessions.getSession, {
         sessionId: "s1",
@@ -70,26 +73,64 @@ describe("sessions", () => {
     });
   });
 
-  test("deleteSession removes the row and reports whether it existed", async () => {
+  test("deleteSession returns 'deleted' for an anonymous match", async () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
       await ctx.runMutation(internal.sessions.createSession, {
         sessionId: "tmp",
         protocolVersion: "2025-06-18",
+        identitySubject: null,
       });
       expect(
         await ctx.runMutation(internal.sessions.deleteSession, {
           sessionId: "tmp",
+          callerIdentitySubject: null,
         }),
-      ).toBe(true);
+      ).toBe("deleted");
       expect(
         await ctx.runQuery(internal.sessions.getSession, { sessionId: "tmp" }),
       ).toBeNull();
       expect(
         await ctx.runMutation(internal.sessions.deleteSession, {
           sessionId: "tmp",
+          callerIdentitySubject: null,
         }),
-      ).toBe(false);
+      ).toBe("not_found");
+    });
+  });
+
+  test("deleteSession returns 'forbidden' when caller subject mismatches", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      await ctx.runMutation(internal.sessions.createSession, {
+        sessionId: "alice-sess",
+        protocolVersion: "2025-06-18",
+        identitySubject: "alice",
+      });
+
+      // Anonymous caller tries to delete alice's session: refused.
+      expect(
+        await ctx.runMutation(internal.sessions.deleteSession, {
+          sessionId: "alice-sess",
+          callerIdentitySubject: null,
+        }),
+      ).toBe("forbidden");
+
+      // Mallory tries to delete alice's session: also refused.
+      expect(
+        await ctx.runMutation(internal.sessions.deleteSession, {
+          sessionId: "alice-sess",
+          callerIdentitySubject: "mallory",
+        }),
+      ).toBe("forbidden");
+
+      // Alice herself: deletion goes through.
+      expect(
+        await ctx.runMutation(internal.sessions.deleteSession, {
+          sessionId: "alice-sess",
+          callerIdentitySubject: "alice",
+        }),
+      ).toBe("deleted");
     });
   });
 
@@ -101,6 +142,7 @@ describe("sessions", () => {
       await ctx.runMutation(internal.sessions.createSession, {
         sessionId: "old",
         protocolVersion: "2025-06-18",
+        identitySubject: null,
       });
 
       // Advance 2 hours; 'old' is now stale, create a 'fresh' session.
@@ -108,6 +150,7 @@ describe("sessions", () => {
       await ctx.runMutation(internal.sessions.createSession, {
         sessionId: "fresh",
         protocolVersion: "2025-06-18",
+        identitySubject: null,
       });
 
       // Prune anything older than 1 hour.

@@ -189,15 +189,19 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       createSession: FunctionReference<
         "mutation",
         "internal",
-        { protocolVersion: string; sessionId: string },
+        {
+          identitySubject: string | null;
+          protocolVersion: string;
+          sessionId: string;
+        },
         string,
         Name
       >;
       deleteSession: FunctionReference<
         "mutation",
         "internal",
-        { sessionId: string },
-        boolean,
+        { callerIdentitySubject: string | null; sessionId: string },
+        "deleted" | "not_found" | "forbidden",
         Name
       >;
       getSession: FunctionReference<
@@ -208,6 +212,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           _creationTime: number;
           _id: string;
           createdAt: number;
+          identitySubject?: string | null;
           lastSeenAt: number;
           protocolVersion: string;
           sessionId: string;

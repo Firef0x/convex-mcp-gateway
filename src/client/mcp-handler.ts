@@ -316,7 +316,7 @@ export async function handleMcpRequest(
       });
       break;
     case "DELETE":
-      response = await handleDelete(ctx, request, component);
+      response = await handleDelete(ctx, request, component, options);
       break;
     default:
       response = new Response("Method Not Allowed", {
@@ -327,19 +327,85 @@ export async function handleMcpRequest(
   return withCors(response, options.cors, request);
 }
 
+/**
+ * Resolve the caller's identity for a request. Used at three points:
+ *   - `tools/list` and `tools/call`: identity drives audit + authorize
+ *   - `initialize`: identity binds to the session row so DELETE later
+ *     verifies teardown is authorised
+ *   - `DELETE`: identity matches what was bound at create time
+ *
+ * Resolution order:
+ *   1. `options.resolveIdentity` if configured AND a Bearer is present
+ *   2. Convex's `ctx.auth.getUserIdentity()` (validates against
+ *      `auth.config.ts`); `iss/aud` mismatches downgrade to null
+ *      rather than 500 the request.
+ */
+async function resolveCallerIdentity(
+  ctx: HandlerCtx,
+  request: Request,
+  options: HandleMcpRequestOptions,
+): Promise<{ subject: string; claims?: Record<string, unknown> } | null> {
+  if (options.resolveIdentity) {
+    const authHeader = request.headers.get("authorization");
+    const token = authHeader?.toLowerCase().startsWith("bearer ")
+      ? authHeader.slice(7)
+      : null;
+    if (token) {
+      try {
+        return await options.resolveIdentity(token);
+      } catch (err) {
+        console.warn(
+          `[mcp-gateway] resolveIdentity threw; treating as anonymous. ` +
+            `(${err instanceof Error ? err.message : String(err)})`,
+        );
+        return null;
+      }
+    }
+    return null;
+  }
+  try {
+    const raw = (await ctx.auth.getUserIdentity()) as
+      | { subject?: string; [k: string]: unknown }
+      | null
+      | undefined;
+    if (raw && typeof raw.subject === "string") {
+      return { subject: raw.subject, claims: raw };
+    }
+  } catch (err) {
+    console.warn(
+      `[mcp-gateway] ctx.auth.getUserIdentity() threw; treating as anonymous. ` +
+        `Likely a Bearer token whose iss/aud doesn't match auth.config.ts. ` +
+        `(${err instanceof Error ? err.message : String(err)})`,
+    );
+  }
+  return null;
+}
+
 async function handleDelete(
   ctx: HandlerCtx,
   request: Request,
   component: ComponentApi,
+  options: HandleMcpRequestOptions,
 ): Promise<Response> {
   const sessionId = request.headers.get("mcp-session-id");
   if (!sessionId) {
     return new Response("Missing Mcp-Session-Id header", { status: 400 });
   }
-  const deleted = await ctx.runMutation(component.sessions.deleteSession, {
+  // Identity-bound DELETE: the session row remembers the subject that
+  // initialised it. Teardown must come from the same subject (or both
+  // sides anonymous) — otherwise a leaked session-id alone is enough
+  // to DoS an authenticated user's session.
+  const identity = await resolveCallerIdentity(ctx, request, options);
+  const result = await ctx.runMutation(component.sessions.deleteSession, {
     sessionId,
+    callerIdentitySubject: identity?.subject ?? null,
   });
-  return new Response(null, { status: deleted ? 200 : 404 });
+  if (result === "deleted") return new Response(null, { status: 200 });
+  if (result === "not_found") return new Response(null, { status: 404 });
+  return new Response(
+    "Forbidden: caller identity does not match session owner",
+    { status: 403 },
+  );
 }
 
 async function handlePost(
@@ -420,14 +486,21 @@ async function handlePost(
     // Best-effort: if the caller `initialize`s while carrying an old
     // session id (buggy client reconnecting without DELETE first),
     // drop the old row so the sessions table doesn't grow unbounded.
-    // The spec doesn't require this — pruning would also catch it
-    // eventually — but cleaning up here keeps the table tight without
-    // depending on the prune cadence.
+    // The deleteSession mutation enforces the identity check, so a
+    // mismatched subject (e.g. an attacker who learned someone
+    // else's id and tries to re-initialize) cannot evict the
+    // original session — only the legitimate owner can.
     const staleSessionId = request.headers.get("mcp-session-id");
     if (staleSessionId) {
       try {
+        const callerIdentity = await resolveCallerIdentity(
+          ctx,
+          request,
+          options,
+        );
         await ctx.runMutation(component.sessions.deleteSession, {
           sessionId: staleSessionId,
+          callerIdentitySubject: callerIdentity?.subject ?? null,
         });
       } catch (err) {
         console.warn(
@@ -479,58 +552,11 @@ async function handlePost(
     );
   }
 
-  // Read identity once at the boundary. Used both for the audit subject
-  // and to pass into the authorize callback (the callback also has its
-  // own ctx.auth, but reading once keeps audit and policy consistent
-  // for a single request).
-  //
-  // Resolution order:
-  //   1. If a resolveIdentity is configured AND a Bearer is present,
-  //      call it. Its result wins.
-  //   2. Otherwise fall back to ctx.auth.getUserIdentity() (JWT
-  //      validation against auth.config.ts).
-  //
-  // ctx.auth.getUserIdentity() THROWS on iss/aud mismatch. For a
-  // gateway that may receive tokens from multiple clients (some of
-  // whose IdPs we don't trust at the Convex layer), letting that
-  // throw bubble out 500s the request. We catch and treat as null so
-  // the authorize callback gets a chance to deny cleanly with -32001.
-  let identity: {
-    subject: string;
-    claims?: Record<string, unknown>;
-  } | null = null;
-  if (options.resolveIdentity) {
-    const authHeader = request.headers.get("authorization");
-    const token = authHeader?.toLowerCase().startsWith("bearer ")
-      ? authHeader.slice(7)
-      : null;
-    if (token) {
-      try {
-        identity = await options.resolveIdentity(token);
-      } catch (err) {
-        console.warn(
-          `[mcp-gateway] resolveIdentity threw; treating as anonymous. ` +
-            `(${err instanceof Error ? err.message : String(err)})`,
-        );
-      }
-    }
-  } else {
-    try {
-      const raw = (await ctx.auth.getUserIdentity()) as
-        | { subject?: string; [k: string]: unknown }
-        | null
-        | undefined;
-      if (raw && typeof raw.subject === "string") {
-        identity = { subject: raw.subject, claims: raw };
-      }
-    } catch (err) {
-      console.warn(
-        `[mcp-gateway] ctx.auth.getUserIdentity() threw; treating as anonymous. ` +
-          `Likely a Bearer token whose iss/aud doesn't match auth.config.ts. ` +
-          `(${err instanceof Error ? err.message : String(err)})`,
-      );
-    }
-  }
+  // Read identity once at the boundary. Used as audit subject, as
+  // input to the authorize callback (so it doesn't need to re-read
+  // ctx.auth itself), and — for initialize — as the binding subject
+  // stored on the session row for later DELETE checks.
+  const identity = await resolveCallerIdentity(ctx, request, options);
   const auditIdentitySubject = identity?.subject ?? null;
 
   let body: string;
@@ -547,6 +573,7 @@ async function handlePost(
       await ctx.runMutation(component.sessions.createSession, {
         sessionId,
         protocolVersion: negotiated,
+        identitySubject: auditIdentitySubject,
       });
       body = jsonResultEnvelope(message.id, {
         protocolVersion: negotiated,

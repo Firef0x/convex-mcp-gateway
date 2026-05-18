@@ -8,17 +8,24 @@ const sessionValidator = v.object({
   protocolVersion: v.string(),
   createdAt: v.number(),
   lastSeenAt: v.number(),
+  identitySubject: v.optional(v.union(v.string(), v.null())),
 });
 
 /**
  * Create a fresh session for the negotiated protocol version. Called
  * from the HTTP handler after a successful `initialize`. The session ID
  * is generated server-side; never trust a client-supplied value.
+ *
+ * `identitySubject` is the JWT subject the gateway resolved at
+ * `initialize` time (or `null` if the caller was anonymous). It binds
+ * the session to a specific user so DELETE can verify the teardown
+ * caller matches the creator.
  */
 export const createSession = internalMutation({
   args: {
     sessionId: v.string(),
     protocolVersion: v.string(),
+    identitySubject: v.union(v.string(), v.null()),
   },
   returns: v.id("sessions"),
   handler: async (ctx, args) => {
@@ -26,6 +33,7 @@ export const createSession = internalMutation({
     return await ctx.db.insert("sessions", {
       sessionId: args.sessionId,
       protocolVersion: args.protocolVersion,
+      identitySubject: args.identitySubject,
       createdAt: now,
       lastSeenAt: now,
     });
@@ -69,21 +77,53 @@ export const touchSession = internalMutation({
 });
 
 /**
- * Terminate a session. The HTTP DELETE handler calls this; the
- * spec-required follow-up is HTTP 404 to subsequent requests carrying
- * that session id.
+ * Outcome of a session-delete attempt:
+ *
+ *   - `"deleted"`   — row existed and identity check passed
+ *   - `"not_found"` — no row with that id (404 to the client)
+ *   - `"forbidden"` — row exists but the caller's identitySubject
+ *                     doesn't match what was bound at create time
+ *                     (403 to the client, defends against
+ *                     session-id-leak DoS)
+ */
+const deleteSessionResultValidator = v.union(
+  v.literal("deleted"),
+  v.literal("not_found"),
+  v.literal("forbidden"),
+);
+
+/**
+ * Terminate a session if the calling identity matches what was bound
+ * at create time. The HTTP DELETE handler calls this; the
+ * spec-required follow-up is HTTP 404 (no such session) or 403
+ * (mismatch). Pre-binding session rows (no `identitySubject` field)
+ * fall back to the legacy "delete anything you know the id of"
+ * behaviour for forward-compat; new rows always have the field and
+ * always check.
  */
 export const deleteSession = internalMutation({
-  args: { sessionId: v.string() },
-  returns: v.boolean(),
+  args: {
+    sessionId: v.string(),
+    callerIdentitySubject: v.union(v.string(), v.null()),
+  },
+  returns: deleteSessionResultValidator,
   handler: async (ctx, args) => {
     const row = await ctx.db
       .query("sessions")
       .withIndex("by_sessionId", (q) => q.eq("sessionId", args.sessionId))
       .unique();
-    if (!row) return false;
+    if (!row) return "not_found";
+    // Forward-compat: rows from before identity binding shipped have
+    // no `identitySubject` field. Treat as "owner unknown, allow
+    // delete" so existing in-flight sessions during the deploy
+    // window don't get stuck.
+    if (row.identitySubject !== undefined) {
+      if (row.identitySubject !== args.callerIdentitySubject) {
+        return "forbidden";
+      }
+    }
     await ctx.db.delete("sessions", row._id);
-    return true;
+    return "deleted";
   },
 });
 
