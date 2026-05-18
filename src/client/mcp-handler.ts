@@ -651,7 +651,7 @@ async function handlePost(
         // Record the rejection in the audit log so operators see who
         // tried what and was denied (or what made the authorizer throw).
         try {
-          await ctx.runAction(component.dispatch.recordAuthDenial, {
+          await ctx.runMutation(component.dispatch.recordAuthDenial, {
             name: tool.name,
             args,
             auditIdentitySubject,

@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server.js";
+import { internalMutation, internalQuery } from "./_generated/server.js";
 
 const sessionValidator = v.object({
   _id: v.id("sessions"),
@@ -15,7 +15,7 @@ const sessionValidator = v.object({
  * from the HTTP handler after a successful `initialize`. The session ID
  * is generated server-side; never trust a client-supplied value.
  */
-export const createSession = mutation({
+export const createSession = internalMutation({
   args: {
     sessionId: v.string(),
     protocolVersion: v.string(),
@@ -37,7 +37,7 @@ export const createSession = mutation({
  * already terminated; the HTTP handler responds with 404 in that case
  * so the client knows to start a new session per MCP 2025-06-18.
  */
-export const getSession = query({
+export const getSession = internalQuery({
   args: { sessionId: v.string() },
   returns: v.union(sessionValidator, v.null()),
   handler: async (ctx, args) => {
@@ -54,7 +54,7 @@ export const getSession = query({
  * can distinguish active from idle sessions. Best-effort: failures are
  * non-fatal and the HTTP handler swallows them.
  */
-export const touchSession = mutation({
+export const touchSession = internalMutation({
   args: { sessionId: v.string() },
   returns: v.boolean(),
   handler: async (ctx, args) => {
@@ -73,7 +73,7 @@ export const touchSession = mutation({
  * spec-required follow-up is HTTP 404 to subsequent requests carrying
  * that session id.
  */
-export const deleteSession = mutation({
+export const deleteSession = internalMutation({
   args: { sessionId: v.string() },
   returns: v.boolean(),
   handler: async (ctx, args) => {
@@ -97,7 +97,7 @@ export const deleteSession = mutation({
  */
 const PRUNE_BATCH = 200;
 
-export const pruneSessions = mutation({
+export const pruneSessions = internalMutation({
   args: { olderThanMs: v.number() },
   returns: v.number(),
   handler: async (ctx, args) => {

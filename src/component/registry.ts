@@ -1,6 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import type { MutationCtx } from "./_generated/server.js";
-import { mutation, query } from "./_generated/server.js";
+import { internalMutation, internalQuery } from "./_generated/server.js";
 import { toolKindValidator } from "./schema.js";
 
 const toolReturnValidator = v.object({
@@ -15,7 +15,7 @@ const toolReturnValidator = v.object({
   metadata: v.optional(v.any()),
 });
 
-export const registerTool = mutation({
+export const registerTool = internalMutation({
   args: {
     name: v.string(),
     description: v.string(),
@@ -45,7 +45,7 @@ export const registerTool = mutation({
   },
 });
 
-export const unregisterTool = mutation({
+export const unregisterTool = internalMutation({
   args: { name: v.string() },
   returns: v.boolean(),
   handler: async (ctx, args) => {
@@ -59,7 +59,7 @@ export const unregisterTool = mutation({
   },
 });
 
-export const listTools = query({
+export const listTools = internalQuery({
   args: {},
   returns: v.array(toolReturnValidator),
   handler: async (ctx) => {
@@ -67,7 +67,7 @@ export const listTools = query({
   },
 });
 
-export const getTool = query({
+export const getTool = internalQuery({
   args: { name: v.string() },
   returns: v.union(toolReturnValidator, v.null()),
   handler: async (ctx, args) => {
@@ -79,7 +79,7 @@ export const getTool = query({
   },
 });
 
-export const clearAllTools = mutation({
+export const clearAllTools = internalMutation({
   args: {},
   returns: v.null(),
   handler: async (ctx) => {
@@ -99,7 +99,7 @@ export const clearAllTools = mutation({
  * (e.g. `metadata`) are cleared rather than silently kept from a prior
  * registration.
  */
-export const replaceTools = mutation({
+export const replaceTools = internalMutation({
   args: {
     tools: v.array(
       v.object({
@@ -202,7 +202,7 @@ async function patchConfigRow(
  * Both URLs are validated with `new URL(...)` at write time so a typo
  * fails loudly here instead of crashing the 401 path much later.
  */
-export const setOAuthConfig = mutation({
+export const setOAuthConfig = internalMutation({
   args: {
     authServerUrl: v.union(v.string(), v.null()),
     resourceUrl: v.optional(v.union(v.string(), v.null())),
@@ -256,7 +256,7 @@ function assertAbsoluteUrl(field: string, value: string): void {
   }
 }
 
-export const getOAuthConfig = query({
+export const getOAuthConfig = internalQuery({
   args: {},
   returns: v.union(
     v.object({

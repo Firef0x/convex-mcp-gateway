@@ -95,7 +95,7 @@ test("recordAuthDenial writes a denied audit row", async () => {
   const t = newTest();
   await t.mutation(internal.mcp.registerDefaults, {});
 
-  await t.action(components.mcpGateway.dispatch.recordAuthDenial, {
+  await t.mutation(components.mcpGateway.dispatch.recordAuthDenial, {
     name: "invoices_list",
     args: { status: "open" },
     auditIdentitySubject: null,

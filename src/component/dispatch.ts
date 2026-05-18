@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import type { FunctionHandle } from "convex/server";
-import { action } from "./_generated/server.js";
-import { api } from "./_generated/api.js";
+import { internalAction, internalMutation } from "./_generated/server.js";
+import { internal } from "./_generated/api.js";
 
 const dispatchResultValidator = v.union(
   v.object({ ok: v.literal(true), data: v.any() }),
@@ -37,7 +37,7 @@ type RegisteredTool = {
  * anonymous calls. Nothing about the policy decision crosses the
  * component boundary.
  */
-export const runTool = action({
+export const runTool = internalAction({
   args: {
     name: v.string(),
     args: v.any(),
@@ -47,7 +47,7 @@ export const runTool = action({
   handler: async (ctx, request) => {
     const start = Date.now();
 
-    const tool = (await ctx.runQuery(api.registry.getTool, {
+    const tool = (await ctx.runQuery(internal.registry.getTool, {
       name: request.name,
     })) as RegisteredTool | null;
     if (!tool) {
@@ -122,10 +122,14 @@ export const runTool = action({
  * Record a deny/error decision the host's authorizer made before
  * delegating. Hosts call this when their authorize callback returns
  * `allowed: false` so the audit log captures the rejection (not just
- * the allowed dispatches). Returning the audit id lets the host
- * include it in error responses if they want correlation.
+ * the allowed dispatches).
+ *
+ * Mutation (not action) because the handler only reads the registry
+ * and writes one audit row — no external IO, no non-transactional
+ * work. Hosts invoke via `ctx.runMutation`, one round-trip instead
+ * of the previous action-wrapping-mutation pattern.
  */
-export const recordAuthDenial = action({
+export const recordAuthDenial = internalMutation({
   args: {
     name: v.string(),
     args: v.any(),
@@ -137,15 +141,17 @@ export const recordAuthDenial = action({
   },
   returns: v.null(),
   handler: async (ctx, request) => {
-    const tool = (await ctx.runQuery(api.registry.getTool, {
-      name: request.name,
-    })) as RegisteredTool | null;
+    const row = await ctx.db
+      .query("tools")
+      .withIndex("by_name", (q) => q.eq("name", request.name))
+      .unique();
     // If the tool doesn't exist we still record an audit entry: this is
     // a denied call to a known-by-the-caller name, not the anonymous
     // unknown-tool spam path we skip elsewhere.
+    const tool = row as RegisteredTool | null;
     const toolKind = tool?.kind ?? "query";
     const auditArgs = tool ? redactArgsForAudit(tool, request.args) : null;
-    await safeRecordAudit(ctx, {
+    await ctx.db.insert("audit", {
       toolName: request.name,
       toolKind,
       args: auditArgs,
@@ -219,7 +225,7 @@ async function safeRecordAudit(
   },
 ): Promise<void> {
   try {
-    await ctx.runMutation(api.audit.recordEntry, entry);
+    await ctx.runMutation(internal.audit.recordEntry, entry);
   } catch (err) {
     // Audit must never alter the dispatch outcome. Surface the failure
     // to the deployment log so operators can investigate, then swallow.

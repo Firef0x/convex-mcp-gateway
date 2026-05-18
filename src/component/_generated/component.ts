@@ -72,7 +72,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
     };
     dispatch: {
       recordAuthDenial: FunctionReference<
-        "action",
+        "mutation",
         "internal",
         {
           args: any;

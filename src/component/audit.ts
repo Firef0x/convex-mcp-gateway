@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server.js";
+import { internalMutation, internalQuery } from "./_generated/server.js";
 import { auditOutcomeValidator, toolKindValidator } from "./schema.js";
 
 const auditEntryValidator = v.object({
@@ -17,14 +17,16 @@ const auditEntryValidator = v.object({
 
 /**
  * Component-internal mutation that appends one row to the audit log.
- * Declared as `mutation` (not `internalMutation`) because anyApi-based
- * function references generated for components don't carry the
- * internal/public marker at runtime, so internal references inside the
- * same component fail to resolve. The component boundary still hides
- * this from the host's HTTP surface; only the host (which already
- * trusts itself) could call it via `components.mcpGateway.audit.recordEntry`.
+ * `internalMutation` keeps it off the client API surface and forces
+ * hosts to go through `gateway.listAuditEntries` (server-side) or
+ * call `components.mcpGateway.audit.recordEntry` explicitly via
+ * `ctx.runMutation` if they want to log custom audit events. At
+ * runtime, the component's `internal.*` and `api.*` references both
+ * resolve to the same `anyApi` proxy; the internal marker is a
+ * TypeScript-level guard against accidentally exposing it to
+ * client-side callers.
  */
-export const recordEntry = mutation({
+export const recordEntry = internalMutation({
   args: {
     toolName: v.string(),
     toolKind: toolKindValidator,
@@ -52,7 +54,7 @@ export const recordEntry = mutation({
  * silently miss matches when most of the recent prefix doesn't match the
  * outcome (e.g. lots of recent `allowed` entries hiding older `error`s).
  */
-export const listEntries = query({
+export const listEntries = internalQuery({
   args: {
     toolName: v.optional(v.string()),
     outcome: v.optional(auditOutcomeValidator),
@@ -109,7 +111,7 @@ export const listEntries = query({
  */
 const PRUNE_BATCH = 200;
 
-export const pruneOlderThan = mutation({
+export const pruneOlderThan = internalMutation({
   args: { cutoffMs: v.number() },
   returns: v.number(),
   handler: async (ctx, args) => {
