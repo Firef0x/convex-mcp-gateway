@@ -29,7 +29,7 @@ export type {
 export type {
   HandleMcpRequestOptions,
   McpCorsOption,
-  McpTokenValidator,
+  McpIdentityResolver,
 } from "./mcp-handler.js";
 export {
   buildProtectedResourceMetadataUrl,

@@ -484,7 +484,7 @@ describe("authorize callback (host's http.ts)", () => {
   });
 });
 
-describe("OAuth bridge mode (DCR + AS metadata + tokenValidator)", () => {
+describe("OAuth bridge mode (DCR + AS metadata + resolveIdentity)", () => {
   test("handleClientRegistration returns the configured upstream client_id", async () => {
     const t = newTest();
     const res = await t.fetch("/oauth/register", {
@@ -518,11 +518,11 @@ describe("OAuth bridge mode (DCR + AS metadata + tokenValidator)", () => {
     expect(body.error).toBe("invalid_redirect_uri");
   });
 
-  test("tokenValidator path: identity from validator, not Convex auth", async () => {
+  test("resolveIdentity path: identity from validator, not Convex auth", async () => {
     const t = newTest();
     await t.mutation(internal.mcp.registerDefaults, {});
     const session = await initialize(t);
-    // The host's mcpHandler routes through `tokenValidator` when a Bearer
+    // The host's mcpHandler routes through `resolveIdentity` when a Bearer
     // is present. The example wires it to accept the literal token
     // "valid-userinfo-token" → subject "validator-resolved-sub".
     const res = await t.fetch("/mcp/", {

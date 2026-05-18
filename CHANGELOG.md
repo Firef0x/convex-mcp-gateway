@@ -19,7 +19,7 @@
     `client_id` for every request. Required
     `allowedRedirectPatterns` enforces an allowlist to prevent
     open-redirect attacks.
-  - `tokenValidator` option on `handleMcpRequest`: host-supplied
+  - `resolveIdentity` option on `handleMcpRequest`: host-supplied
     callback typically calling the upstream's userinfo endpoint,
     enabling opaque-token validation (most IdPs default to opaque
     tokens). When set, replaces Convex's local JWT validation

@@ -44,7 +44,7 @@ export type McpCorsOption =
  * to call the IdP's userinfo endpoint:
  *
  * ```ts
- * tokenValidator: async (token) => {
+ * resolveIdentity: async (token) => {
  *   const r = await fetch("https://id.example.com/api/oidc/userinfo", {
  *     headers: { Authorization: `Bearer ${token}` },
  *   });
@@ -62,7 +62,7 @@ export type McpCorsOption =
  * `ctx.auth.getUserIdentity()` (which only handles JWTs validated
  * by your `auth.config.ts`).
  */
-export type McpTokenValidator = (
+export type McpIdentityResolver = (
   token: string,
 ) => Promise<{ subject: string; claims?: Record<string, unknown> } | null>;
 
@@ -78,10 +78,10 @@ export interface HandleMcpRequestOptions {
   /** See `McpCorsOption`. Omit for non-browser-only deployments. */
   cors?: McpCorsOption;
   /**
-   * See `McpTokenValidator`. Omit to use Convex's built-in JWT
+   * See `McpIdentityResolver`. Omit to use Convex's built-in JWT
    * validation via `ctx.auth.getUserIdentity()`.
    */
-  tokenValidator?: McpTokenValidator;
+  resolveIdentity?: McpIdentityResolver;
 }
 
 type HandlerCtx = {
@@ -400,7 +400,7 @@ async function handlePost(
   // for a single request).
   //
   // Resolution order:
-  //   1. If a tokenValidator is configured AND a Bearer is present,
+  //   1. If a resolveIdentity is configured AND a Bearer is present,
   //      call it. Its result wins.
   //   2. Otherwise fall back to ctx.auth.getUserIdentity() (JWT
   //      validation against auth.config.ts).
@@ -414,17 +414,17 @@ async function handlePost(
     subject: string;
     claims?: Record<string, unknown>;
   } | null = null;
-  if (options.tokenValidator) {
+  if (options.resolveIdentity) {
     const authHeader = request.headers.get("authorization");
     const token = authHeader?.toLowerCase().startsWith("bearer ")
       ? authHeader.slice(7)
       : null;
     if (token) {
       try {
-        identity = await options.tokenValidator(token);
+        identity = await options.resolveIdentity(token);
       } catch (err) {
         console.warn(
-          `[mcp-gateway] tokenValidator threw; treating as anonymous. ` +
+          `[mcp-gateway] resolveIdentity threw; treating as anonymous. ` +
             `(${err instanceof Error ? err.message : String(err)})`,
         );
       }

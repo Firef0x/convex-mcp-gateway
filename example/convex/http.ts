@@ -20,7 +20,7 @@ export const authorize: McpAuthorizerHandler = async (ctx, args) => {
   if (meta.public) return { allowed: true };
 
   // Prefer identity already resolved by the gateway (works for both
-  // pure-JWT and tokenValidator/userinfo-bridge modes). Fall back to
+  // pure-JWT and resolveIdentity/userinfo-bridge modes). Fall back to
   // ctx.auth.getUserIdentity() for backward compat.
   const identity =
     validatorIdentity ?? (await ctx.auth.getUserIdentity().catch(() => null));
@@ -44,10 +44,10 @@ export const authorize: McpAuthorizerHandler = async (ctx, args) => {
 
 const http = httpRouter();
 
-// Test fixture for the userinfo-style tokenValidator path. Real hosts
+// Test fixture for the userinfo-style resolveIdentity path. Real hosts
 // would call the upstream IdP's /userinfo endpoint here; the example
 // uses an in-memory map so tests don't need a network.
-const tokenValidator = async (token: string) => {
+const resolveIdentity = async (token: string) => {
   if (token === "valid-userinfo-token") {
     return { subject: "validator-resolved-sub" };
   }
@@ -58,7 +58,7 @@ const mcpHandler = httpAction(async (ctx, request) =>
   gateway.handleMcpRequest(ctx, request, {
     authorize,
     cors: true,
-    tokenValidator,
+    resolveIdentity,
   }),
 );
 // Mount BOTH /mcp/ and /mcp (no trailing slash). claude.ai (and

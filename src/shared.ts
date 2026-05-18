@@ -93,9 +93,9 @@ export interface McpAuthorizerArgs {
   /**
    * The caller's identity, resolved once at the gateway boundary
    * before this callback runs. Source depends on configuration:
-   * - With `tokenValidator` set: whatever the validator returned
+   * - With `resolveIdentity` set: whatever the validator returned
    *   (typically userinfo-endpoint claims).
-   * - Without `tokenValidator`: the result of
+   * - Without `resolveIdentity`: the result of
    *   `ctx.auth.getUserIdentity()`, with `iss/aud` mismatches treated
    *   as null instead of throwing.
    *

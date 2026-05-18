@@ -44,7 +44,7 @@ import { httpRouter } from "convex/server";
 import {
   McpGateway,
   type McpAuthorizerHandler,
-  type McpTokenValidator,
+  type McpIdentityResolver,
 } from "@tfohlmeister/convex-mcp-gateway";
 import { components } from "./_generated/api.js";
 import { httpAction } from "./_generated/server.js";
@@ -59,7 +59,7 @@ const UPSTREAM_CLIENT_ID = "00000000-0000-0000-0000-000000000000";
 // distribution headaches). The host's `authorize` callback will see
 // `args.identity = { subject, claims }` for valid tokens, `null`
 // for anonymous/invalid.
-const tokenValidator: McpTokenValidator = async (token) => {
+const resolveIdentity: McpIdentityResolver = async (token) => {
   const r = await fetch(`${UPSTREAM_ISSUER}/api/oidc/userinfo`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -77,7 +77,7 @@ const authorize: McpAuthorizerHandler = async (_ctx, args) => {
 const http = httpRouter();
 
 const mcpHandler = httpAction(async (ctx, req) =>
-  gateway.handleMcpRequest(ctx, req, { authorize, cors: true, tokenValidator }),
+  gateway.handleMcpRequest(ctx, req, { authorize, cors: true, resolveIdentity }),
 );
 for (const path of ["/mcp/", "/mcp"]) {
   http.route({ path, method: "POST", handler: mcpHandler });
@@ -215,7 +215,7 @@ yours doesn't, you may need a CORS proxy on the bridge as well.
 - **It does not store client credentials.** Public-client / PKCE flow
   only. No secrets ever round-trip through the bridge.
 - **It does not enforce scopes.** Whatever the upstream grants is
-  what reaches your tokenValidator. Per-tool scope checks belong in
+  what reaches your resolveIdentity. Per-tool scope checks belong in
   the `authorize` callback ([recipes](./authorization.md#recipes)).
 - **It does not proxy authentication.** Login happens directly between
   the user's browser and the upstream IdP. We never see credentials.
