@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — initial version
+## 0.1.0 (2026-05-19) - initial version
 
 First public version of `@tfohlmeister/convex-mcp-gateway`. Implements
 the MCP server side of the Convex+MCP integration: register Convex
@@ -87,11 +87,14 @@ to break, so the entries below describe the full surface area.
   later. Dotted names (`invoices.list`) are the common gotcha
   (mirroring `api.invoices.list` reference style); use
   `invoices_list` instead.
-- **Component isolation.** Every function inside the component is
-  declared as `internalMutation` / `internalQuery` / `internalAction`
-  so nothing on the client-callable surface unless the host
-  explicitly wraps it. Component-internal references use
-  `internal.*` rather than `api.*`.
+- **Component boundary.** The user-facing API is the host's
+  `gateway.*` wrapper, never the raw `components.mcpGateway.*`
+  functions. Inside the component, `audit.recordEntry` is the only
+  `internalMutation` because only in-component `dispatch.runTool`
+  writes audit rows; host-called functions (registry, sessions,
+  `dispatch.runTool`, `dispatch.recordAuthDenial`) are public
+  because Convex enforces the internal/public marker at the
+  component boundary at runtime.
 
 ### Docs
 
