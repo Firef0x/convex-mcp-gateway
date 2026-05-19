@@ -20,7 +20,7 @@ labels: bug
 
 ## Environment
 
-- `@convex-dev/mcp-gateway` version:
+- `convex-mcp-gateway` version:
 - Convex CLI version (`npx convex --version`):
 - Node version (`node --version`):
 - Host JWT issuer (Clerk / Auth0 / Pocket-ID / custom):
