@@ -7,7 +7,7 @@ discovery for free.
 
 Built as a [Convex Component](https://www.convex.dev/components).
 
-[![tests](https://github.com/tfohlmeister/convex-mcp-gateway/actions/workflows/test.yml/badge.svg)](https://github.com/tfohlmeister/convex-mcp-gateway/actions/workflows/test.yml)
+[![tests](https://img.shields.io/github/actions/workflow/status/tfohlmeister/convex-mcp-gateway/test.yml?branch=main&label=tests)](https://github.com/tfohlmeister/convex-mcp-gateway/actions/workflows/test.yml)
 [![npm](https://img.shields.io/npm/v/convex-mcp-gateway.svg)](https://www.npmjs.com/package/convex-mcp-gateway)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
