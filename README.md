@@ -51,6 +51,21 @@ A standalone editorial-styled version of the diagram is at
 in-depth sequence and data-flow diagrams live in
 [`docs/architecture.md`](./docs/architecture.md).
 
+## Try it
+
+The companion repo
+[**convex-mcp-gateway-demo**](https://github.com/tfohlmeister/convex-mcp-gateway-demo)
+is a notes app that registers five tools (public, identity-gated,
+role-gated) and shows the audit log live. Three run modes including
+a local-backend setup that needs no Convex account:
+
+```sh
+git clone https://github.com/tfohlmeister/convex-mcp-gateway-demo
+cd convex-mcp-gateway-demo
+pnpm install && pnpm local:start    # in one terminal
+pnpm convex:dev && pnpm convex:run mcp:registerDefaults && pnpm dev
+```
+
 ## Quickstart
 
 ```sh
