@@ -30,6 +30,10 @@ Built as a [Convex Component](https://www.convex.dev/components).
 - **Wire-error sanitization** — generic message on the wire, full detail
   in audit; `ConvexError` passes through for deliberate user-facing
   messages
+- **`convex-test` helper** — `convex-mcp-gateway/test` exports a one-line
+  `register(t)` that hooks the component into a `convexTest` instance so
+  your host tests can exercise the full `/mcp/` round-trip in-process.
+  See [Testing](./docs/testing.md)
 
 ## What it does
 
