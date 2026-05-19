@@ -1,17 +1,18 @@
-# @tfohlmeister/convex-mcp-gateway
+# convex-mcp-gateway
 
 > Auth-aware Convex component that exposes selected Convex functions as
 > MCP tools. Bring your own JWT issuer, declare scopes/roles per tool,
 > get an audit log and OAuth 2.1 protected-resource discovery for free.
 
 [![tests](https://github.com/tfohlmeister/convex-mcp-gateway/actions/workflows/test.yml/badge.svg)](https://github.com/tfohlmeister/convex-mcp-gateway/actions/workflows/test.yml)
-[![npm](https://img.shields.io/npm/v/@tfohlmeister/convex-mcp-gateway.svg)](https://www.npmjs.com/package/@tfohlmeister/convex-mcp-gateway)
+[![npm](https://img.shields.io/npm/v/convex-mcp-gateway.svg)](https://www.npmjs.com/package/convex-mcp-gateway)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
-> **Status: pre-0.1.** The resource-server side of MCP's OAuth profile
-> is implemented (RFC 9728 discovery, RFC 6750 `WWW-Authenticate`
-> headers, scope-aware `tools/list` filter, audit log). A built-in
-> authorization-server bridge with DCR + PKCE is on the [roadmap](#roadmap).
+> **Status: 0.1.** Resource-server side of MCP's OAuth profile is
+> implemented (RFC 9728 discovery, RFC 6750 `WWW-Authenticate` headers,
+> scope-aware `tools/list` filter, audit log). An opt-in OAuth bridge
+> wraps upstream IdPs without DCR (RFC 7591 client registration, pinned
+> upstream `client_id`, redirect-pattern guard). See [roadmap](#roadmap).
 
 ## What it does
 
@@ -32,13 +33,13 @@ in-depth sequence and data-flow diagrams live in
 ## Quickstart
 
 ```sh
-pnpm add @tfohlmeister/convex-mcp-gateway
+pnpm add convex-mcp-gateway
 ```
 
 ```ts
 // convex/convex.config.ts
 import { defineApp } from "convex/server";
-import mcpGateway from "@tfohlmeister/convex-mcp-gateway/convex.config";
+import mcpGateway from "convex-mcp-gateway/convex.config";
 
 const app = defineApp();
 app.use(mcpGateway);
@@ -48,7 +49,7 @@ export default app;
 ```ts
 // convex/mcp.ts — register tools
 import { v } from "convex/values";
-import { McpGateway, defineMcpQuery } from "@tfohlmeister/convex-mcp-gateway";
+import { McpGateway, defineMcpQuery } from "convex-mcp-gateway";
 import { api, components } from "./_generated/api.js";
 import { internalMutation } from "./_generated/server.js";
 
@@ -85,7 +86,7 @@ import { httpRouter } from "convex/server";
 import {
   McpGateway,
   type McpAuthorizerHandler,
-} from "@tfohlmeister/convex-mcp-gateway";
+} from "convex-mcp-gateway";
 import { components } from "./_generated/api.js";
 import { httpAction } from "./_generated/server.js";
 

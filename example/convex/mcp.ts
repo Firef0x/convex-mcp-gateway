@@ -3,7 +3,7 @@ import {
   McpGateway,
   defineMcpMutation,
   defineMcpQuery,
-} from "@tfohlmeister/convex-mcp-gateway";
+} from "convex-mcp-gateway";
 import { api, components } from "./_generated/api.js";
 import { internalMutation } from "./_generated/server.js";
 

@@ -59,7 +59,7 @@ it next to the `/mcp/` route already mounted in
 ```ts
 // convex/http.ts (extending the router from getting-started.md step 4)
 import { httpRouter } from "convex/server";
-import { McpGateway } from "@tfohlmeister/convex-mcp-gateway";
+import { McpGateway } from "convex-mcp-gateway";
 import { components } from "./_generated/api.js";
 import { httpAction } from "./_generated/server.js";
 

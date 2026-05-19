@@ -43,7 +43,7 @@ roadmap item that adds an opt-in request log).
 The `McpGateway` client exposes a thin wrapper:
 
 ```ts
-import { McpGateway } from "@tfohlmeister/convex-mcp-gateway";
+import { McpGateway } from "convex-mcp-gateway";
 import { components } from "./_generated/api.js";
 import { query } from "./_generated/server.js";
 
@@ -131,7 +131,7 @@ deleted count, so the caller loops until it returns `0`:
 ```ts
 // convex/audit.ts
 import { internalMutation } from "./_generated/server.js";
-import { McpGateway } from "@tfohlmeister/convex-mcp-gateway";
+import { McpGateway } from "convex-mcp-gateway";
 import { components } from "./_generated/api.js";
 
 const gateway = new McpGateway(components.mcpGateway);

@@ -29,7 +29,7 @@ Practically this means:
 ```ts
 import {
   type McpAuthorizerHandler,
-} from "@tfohlmeister/convex-mcp-gateway";
+} from "convex-mcp-gateway";
 
 const authorize: McpAuthorizerHandler = async (ctx, args) => {
   // ... your decision ...
@@ -84,7 +84,7 @@ Simplest possible policy: tools opt in to public via metadata; everything
 else needs a valid JWT.
 
 ```ts
-import { type McpAuthorizerHandler } from "@tfohlmeister/convex-mcp-gateway";
+import { type McpAuthorizerHandler } from "convex-mcp-gateway";
 
 const authorize: McpAuthorizerHandler = async (ctx, { toolMetadata }) => {
   const meta = (toolMetadata ?? {}) as { public?: boolean };

@@ -1,5 +1,5 @@
 import { defineApp } from "convex/server";
-import mcpGateway from "@tfohlmeister/convex-mcp-gateway/convex.config";
+import mcpGateway from "convex-mcp-gateway/convex.config";
 
 const app = defineApp();
 // The component owns four storage tables (tools, config, sessions, audit).

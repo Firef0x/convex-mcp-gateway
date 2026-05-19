@@ -25,12 +25,12 @@ be registered alongside your own:
 import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "./schema.js";
-import componentSchema from "@tfohlmeister/convex-mcp-gateway/_generated/component";
+import componentSchema from "convex-mcp-gateway/_generated/component";
 import { components, internal } from "./_generated/api.js";
 
 const modules = import.meta.glob(["./**/*.ts", "./**/*.js", "!**/*.test.ts"]);
 const componentModules = import.meta.glob([
-  "../../node_modules/@tfohlmeister/convex-mcp-gateway/dist/component/**/*.js",
+  "../../node_modules/convex-mcp-gateway/dist/component/**/*.js",
 ]);
 
 function newTest() {

@@ -155,7 +155,7 @@ export function parseAuthorizerDecision(
  * returns the JWT-validated identity here.
  *
  * ```ts
- * import type { McpAuthorizerHandler } from "@tfohlmeister/convex-mcp-gateway";
+ * import type { McpAuthorizerHandler } from "convex-mcp-gateway";
  *
  * export const authorize: McpAuthorizerHandler = async (ctx, args) => {
  *   const identity = await ctx.auth.getUserIdentity();

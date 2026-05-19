@@ -285,7 +285,7 @@ export function defineMcpAction<
  *   McpGateway,
  *   defineMcpQuery,
  *   type McpAuthorizerHandler,
- * } from "@tfohlmeister/convex-mcp-gateway";
+ * } from "convex-mcp-gateway";
  * import { components, api } from "./_generated/api.js";
  * import { internalMutation } from "./_generated/server.js";
  *

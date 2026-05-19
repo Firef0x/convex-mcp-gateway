@@ -2,7 +2,7 @@
 
 ## 0.1.0 (2026-05-19) - initial version
 
-First public version of `@tfohlmeister/convex-mcp-gateway`. Implements
+First public version of `convex-mcp-gateway`. Implements
 the MCP server side of the Convex+MCP integration: register Convex
 functions as MCP tools, mount one `/mcp/` route in your host, plug
 your existing OAuth / JWT issuer in via a callback. No prior release

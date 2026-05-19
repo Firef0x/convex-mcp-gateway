@@ -45,7 +45,7 @@ import {
   McpGateway,
   type McpAuthorizerHandler,
   type McpIdentityResolver,
-} from "@tfohlmeister/convex-mcp-gateway";
+} from "convex-mcp-gateway";
 import { components } from "./_generated/api.js";
 import { httpAction } from "./_generated/server.js";
 
