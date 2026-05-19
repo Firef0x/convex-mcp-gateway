@@ -4,10 +4,21 @@
   "description": "Auth-aware Convex component that exposes selected Convex functions as MCP tools.",
   "type": "module",
   "license": "Apache-2.0",
+  "author": "Thorben Fohlmeister <thorben@fohlm.com>",
+  "homepage": "https://github.com/tfohlmeister/convex-mcp-gateway#readme",
+  "bugs": {
+    "url": "https://github.com/tfohlmeister/convex-mcp-gateway/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tfohlmeister/convex-mcp-gateway.git"
+  },
   "packageManager": "pnpm@10.30.0",
   "files": [
     "dist",
-    "src"
+    "src",
+    "!src/**/*.test.ts",
+    "!src/**/setup.test.ts"
   ],
   "exports": {
     "./package.json": "./package.json",

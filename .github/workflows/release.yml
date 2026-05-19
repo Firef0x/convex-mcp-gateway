@@ -6,7 +6,7 @@ name: Release
 # commits, tags, and pushes.
 #
 # Requires repository secret `NPM_TOKEN` with publish rights to the
-# `@convex-dev` scope (or whichever scope `package.json` declares).
+# `@tfohlmeister` scope on npmjs.org (the registry-url below).
 on:
   push:
     tags:

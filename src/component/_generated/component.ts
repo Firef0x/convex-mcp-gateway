@@ -53,22 +53,6 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         number,
         Name
       >;
-      recordEntry: FunctionReference<
-        "mutation",
-        "internal",
-        {
-          args: any;
-          durationMs: number;
-          errorCode?: number;
-          errorMessage?: string;
-          identitySubject: string | null;
-          outcome: "allowed" | "denied" | "error";
-          toolKind: "query" | "mutation" | "action";
-          toolName: string;
-        },
-        string,
-        Name
-      >;
     };
     dispatch: {
       recordAuthDenial: FunctionReference<
