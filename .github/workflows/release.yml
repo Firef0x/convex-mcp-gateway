@@ -5,8 +5,16 @@ name: Release
 # `pnpm run alpha` (prerelease) locally; that script bumps the version,
 # commits, tags, and pushes.
 #
-# Requires repository secret `NPM_TOKEN` with publish rights to the
-# `@tfohlmeister` scope on npmjs.org (the registry-url below).
+# Authentication is via npm Trusted Publishing (OIDC), not NPM_TOKEN.
+# On npmjs.com -> package settings -> Trusted Publisher, register:
+#   provider:         GitHub Actions
+#   organization:     tfohlmeister
+#   repository:       convex-mcp-gateway
+#   workflow filename: release.yml
+# The `id-token: write` permission below lets npm verify the workflow
+# is the one configured as the trusted publisher; `--provenance` is
+# added automatically by `npm publish` under OIDC, but we set it
+# explicitly to be unambiguous.
 on:
   push:
     tags:
@@ -58,5 +66,3 @@ jobs:
 
       - name: Publish to npm
         run: pnpm publish --no-git-checks --provenance --access public --tag ${{ steps.tag.outputs.tag }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

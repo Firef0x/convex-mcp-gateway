@@ -1,18 +1,35 @@
 # convex-mcp-gateway
 
-> Auth-aware Convex component that exposes selected Convex functions as
-> MCP tools. Bring your own JWT issuer, declare scopes/roles per tool,
-> get an audit log and OAuth 2.1 protected-resource discovery for free.
+Auth-aware MCP server for [Convex](https://convex.dev). Expose selected
+Convex functions as MCP tools, bring your own JWT issuer, declare
+scopes/roles per tool, get an audit log and OAuth 2.1 protected-resource
+discovery for free.
+
+Built as a [Convex Component](https://www.convex.dev/components).
 
 [![tests](https://github.com/tfohlmeister/convex-mcp-gateway/actions/workflows/test.yml/badge.svg)](https://github.com/tfohlmeister/convex-mcp-gateway/actions/workflows/test.yml)
 [![npm](https://img.shields.io/npm/v/convex-mcp-gateway.svg)](https://www.npmjs.com/package/convex-mcp-gateway)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
-> **Status: 0.1.** Resource-server side of MCP's OAuth profile is
-> implemented (RFC 9728 discovery, RFC 6750 `WWW-Authenticate` headers,
-> scope-aware `tools/list` filter, audit log). An opt-in OAuth bridge
-> wraps upstream IdPs without DCR (RFC 7591 client registration, pinned
-> upstream `client_id`, redirect-pattern guard). See [roadmap](#roadmap).
+## Features
+
+- **Type-safe tool registration** — `defineMcpQuery` / `defineMcpMutation` /
+  `defineMcpAction` declare a Convex function as an MCP tool with end-to-
+  end-typed `args` and (optional) `returns` validators
+- **MCP 2025-06-18 Streamable HTTP** — sessions, `Accept` negotiation,
+  `MCP-Protocol-Version` validation, identity-bound `DELETE`, single-
+  frame SSE
+- **One authorize callback** — gates `tools/call` and filters `tools/list`
+  with `mode: "list" | "call"`; uses your existing `ctx.auth.getUserIdentity()`
+- **OAuth 2.1 protected-resource discovery** — RFC 9728 metadata,
+  RFC 6750 `WWW-Authenticate` headers, multi-tenant ready
+- **Optional OAuth bridge** — RFC 8414 AS metadata wrap + RFC 7591 DCR
+  for browser MCP clients (claude.ai) against IdPs without DCR support
+- **Audit log** — one row per call with per-tool argument redaction
+  (verbatim / dropped / dotted-path redacted)
+- **Wire-error sanitization** — generic message on the wire, full detail
+  in audit; `ConvexError` passes through for deliberate user-facing
+  messages
 
 ## What it does
 
@@ -208,11 +225,6 @@ MCP's OAuth profile (RFC 9728 discovery, RFC 6750 `WWW-Authenticate`).
 A separate bridge mode (RFC 8414 metadata + RFC 7591 DCR wrap) lets
 hosts whose upstream IdP doesn't speak DCR still serve browser MCP
 clients — see [docs/oauth-bridge.md](./docs/oauth-bridge.md).
-
-### Before 0.1.0
-
-- Real-client smoke test (MCP Inspector + one IDE integration)
-- npm publish (`pnpm release`)
 
 ### Future
 
