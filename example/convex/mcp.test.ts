@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { convexTest } from "convex-test";
-import { createFunctionHandle } from "convex/server";
+import { createFunctionHandle, type FunctionReference } from "convex/server";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import schema from "./schema.js";
 import { api, components, internal } from "./_generated/api.js";
@@ -741,6 +741,34 @@ describe("OAuth bridge mode (DCR + AS metadata + resolveIdentity)", () => {
 });
 
 describe("audit listEntries (filter regression coverage)", () => {
+  // `audit.recordEntry` is `internalMutation` so the component's public
+  // surface (and the generated `components.mcpGateway.audit` types) hide
+  // it. Tests seed audit rows directly because going through the real
+  // dispatch path would add unrelated side effects; `convex-test` does
+  // not enforce the component-boundary check, so this cast is safe in
+  // tests only.
+  type SeedAuditArgs = {
+    toolName: string;
+    toolKind: "query" | "mutation" | "action";
+    args: unknown;
+    outcome: "allowed" | "denied" | "error";
+    identitySubject: string | null;
+    durationMs: number;
+    errorCode?: number;
+    errorMessage?: string;
+  };
+  const seedAuditEntry = (
+    components.mcpGateway.audit as unknown as {
+      recordEntry: FunctionReference<
+        "mutation",
+        "internal",
+        SeedAuditArgs,
+        string,
+        "mcpGateway"
+      >;
+    }
+  ).recordEntry;
+
   test("finds older matches when newer entries don't match the outcome filter", async () => {
     const t = newTest();
     await t.mutation(internal.mcp.registerDefaults, {});
@@ -748,7 +776,7 @@ describe("audit listEntries (filter regression coverage)", () => {
     await t.run(async (ctx) => {
       // 3 ancient errors first.
       for (let i = 0; i < 3; i++) {
-        await ctx.runMutation(components.mcpGateway.audit.recordEntry, {
+        await ctx.runMutation(seedAuditEntry, {
           toolName: "x",
           toolKind: "query",
           args: { i },
@@ -761,7 +789,7 @@ describe("audit listEntries (filter regression coverage)", () => {
       }
       // 50 recent allowed rows hide the errors past any small window.
       for (let i = 0; i < 50; i++) {
-        await ctx.runMutation(components.mcpGateway.audit.recordEntry, {
+        await ctx.runMutation(seedAuditEntry, {
           toolName: "x",
           toolKind: "query",
           args: { i },
@@ -786,7 +814,7 @@ describe("audit listEntries (filter regression coverage)", () => {
     const t = newTest();
     await t.mutation(internal.mcp.registerDefaults, {});
     await t.run(async (ctx) => {
-      await ctx.runMutation(components.mcpGateway.audit.recordEntry, {
+      await ctx.runMutation(seedAuditEntry, {
         toolName: "old_tool",
         toolKind: "query",
         args: null,
