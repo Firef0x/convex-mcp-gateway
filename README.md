@@ -11,6 +11,8 @@ Built as a [Convex Component](https://www.convex.dev/components).
 [![npm](https://img.shields.io/npm/v/convex-mcp-gateway.svg)](https://www.npmjs.com/package/convex-mcp-gateway)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
+<!-- START: Include on https://convex.dev/components -->
+
 ## Features
 
 - **Type-safe tool registration** — `defineMcpQuery` / `defineMcpMutation` /
@@ -213,6 +215,8 @@ the full walkthrough.
 - **OAuth discovery is opt-in.** Configure an authorization server, and
   401s carry `WWW-Authenticate` headers per RFC 6750 and the
   RFC 9728 path-prefix metadata URL.
+
+<!-- END: Include on https://convex.dev/components -->
 
 ## Local development
 
