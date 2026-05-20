@@ -15,6 +15,7 @@ import {
   buildResourceUrl,
   convexValidatorToJsonSchema,
   resourcePathFromWellKnownRequest,
+  type McpCaller,
   type McpToolDefinition,
   type McpToolKind,
 } from "../shared.js";
@@ -28,6 +29,7 @@ export type {
   McpAuthorizerArgs,
   McpAuthorizerDecision,
   McpAuthorizerHandler,
+  McpCaller,
   McpToolDefinition,
   McpToolKind,
 } from "../shared.js";
@@ -40,6 +42,7 @@ export {
   buildProtectedResourceMetadataUrl,
   buildResourceUrl,
   convexValidatorToJsonSchema,
+  mcpCallerValidator,
   resourcePathFromWellKnownRequest,
 } from "../shared.js";
 
@@ -94,7 +97,7 @@ type ValidateArgs<Ref extends AnyToolFunctionReference, ArgsV> =
  * Mirror of `ValidateArgs` for the optional `returns:` validator.
  * When the host omits `returns`, ReturnsV resolves to `undefined` and
  * validation is bypassed (no constraint). When provided, the validator's
- * inferred type must equal the function's actual return type — drift
+ * inferred type must equal the function's actual return type, drift
  * between them surfaces as a `_typeMismatch` on the config object.
  */
 type ValidateReturns<Ref extends AnyToolFunctionReference, ReturnsV> =
@@ -116,6 +119,20 @@ type ValidateReturns<Ref extends AnyToolFunctionReference, ReturnsV> =
           }
       : { _typeMismatch: "returns must be a Convex validator" };
 
+/**
+ * Keys of `ArgsV` whose validator accepts the injected caller identity
+ * (`McpCaller`). `identityArg` is constrained to these, so it can only
+ * point at an argument the underlying Convex function actually accepts:
+ * naming an arg of the wrong type (e.g. `v.string()`) or one that does
+ * not exist is a compile error, not a runtime surprise. When no arg
+ * accepts a caller, this is `never`, so `identityArg` cannot be set
+ * until you declare one with `mcpCallerValidator`.
+ */
+type McpCallerArgKeys<ArgsV extends PropertyValidators> = {
+  [K in keyof ArgsV]: McpCaller extends Infer<ArgsV[K]> ? K : never;
+}[keyof ArgsV] &
+  string;
+
 interface McpToolConfigBase<
   Ref extends AnyToolFunctionReference,
   ArgsV extends PropertyValidators,
@@ -136,11 +153,27 @@ interface McpToolConfigBase<
    * MCP-advertised return shape can't ship undetected.
    *
    * Bytes (`v.bytes()`) are intentionally NOT supported in the first
-   * cut — the JSON-Schema mapping is fine but base64-encoding the
+   * cut, the JSON-Schema mapping is fine but base64-encoding the
    * runtime value in `structuredContent` adds enough nuance that we
    * defer it until there's demand.
    */
   returns?: ReturnsV;
+  /**
+   * Name of an `args` key the gateway fills server-side with the
+   * resolved caller identity (`{ subject, claims }`) instead of taking
+   * it from the client. Declare that key with `mcpCallerValidator` so
+   * the compile-time `args` check still matches the function. The key
+   * is excluded from the advertised `inputSchema`, stripped from
+   * caller-supplied arguments (no spoofing), and injected from the
+   * identity resolved at the gateway boundary right before dispatch.
+   *
+   * Use this for identity-scoped tools: Convex strips `ctx.auth` across
+   * the component boundary, so a dispatched tool function cannot read
+   * the caller from the token. `identityArg` is the supported channel.
+   * Calls with no resolved identity are rejected as `Unauthorized`
+   * before dispatch, so the tool never runs unscoped.
+   */
+  identityArg?: McpCallerArgKeys<ArgsV>;
   /**
    * Free-form metadata stored alongside the tool registration. The
    * component never inspects this; it is surfaced to the host's
@@ -153,8 +186,8 @@ interface McpToolConfigBase<
 
 /**
  * MCP tool names must match `^[a-zA-Z0-9_-]{1,64}$` (letters, digits,
- * underscore, hyphen; 1-64 chars). Some clients — notably claude.ai's
- * frontend — reject the entire tool list with a validation error
+ * underscore, hyphen; 1-64 chars). Some clients, notably claude.ai's
+ * frontend, reject the entire tool list with a validation error
  * when any single name violates this, even for tools the caller
  * never invokes. The MCP spec itself doesn't pin this regex, but
  * it's the de-facto-enforced pattern across the major clients.
@@ -179,9 +212,22 @@ function build<
       `MCP tool name "${config.name}" violates the required pattern ` +
         `${MCP_TOOL_NAME_PATTERN.source}. Allowed: letters, digits, ` +
         `underscore, hyphen; 1-64 chars. Dotted names like ` +
-        `"namespace.tool" are not allowed by most MCP clients — ` +
+        `"namespace.tool" are not allowed by most MCP clients, ` +
         `use "namespace_tool" instead.`,
     );
+  }
+  // The identity-injected arg is server-filled, so it must NOT appear in
+  // the schema advertised to clients (they neither see nor send it).
+  let clientArgs: PropertyValidators = config.args;
+  if (config.identityArg !== undefined) {
+    if (!(config.identityArg in config.args)) {
+      throw new Error(
+        `identityArg "${config.identityArg}" is not a key of args for tool ` +
+          `"${config.name}". Declare it in args with mcpCallerValidator.`,
+      );
+    }
+    clientArgs = { ...config.args };
+    delete (clientArgs as Record<string, unknown>)[config.identityArg];
   }
   return {
     name: config.name,
@@ -189,9 +235,12 @@ function build<
     kind,
     fn: config.fn,
     functionReference: config.fn,
-    inputSchema: convexValidatorToJsonSchema(config.args),
+    inputSchema: convexValidatorToJsonSchema(clientArgs),
     ...(config.returns !== undefined
       ? { outputSchema: convexValidatorToJsonSchema(config.returns) }
+      : {}),
+    ...(config.identityArg !== undefined
+      ? { identityArg: config.identityArg }
       : {}),
     ...(config.metadata !== undefined ? { metadata: config.metadata } : {}),
   } as McpToolDefinition & { fn: Ref; kind: Kind };
@@ -329,6 +378,9 @@ export class McpGateway {
       ...(tool.outputSchema !== undefined
         ? { outputSchema: tool.outputSchema }
         : {}),
+      ...(tool.identityArg !== undefined
+        ? { identityArg: tool.identityArg }
+        : {}),
       ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
     });
   }
@@ -361,6 +413,9 @@ export class McpGateway {
         inputSchema: tool.inputSchema,
         ...(tool.outputSchema !== undefined
           ? { outputSchema: tool.outputSchema }
+          : {}),
+        ...(tool.identityArg !== undefined
+          ? { identityArg: tool.identityArg }
           : {}),
         ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
       })),
@@ -463,7 +518,7 @@ export class McpGateway {
 
   /**
    * Wipe the entire tool registry. Does **not** touch `config`,
-   * `audit`, or `sessions` — only the `tools` table. Intended for
+   * `audit`, or `sessions`, only the `tools` table. Intended for
    * tests and one-shot deploy resets where you want the next
    * `register(ctx, [...])` to start from an empty registry.
    */
@@ -571,7 +626,7 @@ export class McpGateway {
   ): Promise<Response> {
     // Discovery is read-only public metadata (RFC 9728 §3) and is
     // fetched cross-origin by every browser MCP client. Always
-    // permissive CORS — no secrets here.
+    // permissive CORS, no secrets here.
     const corsHeaders = {
       "access-control-allow-origin": "*",
       vary: "Origin",
@@ -626,8 +681,8 @@ export class McpGateway {
   // OPTIONAL: OIDC-bridge mode
   //
   // The two methods below are opt-in helpers for hosts whose upstream
-  // IdP doesn't support Dynamic Client Registration (RFC 7591) — e.g.
-  // Pocket-ID 2.x — but who still want browser-based MCP clients
+  // IdP doesn't support Dynamic Client Registration (RFC 7591), e.g.
+  // Pocket-ID 2.x, but who still want browser-based MCP clients
   // (which DO require DCR) to connect.
   //
   // Pattern: the host advertises ITSELF as the authorization server in
@@ -738,7 +793,7 @@ export class McpGateway {
       grant_types_supported: upstream.grant_types_supported,
       code_challenge_methods_supported:
         upstream.code_challenge_methods_supported,
-      // Public-client (PKCE) only at the bridge — secrets stay
+      // Public-client (PKCE) only at the bridge, secrets stay
       // upstream and never round-trip through here.
       token_endpoint_auth_methods_supported: ["none"],
       registration_endpoint: `${url.origin}${registrationPath}`,
@@ -875,7 +930,7 @@ export class McpGateway {
 // In-memory cache for upstream OIDC discovery docs. One Convex
 // httpAction process serves many requests; refetching openid-config
 // per call would add 100ms+ per AS-metadata request for no benefit
-// (the doc is effectively static — TTL is 1 hour to recover from
+// (the doc is effectively static, TTL is 1 hour to recover from
 // upstream config changes without a redeploy).
 const oidcCache = new Map<
   string,

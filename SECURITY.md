@@ -51,7 +51,7 @@ worth understanding when evaluating its security posture:
   `throw new Error("...")` from a tool handler is replaced with a
   generic `"Tool execution failed"` on the wire, while the audit
   row keeps the verbose message. Use `throw new ConvexError("...")`
-  when you want a specific message to reach the MCP caller — that
+  when you want a specific message to reach the MCP caller, that
   is the deliberate user-facing channel.
 - **The audit log is unbounded.** No automatic retention. Add a cron
   job that prunes rows older than your retention window. See

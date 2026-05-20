@@ -1,4 +1,5 @@
 import { ConvexError, v } from "convex/values";
+import { mcpCallerValidator } from "convex-mcp-gateway";
 import { mutation, query } from "./_generated/server";
 
 export const seed = mutation({
@@ -42,6 +43,22 @@ export const markPaid = mutation({
 });
 
 /**
+ * Identity-injected tool. Unlike `list` (which sees `ctx.auth` as null
+ * across the component boundary), this declares a `caller` argument that
+ * the gateway fills with the resolved caller identity, wired via
+ * `identityArg: "caller"` in convex/mcp.ts. The tool reads the
+ * authenticated caller directly and safely; clients can neither see nor
+ * spoof the `caller` argument.
+ */
+export const whoami = query({
+  args: { caller: mcpCallerValidator },
+  returns: v.object({ subject: v.string(), hasClaims: v.boolean() }),
+  handler: async (_ctx, { caller }) => {
+    return { subject: caller.subject, hasClaims: caller.claims !== undefined };
+  },
+});
+
+/**
  * A public read-only summary that does not require authentication. The
  * example's authorize callback opts it out of authentication via
  * `metadata: { public: true }` in convex/mcp.ts.
@@ -57,7 +74,7 @@ export const summary = query({
 
 /**
  * Test-only fixture: always throws a plain Error. The gateway treats
- * this as an unexpected internal failure — the wire response carries
+ * this as an unexpected internal failure, the wire response carries
  * a generic "Tool execution failed" message, while the audit row
  * keeps the verbose "boom" string for operator debugging.
  */
@@ -65,7 +82,7 @@ export const throwsAlways = query({
   args: {},
   returns: v.null(),
   handler: async () => {
-    throw new Error("boom — should not reach the wire");
+    throw new Error("boom, should not reach the wire");
   },
 });
 

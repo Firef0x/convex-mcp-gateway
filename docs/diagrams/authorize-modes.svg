@@ -51,7 +51,7 @@
   <line x1="760" y1="328" x2="680" y2="384"
         stroke="#52534e" stroke-width="1.2" marker-end="url(#arrow)"/>
 
-  <!-- ListMode -> Hide (allowed=false or throws) — passive, dashed -->
+  <!-- ListMode -> Hide (allowed=false or throws), passive, dashed -->
   <line x1="840" y1="328" x2="920" y2="384"
         stroke="#52534e" stroke-width="1.2" stroke-dasharray="5,4"
         marker-end="url(#arrow)"/>

@@ -34,6 +34,13 @@ helper iterates them; you don't need to add your own.
   auditing it would dominate the table.
 - **`initialize` and other JSON-RPC methods.** Same reasoning.
 
+- **The injected caller argument.** For a tool that declares
+  `identityArg`, the gateway injects the resolved caller
+  (`{ subject, claims }`) server-side. That argument is stripped before
+  the audit write, so the caller and its (potentially sensitive) claims
+  never land in `args`. The caller's subject is still recorded in the
+  dedicated `identitySubject` column.
+
 If you need request-level observability beyond `tools/call`, layer your
 own logging in front of the gateway's HTTP route (or wait for the
 roadmap item that adds an opt-in request log).

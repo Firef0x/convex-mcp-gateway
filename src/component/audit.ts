@@ -22,7 +22,7 @@ const auditEntryValidator = v.object({
 /**
  * Component-internal mutation that appends one row to the audit log.
  * Declared as `internalMutation` because only `dispatch.runTool`
- * (inside this component) ever writes audit entries — hosts that
+ * (inside this component) ever writes audit entries, hosts that
  * want to log custom audit events should wrap the public
  * `gateway.listAuditEntries` reader instead.
  */
@@ -117,7 +117,7 @@ export const pruneOlderThan = mutation({
   handler: async (ctx, args) => {
     // Iterate oldest-first by `_creationTime` (Convex's default
     // ascending order). The first row whose creationTime >= cutoff
-    // means everything after is also too new — break early.
+    // means everything after is also too new, break early.
     const candidates = await ctx.db
       .query("audit")
       .order("asc")

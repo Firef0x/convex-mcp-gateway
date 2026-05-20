@@ -54,6 +54,14 @@ const resolveIdentity = async (token: string) => {
   if (token === "valid-userinfo-token") {
     return { subject: "validator-resolved-sub" };
   }
+  // Like the above, but carries claims so tests can assert the claims
+  // half of the resolved caller survives the full HTTP -> inject path.
+  if (token === "valid-userinfo-claims-token") {
+    return {
+      subject: "claims-resolved-sub",
+      claims: { email: "claims@example.com" },
+    };
+  }
   if (token === "boom-token") {
     throw new Error("simulated validator failure");
   }
@@ -73,7 +81,7 @@ const mcpHandler = httpAction(async (ctx, request) =>
 // typed the slash explicitly. Convex's exact-path routing matches
 // /mcp ≠ /mcp/, so a single-route deployment silently 404s those
 // calls and the OAuth flow appears to complete but the connector
-// "won't connect" — debugged the hard way.
+// "won't connect", debugged the hard way.
 for (const path of ["/mcp/", "/mcp"]) {
   http.route({ path, method: "POST", handler: mcpHandler });
   http.route({ path, method: "GET", handler: mcpHandler });

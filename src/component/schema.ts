@@ -27,6 +27,14 @@ export default defineSchema({
      * column stay valid courtesy of `v.optional`.
      */
     outputSchema: v.optional(v.any()),
+    /**
+     * Name of the tool-function argument the gateway fills with the
+     * resolved caller identity before dispatch. Excluded from the
+     * advertised inputSchema and stripped from caller args. Optional;
+     * unset means the tool takes no injected identity. Pre-existing rows
+     * without the column stay valid courtesy of `v.optional`.
+     */
+    identityArg: v.optional(v.string()),
     metadata: v.optional(v.any()),
   }).index("by_name", ["name"]),
 

@@ -6,8 +6,8 @@ with embedded browsers) to connect to an upstream IdP that **doesn't
 support Dynamic Client Registration** (Pocket-ID, some older Authentik
 / Keycloak setups, plain OIDC providers without RFC 7591).
 
-This is **opt-in**. The default ["dumb" pass-through mode](./authorization.md)
-— where your `authorize` callback is the entire auth story — keeps
+This is **opt-in**. The default ["dumb" pass-through mode](./authorization.md),
+where your `authorize` callback is the entire auth story, keeps
 working unchanged.
 
 ## What the bridge does
@@ -34,7 +34,7 @@ In the IdP's admin UI, create an OIDC client with:
   `http://localhost:6274/oauth/callback/debug`. For IDE plugins:
   whatever they document.
 
-Note the **client id** — the bridge needs it.
+Note the **client id**, the bridge needs it.
 
 ### 2. Mount the bridge endpoints
 
@@ -108,7 +108,7 @@ http.route({
 const asHandler = httpAction(async (ctx, req) =>
   gateway.serveAuthorizationServerMetadata(ctx, req, {
     upstreamIssuer: UPSTREAM_ISSUER,
-    // See "Pitfalls" below — issuer override matches tokens, NOT spec.
+    // See "Pitfalls" below, issuer override matches tokens, NOT spec.
     overrides: { issuer: UPSTREAM_ISSUER },
   }),
 );
@@ -161,7 +161,7 @@ explicitly. If you only mount `/mcp/`, Convex's strict-path routing
 
 RFC 8414 §2.1 says the `issuer` field in your AS metadata MUST equal
 the URL the metadata document was served from. If you follow that
-literally, the bridge advertises `issuer: <your origin>` — but tokens
+literally, the bridge advertises `issuer: <your origin>`, but tokens
 from the upstream carry `iss: <upstream origin>`. Some clients
 validate `id_token.iss === metadata.issuer` and reject the OAuth flow
 silently.
@@ -179,7 +179,7 @@ Technically a spec violation but no client we've tested
 
 claude.ai's DCR request always asks for `scope: "openid profile email
 groups"`. Stripping `openid` from your advertised `scopes_supported`
-doesn't help — claude.ai asks anyway. Don't bother filtering scopes
+doesn't help, claude.ai asks anyway. Don't bother filtering scopes
 to "fix" client behaviour; either the upstream issues an id_token or
 it doesn't.
 
@@ -189,7 +189,7 @@ MCP 2025-06-18 §6.4 wants tokens audience-bound to the MCP resource
 URL. Many IdPs (Pocket-ID 2.x, others) ignore the `resource`
 parameter and just set `aud: [client_id]`. Most clients we've tested
 accept that, but a strict client would reject it. Resolving this
-requires re-signing tokens at the bridge (with our own keys + JWKS) —
+requires re-signing tokens at the bridge (with our own keys + JWKS),
 out of scope for now.
 
 ### Pre-registering claude.ai's redirect URI
@@ -205,7 +205,7 @@ URIs.
 If a browser MCP client calls the upstream IdP's `userinfo`,
 `token`, or `jwks` endpoints directly (some do, some don't), the
 upstream must serve CORS for the client's origin. We saw Pocket-ID
-return `Access-Control-Allow-Origin: *` on all OIDC endpoints — if
+return `Access-Control-Allow-Origin: *` on all OIDC endpoints, if
 yours doesn't, you may need a CORS proxy on the bridge as well.
 
 ## What the bridge does NOT do

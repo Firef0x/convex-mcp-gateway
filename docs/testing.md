@@ -7,10 +7,10 @@ for general convex-test usage, see the
 
 There are two layers worth covering:
 
-1. **Component layer** — `dispatch.runTool` and `dispatch.recordAuthDenial`,
+1. **Component layer**: `dispatch.runTool` and `dispatch.recordAuthDenial`,
    exercised directly via `t.action(components.mcpGateway.*)`. No HTTP,
-   no auth — just the registry + tool execution + audit pipeline.
-2. **End-to-end layer** — drive the host's `/mcp/` route via `t.fetch`
+   no auth, just the registry + tool execution + audit pipeline.
+2. **End-to-end layer**: drive the host's `/mcp/` route via `t.fetch`
    to cover the full Streamable-HTTP envelope, the authorize callback,
    and identity propagation through `t.withIdentity`.
 

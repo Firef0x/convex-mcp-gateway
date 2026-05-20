@@ -297,6 +297,10 @@ is affected. See [audit-log.md](./audit-log.md) for the full audit schema.
   re-check at call-mode.
 - **Trying to read `ctx.auth` inside a tool function called from the
   component.** Convex strips auth context across the component boundary.
-  If a tool needs the caller's identity, pass it as an argument from the
-  authorize callback or the host (the `auditIdentitySubject` plumbing
-  inside the gateway is for the audit log only).
+  If a tool needs the caller's identity, declare an argument with
+  `mcpCallerValidator` and name it in the tool's `identityArg`: the
+  gateway injects the resolved caller (`{ subject, claims }`) server-side,
+  hides the argument from clients, and rejects unauthenticated calls. See
+  [architecture.md → Identity propagation](./architecture.md#identity-propagation).
+  (Do not reach for the `auditIdentitySubject` plumbing; that is for the
+  audit log only.)

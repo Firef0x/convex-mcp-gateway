@@ -14,14 +14,14 @@ import {
  * headers; non-browser clients (CLIs, server-to-server) work without
  * it.
  *
- * - `true` — permissive: `Access-Control-Allow-Origin: *`,
+ * - `true`, permissive: `Access-Control-Allow-Origin: *`,
  *   `Access-Control-Allow-Credentials: false` (the spec forbids
  *   credentials with the wildcard origin). Tokens are passed via
  *   `Authorization: Bearer ...` so this works for OAuth flows.
- * - `string` / `string[]` — exact-match allowlist of origins. The
+ * - `string` / `string[]`, exact-match allowlist of origins. The
  *   request's `Origin` header is echoed back if it matches, otherwise
  *   no CORS headers are emitted (the browser then blocks the call).
- * - `(origin: string) => boolean` — custom matcher for things like
+ * - `(origin: string) => boolean`, custom matcher for things like
  *   subdomain wildcards or per-tenant rules.
  *
  * `Mcp-Session-Id` is automatically exposed via
@@ -31,7 +31,7 @@ import {
  * **Production note**: `cors: true` makes response bodies readable
  * from any origin. The gateway carries auth via `Authorization:
  * Bearer ...` (never cookies), so wildcard CORS does not transmit
- * the user's credentials — but a webapp running in the user's
+ * the user's credentials, but a webapp running in the user's
  * browser with the Bearer in its own state can read responses
  * cross-origin. Prefer an explicit allowlist
  * (`cors: ["https://app.example.com"]`) for any deployment with
@@ -50,7 +50,7 @@ export type McpCorsOption =
  * for the authorize callback (via `args.identity`).
  *
  * Useful when the upstream IdP issues opaque access tokens that
- * Convex's local JWT validation can't verify — typical pattern is
+ * Convex's local JWT validation can't verify, typical pattern is
  * to call the IdP's userinfo endpoint:
  *
  * ```ts
@@ -66,7 +66,7 @@ export type McpCorsOption =
  *
  * Returning `null` means "token rejected" (treated identically to
  * "no token at all"). Throwing is treated as null with a warning
- * logged — rejection is not an error condition.
+ * logged, rejection is not an error condition.
  *
  * When this option is omitted, the gateway falls back to
  * `ctx.auth.getUserIdentity()` (which only handles JWTs validated
@@ -96,7 +96,7 @@ export interface HandleMcpRequestOptions {
    * Override the `serverInfo` returned in the `initialize` response.
    * Defaults to `{ name: "convex-mcp-gateway", version: "0.0.0" }`.
    * Hosts that white-label or want telemetry-grade version reporting
-   * can supply their own `{ name, version }` here — the constant
+   * can supply their own `{ name, version }` here, the constant
    * baked into this package is intentionally static, because Convex
    * doesn't expose `package.json` to the runtime.
    */
@@ -124,6 +124,7 @@ type RegisteredTool = {
   functionHandle: string;
   inputSchema: unknown;
   outputSchema?: unknown;
+  identityArg?: string;
   metadata?: unknown;
 };
 
@@ -175,7 +176,7 @@ function preflightResponse(
 ): Response {
   const baseHeaders = corsHeaders(cors, request);
   if (Object.keys(baseHeaders).length === 0) {
-    // CORS not configured for this origin — let the browser block it.
+    // CORS not configured for this origin, let the browser block it.
     return new Response(null, { status: 204 });
   }
   const requestedHeaders =
@@ -393,7 +394,7 @@ async function handleDelete(
   }
   // Identity-bound DELETE: the session row remembers the subject that
   // initialised it. Teardown must come from the same subject (or both
-  // sides anonymous) — otherwise a leaked session-id alone is enough
+  // sides anonymous), otherwise a leaked session-id alone is enough
   // to DoS an authenticated user's session.
   const identity = await resolveCallerIdentity(ctx, request, options);
   const result = await ctx.runMutation(component.sessions.deleteSession, {
@@ -489,7 +490,7 @@ async function handlePost(
     // The deleteSession mutation enforces the identity check, so a
     // mismatched subject (e.g. an attacker who learned someone
     // else's id and tries to re-initialize) cannot evict the
-    // original session — only the legitimate owner can.
+    // original session, only the legitimate owner can.
     const staleSessionId = request.headers.get("mcp-session-id");
     if (staleSessionId) {
       try {
@@ -554,7 +555,7 @@ async function handlePost(
 
   // Read identity once at the boundary. Used as audit subject, as
   // input to the authorize callback (so it doesn't need to re-read
-  // ctx.auth itself), and — for initialize — as the binding subject
+  // ctx.auth itself), and, for initialize, as the binding subject
   // stored on the session row for later DELETE checks.
   const identity = await resolveCallerIdentity(ctx, request, options);
   const auditIdentitySubject = identity?.subject ?? null;
@@ -621,7 +622,7 @@ async function handlePost(
             description: tool.description,
             inputSchema: tool.inputSchema,
             // Only emit `outputSchema` when the tool actually declared
-            // one — some MCP clients (Inspector older versions) are
+            // one, some MCP clients (Inspector older versions) are
             // strict about the field being absent vs null vs {}.
             ...(tool.outputSchema !== undefined
               ? { outputSchema: tool.outputSchema }
@@ -658,8 +659,15 @@ async function handlePost(
         break;
       }
 
+      // Identity-injected arg: the gateway fills this server-side from the
+      // resolved caller, so a client-supplied value is meaningless and a
+      // spoofing vector. Strip it before authorize / audit / dispatch.
+      if (tool.identityArg !== undefined) {
+        delete args[tool.identityArg];
+      }
+
       const start = Date.now();
-      const { decision, threw } = await safeAuthorize(options.authorize, ctx, {
+      const authz = await safeAuthorize(options.authorize, ctx, {
         toolName: tool.name,
         toolKind: tool.kind,
         args,
@@ -667,6 +675,18 @@ async function handlePost(
         toolMetadata: tool.metadata ?? null,
         identity,
       });
+      const threw = authz.threw;
+      let decision = authz.decision;
+      // A tool that declares identityArg structurally needs a caller. If
+      // none was resolved, deny as Unauthorized (so the client starts the
+      // OAuth flow) regardless of what the host's authorize returned.
+      // The tool must never run unscoped.
+      if (decision.allowed && tool.identityArg !== undefined && !identity) {
+        decision = {
+          allowed: false,
+          reason: "Unauthorized: tool requires an authenticated caller",
+        };
+      }
 
       if (!decision.allowed) {
         const reason = decision.reason ?? "Forbidden";
@@ -689,7 +709,7 @@ async function handlePost(
           });
         } catch (err) {
           // Match safeRecordAudit's pattern in dispatch.ts: audit must
-          // never alter the dispatch outcome, so swallow — but log so
+          // never alter the dispatch outcome, so swallow, but log so
           // a recurring write failure (schema drift, validator
           // mismatch) is visible to operators.
           console.error(
@@ -741,6 +761,7 @@ async function handlePost(
         name,
         args,
         auditIdentitySubject,
+        identity,
       });
       if (!dispatched.ok) {
         // MCP 2025-06-18 §tools/call distinguishes:

@@ -87,7 +87,7 @@ export const registerDefaults = internalMutation({
 });
 ```
 
-**Naming**: tool names must match `^[a-zA-Z0-9_-]{1,64}$` — letters,
+**Naming**: tool names must match `^[a-zA-Z0-9_-]{1,64}$`, letters,
 digits, underscore, hyphen, up to 64 chars. Dotted names like
 `invoices.list` (mirroring Convex's `api.invoices.list` reference
 style) are rejected by most MCP clients and will throw at
@@ -109,11 +109,40 @@ defineMcpQuery({
 ```
 
 Tools without `returns:` keep their pre-existing wire format
-unchanged — backwards-compatible for any registration that exists today.
+unchanged, backwards-compatible for any registration that exists today.
+
+**Injecting the caller identity (optional)**: a dispatched tool runs
+inside the component, where `ctx.auth` is unavailable. To give a tool
+the authenticated caller, declare an argument with `mcpCallerValidator`
+and name it in `identityArg`. The gateway fills it server-side with the
+resolved caller (`{ subject, claims }`), hides it from the advertised
+schema, strips any client-supplied value (no spoofing), and rejects
+unauthenticated calls as `-32001 Unauthorized`:
+
+```ts
+// convex/invoices.ts
+import { mcpCallerValidator } from "convex-mcp-gateway";
+
+export const whoami = query({
+  args: { caller: mcpCallerValidator },
+  handler: async (_ctx, { caller }) => ({ subject: caller.subject }),
+});
+
+// convex/mcp.ts (in registerDefaults)
+defineMcpQuery({
+  name: "invoices_whoami",
+  fn: api.invoices.whoami,
+  args: { caller: mcpCallerValidator },
+  identityArg: "caller", // ← gateway fills this; clients can't send it
+}),
+```
+
+See [architecture.md → Identity propagation](./architecture.md#identity-propagation)
+for the full data flow.
 
 `gateway.register` always replaces the registry atomically: tools no
 longer in the array are removed in the same Convex mutation. This is
-deliberate — incremental upserts leak stale registrations across
+deliberate, incremental upserts leak stale registrations across
 deploys (the old tool stays exposed forever unless you remember to
 `unregisterTool`), which is exactly what this API is meant to
 prevent. For plugin systems that need genuine per-item upserts, call
@@ -294,10 +323,10 @@ curl http://127.0.0.1:3311/mcp/ \
 
 ## Where to go next
 
-- [architecture.md](./architecture.md) — component model, data flow,
+- [architecture.md](./architecture.md): component model, data flow,
   identity propagation
-- [authorization.md](./authorization.md) — scope/role recipes,
+- [authorization.md](./authorization.md): scope/role recipes,
   `mode: "list"` vs `"call"`, audit-redaction
-- [oauth.md](./oauth.md) — full OAuth 2.1 setup with discovery
-- [audit-log.md](./audit-log.md) — reading and pruning the audit log
-- [testing.md](./testing.md) — `convex-test` patterns for the gateway
+- [oauth.md](./oauth.md): full OAuth 2.1 setup with discovery
+- [audit-log.md](./audit-log.md): reading and pruning the audit log
+- [testing.md](./testing.md): `convex-test` patterns for the gateway

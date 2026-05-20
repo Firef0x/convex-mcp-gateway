@@ -115,9 +115,13 @@ A few invariants worth pointing out:
   drive-by attacker grow the `audit` table without bound.
 - **Authorize throws are isolated.** They become `-32603` JSON-RPC
   errors with an audit entry, not HTTP 500s. The MCP client can recover.
-- **Identity flows host-side only.** The component receives
-  `auditIdentitySubject: string | null` for audit purposes; the actual
-  identity object never crosses the component boundary.
+- **Identity flows host-side only, by default.** The component receives
+  `auditIdentitySubject: string | null` for audit purposes; the full
+  identity object stays in the host. The one exception is a tool that
+  opts in via `identityArg` (see [Identity propagation](#identity-propagation)):
+  for those, the resolved caller `{ subject, claims }` is passed to
+  `runTool` so the gateway can inject it into the named argument. It is
+  never written to the audit log.
 
 ## Request flow: `tools/list`
 
@@ -139,17 +143,58 @@ Convex validates the inbound `Authorization: Bearer <jwt>` header
 against your `auth.config.ts` before any function runs. Inside the
 host's `/mcp/` `httpAction`:
 
-- `handleMcpRequest` calls `ctx.auth.getUserIdentity()` once at the
-  boundary and passes `identity?.subject ?? null` to the component as
-  `auditIdentitySubject`.
-- The authorize callback also calls `ctx.auth.getUserIdentity()` and
-  sees the full identity object (claims, scopes, roles).
-- Tool handlers invoked via `dispatch.runTool` run inside the
-  component, where `ctx.auth` is **not** available. If a tool needs the
-  caller's identity, pass relevant claims as explicit args from the
-  authorize layer, or have the host pre-resolve them before calling
-  `dispatch.runTool`.
+- `handleMcpRequest` resolves the caller once at the boundary and reuses
+  the result everywhere. Resolution order: `options.resolveIdentity(token)`
+  if configured and a Bearer is present (the userinfo-bridge path), else
+  Convex's `ctx.auth.getUserIdentity()` validated against your
+  `auth.config.ts`. Either way the shape is
+  `{ subject: string; claims?: Record<string, unknown> } | null`.
+- The resolved `subject` becomes `auditIdentitySubject` for the audit
+  row. The full identity is also handed to the authorize callback as
+  `args.identity` (so the callback works in both bridge and pure-JWT
+  modes).
 - The audit row stores `identity.subject` (or `null` for anonymous).
+
+![Where the caller identity comes from](./diagrams/identity-provenance.svg)
+
+### Injecting the caller into a tool (`identityArg`)
+
+Tool handlers invoked via `dispatch.runTool` run inside the component,
+where `ctx.auth` is **not** available, so a dispatched tool cannot read
+the caller from the token. The supported channel is `identityArg`:
+
+- Declare an argument with `mcpCallerValidator` (shape
+  `{ subject: string; claims?: any }`) and name it in the tool's
+  `identityArg`.
+- At registration, the gateway removes that argument from the advertised
+  `inputSchema`, so clients never see it.
+- At request time, any client-supplied value for that argument is
+  stripped (no spoofing), and the gateway injects the identity it
+  resolved at the boundary right before dispatch.
+- A tool that declares `identityArg` structurally needs a caller. If
+  none was resolved, the call is denied as `-32001 Unauthorized` (both
+  in the host handler and again inside `runTool`, so a direct component
+  call can't inject `null` and trip the function's arg validator). The
+  tool never runs unscoped.
+- The injected argument is stripped before the audit write, so the
+  caller and its claims never reach the audit log; the subject is still
+  recorded in the audit row's dedicated `identitySubject` column.
+
+```ts
+// convex/invoices.ts
+export const whoami = query({
+  args: { caller: mcpCallerValidator },
+  handler: async (_ctx, { caller }) => ({ subject: caller.subject }),
+});
+
+// convex/mcp.ts
+defineMcpQuery({
+  name: "invoices_whoami",
+  fn: api.invoices.whoami,
+  args: { caller: mcpCallerValidator },
+  identityArg: "caller", // gateway fills `caller`; clients can't send it
+}),
+```
 
 Whatever JWT issuer you already use (Clerk, Auth0, Pocket-ID, custom)
 keeps working without glue code.

@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 720"
+     font-family="'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+  <defs>
+    <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="0.9" fill="rgba(11,13,11,0.10)"/>
+    </pattern>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#52534e"/>
+    </marker>
+    <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#f7591f"/>
+    </marker>
+    <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#1a70c7"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#f5f4ed"/>
+  <rect width="100%" height="100%" fill="url(#dots)" opacity="0.55"/>
+
+  <!-- ================= STAGE EYEBROWS ================= -->
+  <text x="40" y="52" fill="#52534e" font-size="9" font-family="'Geist Mono', ui-monospace, monospace"
+        letter-spacing="0.16em">1 · INBOUND</text>
+  <text x="300" y="52" fill="#52534e" font-size="9" font-family="'Geist Mono', ui-monospace, monospace"
+        letter-spacing="0.16em">2 · RESOLVE AT HOST BOUNDARY</text>
+  <text x="610" y="52" fill="#52534e" font-size="9" font-family="'Geist Mono', ui-monospace, monospace"
+        letter-spacing="0.16em">3 · RESOLVED</text>
+  <text x="852" y="52" fill="#52534e" font-size="9" font-family="'Geist Mono', ui-monospace, monospace"
+        letter-spacing="0.16em">4 · CONSUMERS</text>
+
+  <!-- ================= 1 · INBOUND ================= -->
+  <rect x="40" y="250" width="170" height="78" rx="6" fill="rgba(82,83,78,0.10)" stroke="#65655c" stroke-width="1"/>
+  <rect x="48" y="258" width="32" height="12" rx="2" fill="transparent" stroke="rgba(101,101,92,0.40)" stroke-width="0.8"/>
+  <text x="64" y="267" fill="#65655c" font-size="7" font-family="'Geist Mono', ui-monospace, monospace"
+        text-anchor="middle" letter-spacing="0.08em">EXT</text>
+  <text x="125" y="290" fill="#0b0d0b" font-size="12" font-weight="600" text-anchor="middle">MCP Client</text>
+  <text x="125" y="308" fill="#52534e" font-size="8" font-family="'Geist Mono', ui-monospace, monospace"
+        text-anchor="middle">Authorization:</text>
+  <text x="125" y="319" fill="#52534e" font-size="8" font-family="'Geist Mono', ui-monospace, monospace"
+        text-anchor="middle">Bearer &lt;token&gt;</text>
+
+  <!-- inbound arrow (HTTP blue) -->
+  <line x1="210" y1="289" x2="270" y2="289" stroke="#1a70c7" stroke-width="1.4" marker-end="url(#arrow-link)"/>
+
+  <!-- ================= 2 · RESOLVER CONTAINER (host) ================= -->
+  <rect x="270" y="78" width="300" height="470" rx="8" fill="#ffffff" stroke="#0b0d0b" stroke-width="1"/>
+  <rect x="282" y="90" width="40" height="13" rx="2" fill="transparent" stroke="rgba(11,13,11,0.40)" stroke-width="0.8"/>
+  <text x="302" y="99" fill="#0b0d0b" font-size="7" font-family="'Geist Mono', ui-monospace, monospace"
+        text-anchor="middle" letter-spacing="0.08em">HOST</text>
+  <text x="420" y="100" fill="#0b0d0b" font-size="13" font-weight="600" text-anchor="middle">resolveCallerIdentity</text>
+  <text x="420" y="116" fill="#52534e" font-size="9" font-family="'Geist Mono', ui-monospace, monospace"
+        text-anchor="middle">/mcp/ httpAction · resolved once per request</text>
+
+  <!-- Branch A: BRIDGE MODE -->
+  <rect x="290" y="132" width="260" height="150" rx="6" fill="rgba(247,89,31,0.05)" stroke="#f7591f" stroke-width="1.1"/>
+  <rect x="300" y="142" width="120" height="13" rx="2" fill="transparent" stroke="rgba(247,89,31,0.50)" stroke-width="0.8"/>
+  <text x="360" y="151" fill="#f7591f" font-size="7" font-family="'Geist Mono', ui-monospace, monospace"
+        text-anchor="middle" letter-spacing="0.08em">A · BRIDGE MODE</text>
+  <text x="304" y="174" fill="#52534e" font-size="8" font-family="'Geist Mono', ui-monospace, monospace">if options.resolveIdentity set</text>
+  <text x="304" y="186" fill="#52534e" font-size="8" font-family="'Geist Mono', ui-monospace, monospace">+ Bearer present</text>
+  <text x="304" y="208" fill="#0b0d0b" font-size="9" font-family="'Geist Mono', ui-monospace, monospace">resolveIdentity(token)</text>
+  <line x1="312" y1="216" x2="312" y2="232" stroke="#52534e" stroke-width="1.1" marker-end="url(#arrow)"/>
+  <text x="324" y="236" fill="#52534e" font-size="8" font-family="'Geist Mono', ui-monospace, monospace">calls upstream IdP /userinfo</text>
+  <text x="304" y="262" fill="#0b0d0b" font-size="8.5" font-family="'Geist Mono', ui-monospace, monospace">→ { subject,</text>
+  <text x="304" y="274" fill="#0b0d0b" font-size="8.5" font-family="'Geist Mono', ui-monospace, monospace">    claims: userinfo&#160;doc }</text>
+
+  <!-- Branch B: PURE JWT MODE -->
+  <rect x="290" y="296" width="260" height="138" rx="6" fill="rgba(11,13,11,0.04)" stroke="#52534e" stroke-width="1"/>
+  <rect x="300" y="306" width="138" height="13" rx="2" fill="transparent" stroke="rgba(82,83,78,0.50)" stroke-width="0.8"/>
+  <text x="369" y="315" fill="#52534e" font-size="7" font-family="'Geist Mono', ui-monospace, monospace"
+        text-anchor="middle" letter-spacing="0.08em">B · PURE JWT (DEFAULT)</text>
+  <text x="304" y="338" fill="#52534e" font-size="8" font-family="'Geist Mono', ui-monospace, monospace">else (no resolveIdentity)</text>
+  <text x="304" y="360" fill="#0b0d0b" font-size="9" font-family="'Geist Mono', ui-monospace, monospace">ctx.auth.getUserIdentity()</text>
+  <line x1="312" y1="368" x2="312" y2="384" stroke="#52534e" stroke-width="1.1" marker-end="url(#arrow)"/>
+  <text x="324" y="388" fill="#52534e" font-size="8" font-family="'Geist Mono', ui-monospace, monospace">validated vs auth.config.ts</text>
+  <text x="304" y="414" fill="#0b0d0b" font-size="8.5" font-family="'Geist Mono', ui-monospace, monospace">→ { subject,</text>
+  <text x="304" y="426" fill="#0b0d0b" font-size="8.5" font-family="'Geist Mono', ui-monospace, monospace">    claims: JWT&#160;identity }</text>
+
+  <!-- anonymous note -->
+  <text x="290" y="466" fill="#9a3b12" font-size="8.5" font-family="'Geist Mono', ui-monospace, monospace" font-weight="600">no Bearer · iss/aud mismatch ·</text>
+  <text x="290" y="478" fill="#9a3b12" font-size="8.5" font-family="'Geist Mono', ui-monospace, monospace" font-weight="600">resolver throws  →  null (anonymous)</text>
+  <text x="290" y="500" fill="#52534e" font-size="8" font-style="italic" font-family="'Instrument Serif', Georgia, serif">A thrown resolver / validator is downgraded</text>
+  <text x="290" y="514" fill="#52534e" font-size="8" font-style="italic" font-family="'Instrument Serif', Georgia, serif">to null, never a 500; the request still runs,</text>
+  <text x="290" y="528" fill="#52534e" font-size="8" font-style="italic" font-family="'Instrument Serif', Georgia, serif">just unauthenticated.</text>
+
+  <!-- resolver -> resolved value arrow -->
+  <line x1="570" y1="289" x2="628" y2="289" stroke="#52534e" stroke-width="1.3" marker-end="url(#arrow)"/>
+
+  <!-- ================= 3 · RESOLVED VALUE ================= -->
+  <rect x="628" y="246" width="180" height="86" rx="10" fill="#fff" stroke="#0b0d0b" stroke-width="1.4"/>
+  <text x="718" y="272" fill="#0b0d0b" font-size="10" font-weight="600" text-anchor="middle"
+        font-family="'Geist Mono', ui-monospace, monospace">{ subject: string,</text>
+  <text x="718" y="288" fill="#0b0d0b" font-size="10" font-weight="600" text-anchor="middle"
+        font-family="'Geist Mono', ui-monospace, monospace">  claims?: {…} }</text>
+  <text x="718" y="312" fill="#52534e" font-size="8.5" text-anchor="middle"
+        font-family="'Geist Mono', ui-monospace, monospace">| null  (anonymous)</text>
+
+  <!-- fan-out arrows from resolved value to the three consumers -->
+  <!-- to Audit -->
+  <path d="M 808 268 C 836 268, 836 150, 864 150" fill="none" stroke="#52534e" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <!-- to authorize (focal coral) -->
+  <line x1="808" y1="289" x2="864" y2="289" stroke="#f7591f" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
+  <!-- to identityArg injection -->
+  <path d="M 808 312 C 836 312, 836 446, 864 446" fill="none" stroke="#52534e" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- ================= 4 · CONSUMERS ================= -->
+  <!-- Consumer 1: Audit log -->
+  <rect x="864" y="116" width="186" height="74" rx="6" fill="rgba(11,13,11,0.05)" stroke="#52534e" stroke-width="1"/>
+  <rect x="872" y="124" width="42" height="12" rx="2" fill="transparent" stroke="rgba(82,83,78,0.50)" stroke-width="0.8"/>
+  <text x="893" y="133" fill="#52534e" font-size="7" font-family="'Geist Mono', ui-monospace, monospace"
+        text-anchor="middle" letter-spacing="0.08em">STORE</text>
+  <text x="957" y="153" fill="#0b0d0b" font-size="11" font-weight="600" text-anchor="middle">Audit log</text>
+  <text x="957" y="170" fill="#52534e" font-size="8" font-family="'Geist Mono', ui-monospace, monospace"
+        text-anchor="middle">identitySubject = subject</text>
+  <text x="957" y="182" fill="#52534e" font-size="8" font-family="'Geist Mono', ui-monospace, monospace"
+        text-anchor="middle">(claims never stored)</text>
+
+  <!-- Consumer 2: authorize callback (FOCAL) -->
+  <rect x="864" y="252" width="186" height="74" rx="6" fill="rgba(247,89,31,0.08)" stroke="#f7591f" stroke-width="1.2"/>
+  <rect x="872" y="260" width="40" height="12" rx="2" fill="transparent" stroke="rgba(247,89,31,0.50)" stroke-width="0.8"/>
+  <text x="892" y="269" fill="#f7591f" font-size="7" font-family="'Geist Mono', ui-monospace, monospace"
+        text-anchor="middle" letter-spacing="0.08em">HOST</text>
+  <text x="957" y="289" fill="#0b0d0b" font-size="11" font-weight="600" text-anchor="middle">authorize callback</text>
+  <text x="957" y="306" fill="#52534e" font-size="8" font-family="'Geist Mono', ui-monospace, monospace"
+        text-anchor="middle">args.identity (subject</text>
+  <text x="957" y="318" fill="#52534e" font-size="8" font-family="'Geist Mono', ui-monospace, monospace"
+        text-anchor="middle">+ claims, both modes)</text>
+
+  <!-- Consumer 3: identityArg injection -->
+  <rect x="864" y="408" width="186" height="92" rx="6" fill="#ffffff" stroke="#0b0d0b" stroke-width="1"/>
+  <rect x="872" y="416" width="40" height="12" rx="2" fill="transparent" stroke="rgba(11,13,11,0.40)" stroke-width="0.8"/>
+  <text x="892" y="425" fill="#0b0d0b" font-size="7" font-family="'Geist Mono', ui-monospace, monospace"
+        text-anchor="middle" letter-spacing="0.08em">CORE</text>
+  <text x="957" y="445" fill="#0b0d0b" font-size="11" font-weight="600" text-anchor="middle">identityArg injection</text>
+  <text x="957" y="462" fill="#52534e" font-size="8" font-family="'Geist Mono', ui-monospace, monospace"
+        text-anchor="middle">runTool injects caller into</text>
+  <text x="957" y="474" fill="#52534e" font-size="8" font-family="'Geist Mono', ui-monospace, monospace"
+        text-anchor="middle">the declared tool arg</text>
+  <text x="957" y="490" fill="#9a3b12" font-size="8" font-family="'Geist Mono', ui-monospace, monospace"
+        text-anchor="middle" font-weight="600">null → -32001 Unauthorized</text>
+
+  <!-- ================= EDITORIAL ASIDE ================= -->
+  <line x1="40" y1="572" x2="1040" y2="572" stroke="rgba(11,13,11,0.10)" stroke-width="0.8"/>
+  <text x="40" y="600" fill="#0b0d0b" font-size="13" font-style="italic" font-family="'Instrument Serif', Georgia, serif">
+    One resolution, three readers.
+  </text>
+  <text x="40" y="620" fill="#52534e" font-size="10.5" font-style="italic" font-family="'Instrument Serif', Georgia, serif">
+    <tspan x="40" dy="0">The caller is resolved exactly once at the host boundary. The audit log keeps only the subject; the</tspan>
+    <tspan x="40" dy="16">authorize callback sees the whole identity to make its decision; and a tool that opted in via</tspan>
+    <tspan x="40" dy="16">identityArg has the resolved caller injected server-side; clients can neither see nor spoof it.</tspan>
+  </text>
+
+  <!-- ================= LEGEND ================= -->
+  <text x="40" y="688" fill="#52534e" font-size="8" font-family="'Geist Mono', ui-monospace, monospace"
+        letter-spacing="0.14em">LEGEND</text>
+
+  <rect x="110" y="681" width="14" height="10" rx="2" fill="rgba(82,83,78,0.10)" stroke="#65655c" stroke-width="1"/>
+  <text x="130" y="689" fill="#52534e" font-size="9">External</text>
+
+  <rect x="200" y="681" width="14" height="10" rx="2" fill="#ffffff" stroke="#0b0d0b" stroke-width="1"/>
+  <text x="220" y="689" fill="#52534e" font-size="9">Host · component</text>
+
+  <rect x="330" y="681" width="14" height="10" rx="2" fill="rgba(247,89,31,0.08)" stroke="#f7591f" stroke-width="1"/>
+  <text x="350" y="689" fill="#52534e" font-size="9">authorize (focal)</text>
+
+  <line x1="470" y1="687" x2="498" y2="687" stroke="#1a70c7" stroke-width="1.4" marker-end="url(#arrow-link)"/>
+  <text x="506" y="689" fill="#52534e" font-size="9">HTTP</text>
+
+  <line x1="570" y1="687" x2="598" y2="687" stroke="#52534e" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="606" y="689" fill="#52534e" font-size="9">identity flow</text>
+
+  <line x1="710" y1="687" x2="738" y2="687" stroke="#f7591f" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
+  <text x="746" y="689" fill="#52534e" font-size="9">policy decision</text>
+</svg>

@@ -16,24 +16,24 @@ Built as a [Convex Component](https://www.convex.dev/components).
 
 ## Features
 
-- **Type-safe tool registration** — `defineMcpQuery` / `defineMcpMutation` /
+- **Type-safe tool registration**: `defineMcpQuery` / `defineMcpMutation` /
   `defineMcpAction` declare a Convex function as an MCP tool with end-to-
   end-typed `args` and (optional) `returns` validators
-- **MCP 2025-06-18 Streamable HTTP** — sessions, `Accept` negotiation,
+- **MCP 2025-06-18 Streamable HTTP**: sessions, `Accept` negotiation,
   `MCP-Protocol-Version` validation, identity-bound `DELETE`, single-
   frame SSE
-- **One authorize callback** — gates `tools/call` and filters `tools/list`
+- **One authorize callback**: gates `tools/call` and filters `tools/list`
   with `mode: "list" | "call"`; uses your existing `ctx.auth.getUserIdentity()`
-- **OAuth 2.1 protected-resource discovery** — RFC 9728 metadata,
+- **OAuth 2.1 protected-resource discovery**: RFC 9728 metadata,
   RFC 6750 `WWW-Authenticate` headers, multi-tenant ready
-- **Optional OAuth bridge** — RFC 8414 AS metadata wrap + RFC 7591 DCR
+- **Optional OAuth bridge**: RFC 8414 AS metadata wrap + RFC 7591 DCR
   for browser MCP clients (claude.ai) against IdPs without DCR support
-- **Audit log** — one row per call with per-tool argument redaction
+- **Audit log**: one row per call with per-tool argument redaction
   (verbatim / dropped / dotted-path redacted)
-- **Wire-error sanitization** — generic message on the wire, full detail
+- **Wire-error sanitization**: generic message on the wire, full detail
   in audit; `ConvexError` passes through for deliberate user-facing
   messages
-- **`convex-test` helper** — `convex-mcp-gateway/test` exports a one-line
+- **`convex-test` helper**: `convex-mcp-gateway/test` exports a one-line
   `register(t)` that hooks the component into a `convexTest` instance so
   your host tests can exercise the full `/mcp/` round-trip in-process.
   See [Testing](./docs/testing.md)
@@ -86,7 +86,7 @@ export default app;
 ```
 
 ```ts
-// convex/mcp.ts — register tools
+// convex/mcp.ts, register tools
 import { v } from "convex/values";
 import { McpGateway, defineMcpQuery } from "convex-mcp-gateway";
 import { api, components } from "./_generated/api.js";
@@ -120,7 +120,7 @@ export const registerDefaults = internalMutation({
 ```
 
 ```ts
-// convex/http.ts — mount the gateway with your authorize callback
+// convex/http.ts, mount the gateway with your authorize callback
 import { httpRouter } from "convex/server";
 import {
   McpGateway,
@@ -143,7 +143,7 @@ const http = httpRouter();
 const mcp = httpAction(async (ctx, req) =>
   gateway.handleMcpRequest(ctx, req, { authorize }),
 );
-// Mount both /mcp/ and /mcp — some clients (claude.ai) strip the
+// Mount both /mcp/ and /mcp, some clients (claude.ai) strip the
 // trailing slash from the configured URL before POSTing.
 for (const path of ["/mcp/", "/mcp"]) {
   http.route({ path, method: "POST", handler: mcp });
@@ -157,7 +157,7 @@ export default http;
 npx convex dev --once
 npx convex run mcp:registerDefaults
 
-# Talk to it (Streamable HTTP — initialize first, then send commands).
+# Talk to it (Streamable HTTP, initialize first, then send commands).
 SESSION=$(curl -sSD - -X POST "$CONVEX_SITE_URL/mcp/" \
   -H 'content-type: application/json' \
   -H 'accept: application/json, text/event-stream' \
@@ -181,21 +181,21 @@ the full walkthrough.
 
 ## Documentation
 
-- **[Getting Started](./docs/getting-started.md)** — install, register,
+- **[Getting Started](./docs/getting-started.md)**: install, register,
   call, in five minutes
-- **[Architecture](./docs/architecture.md)** — component model, data
+- **[Architecture](./docs/architecture.md)**: component model, data
   flow, sequence diagrams
-- **[Authorization](./docs/authorization.md)** — authorizer contract,
+- **[Authorization](./docs/authorization.md)**: authorizer contract,
   `mode: "list"` vs `"call"`, scope/role recipes
-- **[OAuth 2.1 setup](./docs/oauth.md)** — RFC 9728 discovery, host-side
+- **[OAuth 2.1 setup](./docs/oauth.md)**: RFC 9728 discovery, host-side
   mount, multi-tenant
-- **[OAuth bridge mode](./docs/oauth-bridge.md)** — opt-in DCR + AS
+- **[OAuth bridge mode](./docs/oauth-bridge.md)**: opt-in DCR + AS
   metadata wrap + userinfo token validation, for browser MCP clients
   (claude.ai) against IdPs that don't support Dynamic Client
   Registration (Pocket-ID, etc.)
-- **[Audit log](./docs/audit-log.md)** — reading, filtering, redacting,
+- **[Audit log](./docs/audit-log.md)**: reading, filtering, redacting,
   pruning
-- **[Testing](./docs/testing.md)** — convex-test patterns, identity
+- **[Testing](./docs/testing.md)**: convex-test patterns, identity
   injection, swappable authorizers
 
 ## Design choices, briefly
@@ -231,7 +231,7 @@ pnpm local:start                        # downloads the pinned binary, writes .e
 ```
 
 The local backend uses upstream test fixture credentials checked into
-`get-convex/convex-backend` — public, deterministic, safe to commit.
+`get-convex/convex-backend`, public, deterministic, safe to commit.
 See [docs/testing.md](./docs/testing.md) for `convex-test` patterns and
 [CONTRIBUTING.md](./CONTRIBUTING.md) for the contribution workflow.
 
@@ -248,7 +248,7 @@ component. The gateway only implements the resource-server side of
 MCP's OAuth profile (RFC 9728 discovery, RFC 6750 `WWW-Authenticate`).
 A separate bridge mode (RFC 8414 metadata + RFC 7591 DCR wrap) lets
 hosts whose upstream IdP doesn't speak DCR still serve browser MCP
-clients — see [docs/oauth-bridge.md](./docs/oauth-bridge.md).
+clients, see [docs/oauth-bridge.md](./docs/oauth-bridge.md).
 
 ### Future
 

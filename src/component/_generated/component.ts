@@ -73,7 +73,12 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       runTool: FunctionReference<
         "action",
         "internal",
-        { args: any; auditIdentitySubject: string | null; name: string },
+        {
+          args: any;
+          auditIdentitySubject: string | null;
+          identity?: { claims?: any; subject: string } | null;
+          name: string;
+        },
         | { data: any; ok: true }
         | { error: { code: number; message: string }; ok: false },
         Name
@@ -97,6 +102,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           _id: string;
           description: string;
           functionHandle: string;
+          identityArg?: string;
           inputSchema: any;
           kind: "query" | "mutation" | "action";
           metadata?: any;
@@ -114,6 +120,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           _id: string;
           description: string;
           functionHandle: string;
+          identityArg?: string;
           inputSchema: any;
           kind: "query" | "mutation" | "action";
           metadata?: any;
@@ -128,6 +135,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         {
           description: string;
           functionHandle: string;
+          identityArg?: string;
           inputSchema: any;
           kind: "query" | "mutation" | "action";
           metadata?: any;
@@ -144,6 +152,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           tools: Array<{
             description: string;
             functionHandle: string;
+            identityArg?: string;
             inputSchema: any;
             kind: "query" | "mutation" | "action";
             metadata?: any;

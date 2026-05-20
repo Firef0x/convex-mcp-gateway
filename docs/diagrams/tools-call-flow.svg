@@ -107,9 +107,9 @@
         text-anchor="middle" letter-spacing="0.06em">{allowed:true}</text>
 
   <!-- 7. runTool -->
-  <rect x="320" y="380" width="160" height="12" rx="2" fill="#f5f4ed"/>
+  <rect x="316" y="380" width="168" height="12" rx="2" fill="#f5f4ed"/>
   <text x="400" y="390" fill="#52534e" font-size="8" font-family="'Geist Mono', ui-monospace, monospace"
-        text-anchor="middle" letter-spacing="0.06em">runTool(args, identitySubject)</text>
+        text-anchor="middle" letter-spacing="0.06em">runTool(args, subject, identity)</text>
 
   <!-- 8. runQuery / runMutation / runAction -->
   <rect x="580" y="416" width="120" height="12" rx="2" fill="#f5f4ed"/>

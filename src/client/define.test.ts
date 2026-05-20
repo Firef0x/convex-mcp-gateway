@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { v } from "convex/values";
-import { defineMcpQuery } from "./index.js";
+import type { FunctionReference } from "convex/server";
+import { defineMcpQuery, mcpCallerValidator, type McpCaller } from "./index.js";
 
 // defineMcpQuery's TS signature requires a real Convex function
 // reference; runtime validation runs first regardless of TS, so we
@@ -60,6 +61,59 @@ describe("defineMcp* name validation", () => {
   test("accepts hyphens, digits, underscores up to 64 chars", () => {
     expect(() => call("a-b_c-1234")).not.toThrow();
     expect(() => call("a".repeat(64))).not.toThrow();
+  });
+});
+
+describe("defineMcp* identityArg (inputSchema + compile-time safety)", () => {
+  type QueryRef<Args extends Record<string, unknown>> = FunctionReference<
+    "query",
+    "public",
+    Args,
+    unknown
+  >;
+
+  test("excludes the injected caller arg from inputSchema", () => {
+    const okRef = {} as QueryRef<{ caller: McpCaller; status?: string }>;
+    const tool = defineMcpQuery({
+      name: "ok_tool",
+      description: "x",
+      fn: okRef,
+      args: { caller: mcpCallerValidator, status: v.optional(v.string()) },
+      identityArg: "caller",
+    });
+    const schema = tool.inputSchema as {
+      properties?: Record<string, unknown>;
+    };
+    expect(schema.properties ?? {}).not.toHaveProperty("caller");
+    expect(schema.properties ?? {}).toHaveProperty("status");
+    expect((tool as { identityArg?: string }).identityArg).toBe("caller");
+  });
+
+  test("identityArg must name an arg that accepts a caller (type error otherwise)", () => {
+    const badRef = {} as QueryRef<{ status: string }>;
+    defineMcpQuery({
+      name: "bad_tool",
+      description: "x",
+      fn: badRef,
+      args: { status: v.string() },
+      // @ts-expect-error - "status" is a plain string arg, not an McpCaller sink
+      identityArg: "status",
+    });
+    expect(true).toBe(true);
+  });
+
+  test("identityArg naming a key absent from args throws at runtime", () => {
+    // TS would catch this, but runtime validation must also reject it for
+    // JS callers / casts that bypass the compiler.
+    expect(() =>
+      (defineMcpQuery as unknown as (c: unknown) => unknown)({
+        name: "missing_arg_tool",
+        description: "x",
+        fn: {},
+        args: { status: v.optional(v.string()) },
+        identityArg: "caller",
+      }),
+    ).toThrow(/identityArg "caller" is not a key of args/);
   });
 });
 

@@ -1,5 +1,7 @@
+import { v } from "convex/values";
 import type {
   GenericValidator,
+  Infer,
   PropertyValidators,
   Validator,
   VAny,
@@ -69,8 +71,49 @@ export interface McpToolDefinition {
    * `defineMcp{Query,Mutation,Action}`.
    */
   outputSchema?: JsonSchema;
+  /**
+   * Name of the tool function argument the gateway fills server-side
+   * with the resolved caller identity (`{ subject, claims }`). When set:
+   * the arg is removed from the advertised `inputSchema` (clients never
+   * see it), stripped from caller-supplied arguments (no spoofing), and
+   * injected from the identity resolved at the gateway boundary right
+   * before dispatch. Lets identity-scoped tools read the caller without
+   * `ctx.auth` (which Convex strips across the component boundary). Use
+   * `mcpCallerValidator` for the arg's validator.
+   */
+  identityArg?: string;
   metadata?: Record<string, unknown>;
 }
+
+/**
+ * Validator for the caller identity the gateway injects into a tool's
+ * `identityArg`. Declare the receiving argument with this validator so
+ * the tool's compile-time `args` check still matches its function:
+ *
+ * ```ts
+ * export const whoami = query({
+ *   args: { caller: mcpCallerValidator },
+ *   handler: async (_ctx, { caller }) => ({ subject: caller.subject }),
+ * });
+ *
+ * defineMcpQuery({
+ *   name: "whoami",
+ *   fn: api.x.whoami,
+ *   args: { caller: mcpCallerValidator },
+ *   identityArg: "caller",
+ * });
+ * ```
+ *
+ * `subject` is the caller's stable id; `claims` is whatever the
+ * boundary resolved (the upstream userinfo doc in bridge mode, or the
+ * Convex JWT identity otherwise).
+ */
+export const mcpCallerValidator = v.object({
+  subject: v.string(),
+  claims: v.optional(v.any()),
+});
+
+export type McpCaller = Infer<typeof mcpCallerValidator>;
 
 /**
  * Args that the gateway passes to the host's `authorize` callback for

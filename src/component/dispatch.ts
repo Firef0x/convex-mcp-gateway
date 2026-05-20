@@ -2,6 +2,7 @@ import { ConvexError, v } from "convex/values";
 import type { FunctionHandle } from "convex/server";
 import { action, mutation } from "./_generated/server.js";
 import { api, internal } from "./_generated/api.js";
+import { mcpCallerValidator } from "../shared.js";
 
 const dispatchResultValidator = v.union(
   v.object({ ok: v.literal(true), data: v.any() }),
@@ -17,6 +18,7 @@ type RegisteredTool = {
   kind: "query" | "mutation" | "action";
   functionHandle: string;
   inputSchema: unknown;
+  identityArg?: string;
   metadata?: unknown;
 };
 
@@ -42,6 +44,13 @@ export const runTool = action({
     name: v.string(),
     args: v.any(),
     auditIdentitySubject: v.union(v.string(), v.null()),
+    /**
+     * Caller identity to inject into the tool's `identityArg` argument.
+     * Resolved host-side at the gateway boundary. Only used when the
+     * registered tool declares an `identityArg`; ignored otherwise.
+     * Optional so direct (test) callers and identity-less tools can omit it.
+     */
+    identity: v.optional(v.union(mcpCallerValidator, v.null())),
   },
   returns: dispatchResultValidator,
   handler: async (ctx, request) => {
@@ -60,7 +69,33 @@ export const runTool = action({
       };
     }
 
-    const auditArgs = redactArgsForAudit(tool, request.args);
+    // A tool that declares `identityArg` needs a resolved caller. Deny
+    // here too (not only in the host handler) so a direct `runTool` call
+    // can't inject `null` and crash the function's arg validator. The
+    // component stays self-defending regardless of how it was reached.
+    if (tool.identityArg !== undefined && !request.identity) {
+      return {
+        ok: false as const,
+        error: {
+          code: -32001,
+          message: "Unauthorized: tool requires an authenticated caller",
+        },
+      };
+    }
+
+    // The audit records only what the caller actually sent: strip the
+    // identity arg before auditing (defense in depth, since the host also
+    // strips it on the HTTP path) so the injected caller / claims never
+    // reach the audit log. Inject the resolved caller only into callArgs.
+    const callerArgs =
+      tool.identityArg !== undefined
+        ? omitKey(request.args, tool.identityArg)
+        : request.args;
+    const auditArgs = redactArgsForAudit(tool, callerArgs);
+    const callArgs =
+      tool.identityArg !== undefined
+        ? { ...(callerArgs as Record<string, unknown>), [tool.identityArg]: request.identity }
+        : request.args;
     let data: unknown;
     // Errors come in two flavours:
     //   - `wire`: what the MCP caller sees in `result.isError` /
@@ -68,7 +103,7 @@ export const runTool = action({
     //     deliberate ConvexError, because tool authors can't be
     //     trusted to omit secrets from arbitrary thrown messages
     //     (e.g. fetch errors that quote URLs containing credentials).
-    //   - `audit`: what lands in the audit table. Always verbose —
+    //   - `audit`: what lands in the audit table. Always verbose,
     //     operators need the full text to debug regressions, and the
     //     audit table is server-side (no leak risk by default).
     let wireError: { code: number; message: string } | null = null;
@@ -79,21 +114,18 @@ export const runTool = action({
       >;
       switch (tool.kind) {
         case "query":
-          data = await ctx.runQuery(
-            handle as FunctionHandle<"query">,
-            request.args,
-          );
+          data = await ctx.runQuery(handle as FunctionHandle<"query">, callArgs);
           break;
         case "mutation":
           data = await ctx.runMutation(
             handle as FunctionHandle<"mutation">,
-            request.args,
+            callArgs,
           );
           break;
         case "action":
           data = await ctx.runAction(
             handle as FunctionHandle<"action">,
-            request.args,
+            callArgs,
           );
           break;
       }
@@ -152,7 +184,7 @@ export const runTool = action({
  * the allowed dispatches).
  *
  * Mutation (not action) because the handler only reads the registry
- * and writes one audit row — no external IO, no non-transactional
+ * and writes one audit row, no external IO, no non-transactional
  * work. Hosts invoke via `ctx.runMutation`, one round-trip instead
  * of the previous action-wrapping-mutation pattern.
  */
@@ -225,6 +257,20 @@ function redactArgsForAudit(tool: RegisteredTool, args: unknown): unknown {
     out = applyRedactionPath(out, field.split("."));
   }
   return out;
+}
+
+function omitKey(obj: unknown, key: string): unknown {
+  // `args` is `v.any()`, so a caller can send a non-object (string,
+  // number, array). The `in` operator throws on primitives, so guard
+  // before touching it; non-objects are passed through unchanged and
+  // the dispatched function's validator rejects them gracefully inside
+  // the try/catch (a clean -32000, not an uncaught 500).
+  if (typeof obj !== "object" || obj === null || Array.isArray(obj)) return obj;
+  const record = obj as Record<string, unknown>;
+  if (!(key in record)) return record;
+  const clone = { ...record };
+  delete clone[key];
+  return clone;
 }
 
 function applyRedactionPath(value: unknown, path: string[]): unknown {

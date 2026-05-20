@@ -3,6 +3,7 @@ import {
   McpGateway,
   defineMcpMutation,
   defineMcpQuery,
+  mcpCallerValidator,
 } from "convex-mcp-gateway";
 import { api, components } from "./_generated/api.js";
 import { internalMutation } from "./_generated/server.js";
@@ -40,6 +41,19 @@ export const registerDefaults = internalMutation({
           description: "Mark an invoice as paid.",
           fn: api.invoices.markPaid,
           args: { id: v.id("invoices") },
+        }),
+        defineMcpQuery({
+          name: "invoices_whoami",
+          description:
+            "Return the authenticated caller. Identity is injected by " +
+            "the gateway into the `caller` arg (never sent by the client).",
+          fn: api.invoices.whoami,
+          args: { caller: mcpCallerValidator },
+          returns: v.object({ subject: v.string(), hasClaims: v.boolean() }),
+          // The gateway fills `caller` from the resolved identity, strips
+          // it from the advertised schema + client args, and rejects calls
+          // with no caller as Unauthorized.
+          identityArg: "caller",
         }),
         defineMcpQuery({
           name: "invoices_summary",

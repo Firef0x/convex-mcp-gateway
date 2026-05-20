@@ -176,7 +176,7 @@
   <text x="140" y="108" fill="#52534e" font-size="9"
         font-family="ui-monospace, monospace" text-anchor="middle">any MCP-compliant</text>
 
-  <!-- Bridge / Host (FOCAL coral — this is the entire diagram subject) -->
+  <!-- Bridge / Host (FOCAL coral, this is the entire diagram subject) -->
   <rect x="440" y="52" width="160" height="72" rx="6" fill="#f5f4ed"/>
   <rect x="440" y="52" width="160" height="72" rx="6"
         fill="rgba(247,89,31,0.08)" stroke="#f7591f" stroke-width="1.2"/>

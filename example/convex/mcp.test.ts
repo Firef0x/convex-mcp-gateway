@@ -243,7 +243,7 @@ describe("HTTP envelope (host-mounted /mcp/)", () => {
     // resolveIdentity accepts `valid-userinfo-token` →
     // "validator-resolved-sub"). The gateway binds the session row to
     // that subject. An anonymous DELETE (no Bearer) must be refused
-    // with 403 — otherwise a leaked session id alone would suffice to
+    // with 403, otherwise a leaked session id alone would suffice to
     // DoS the authenticated user's session.
     const t = newTest();
     const initRes = await t.fetch("/mcp/", {
@@ -472,10 +472,12 @@ describe("authorize callback (host's http.ts)", () => {
     const body = (await res.json()) as {
       result: { tools: Array<{ name: string }> };
     };
-    // alice has no admin role → markPaid is hidden, list + summary visible.
+    // alice has no admin role → markPaid is hidden, list + summary +
+    // whoami visible (whoami is identity-gated but alice is authenticated).
     expect(body.result.tools.map((tool) => tool.name).sort()).toEqual([
       "invoices_list",
       "invoices_summary",
+      "invoices_whoami",
     ]);
   });
 
@@ -510,6 +512,7 @@ describe("authorize callback (host's http.ts)", () => {
       "invoices_list",
       "invoices_markPaid",
       "invoices_summary",
+      "invoices_whoami",
     ]);
   });
 
@@ -954,8 +957,8 @@ describe("tool execution failures", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      // Wire message is the generic placeholder — the verbose
-      // "boom — should not reach the wire" string stays out of the
+      // Wire message is the generic placeholder, the verbose
+      // "boom, should not reach the wire" string stays out of the
       // unauthenticated caller's response.
       expect(result.error.code).toBe(-32000);
       expect(result.error.message).toBe("Tool execution failed");
@@ -1282,7 +1285,7 @@ describe("RFC 9728 protected-resource metadata", () => {
 });
 
 // =================================================================
-// OAuth bridge: handleClientRegistration branches. Covers #45 —
+// OAuth bridge: handleClientRegistration branches. Covers #45,
 // empty redirect_uris, malformed JSON, non-POST, OPTIONS preflight.
 // =================================================================
 
@@ -1533,7 +1536,7 @@ describe("authorize callback throws (end-to-end)", () => {
       result: { tools: Array<{ name: string }> };
     };
     // Every tool gets dropped from the catalog when authorize throws
-    // for each entry — no client should see a tool it cannot invoke.
+    // for each entry, no client should see a tool it cannot invoke.
     expect(listBody.result.tools).toEqual([]);
   });
 });
@@ -1614,7 +1617,339 @@ describe("RFC 8414 AS metadata bridge", () => {
       "https://upstream.example.com/authorize",
     );
     expect(body.registration_endpoint).toMatch(/\/oauth\/register$/);
-    // Public-client (PKCE) — secrets stay upstream.
+    // Public-client (PKCE), secrets stay upstream.
     expect(body.token_endpoint_auth_methods_supported).toEqual(["none"]);
+  });
+});
+
+// =================================================================
+// identityArg: the gateway injects the resolved caller into the tool's
+// declared arg, excludes it from the advertised inputSchema, strips any
+// client-supplied value (no spoofing), and denies calls with no caller.
+// Enables per-caller scoping despite ctx.auth being stripped across the
+// component boundary.
+// =================================================================
+
+describe("identityArg (caller injection)", () => {
+  test("runTool injects the resolved identity into the tool's caller arg", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    const result = await t.action(components.mcpGateway.dispatch.runTool, {
+      name: "invoices_whoami",
+      args: {},
+      auditIdentitySubject: "alice",
+      identity: { subject: "alice", claims: { email: "alice@example.com" } },
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data).toEqual({ subject: "alice", hasClaims: true });
+    }
+  });
+
+  test("the injected caller / claims never reach the audit log", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    // Inject an identity carrying claims (potential PII / tokens). The
+    // dispatch strips identityArg before auditing, so neither the
+    // subject nor the claims object may appear in the stored args.
+    await t.action(components.mcpGateway.dispatch.runTool, {
+      name: "invoices_whoami",
+      args: {},
+      auditIdentitySubject: "alice",
+      identity: { subject: "alice", claims: { email: "alice@example.com" } },
+    });
+    const entries = await t.run(async (ctx) =>
+      ctx.runQuery(components.mcpGateway.audit.listEntries, {
+        toolName: "invoices_whoami",
+      }),
+    );
+    expect(entries).toHaveLength(1);
+    // The caller arg is stripped; args carries only what the client sent ({}).
+    expect(entries[0]!.args).toEqual({});
+    // Subject is still recorded in the dedicated audit column, not in args.
+    expect(entries[0]!.identitySubject).toBe("alice");
+  });
+
+  test("runTool overwrites a caller value smuggled into args (no spoofing)", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    const result = await t.action(components.mcpGateway.dispatch.runTool, {
+      name: "invoices_whoami",
+      args: { caller: { subject: "attacker" } },
+      auditIdentitySubject: "alice",
+      identity: { subject: "alice" },
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data).toEqual({ subject: "alice", hasClaims: false });
+    }
+  });
+
+  test("runTool denies an identityArg tool when no caller is provided", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    // No `identity` passed: the component must deny rather than inject
+    // null and trip the function's arg validator.
+    const result = await t.action(components.mcpGateway.dispatch.runTool, {
+      name: "invoices_whoami",
+      args: {},
+      auditIdentitySubject: null,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe(-32001);
+      expect(result.error.message).toMatch(/authenticated caller/i);
+    }
+  });
+
+  test("tools/list omits the injected caller arg from inputSchema", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    const session = await initialize(t);
+    const res = await rpc(
+      t,
+      session,
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      { authorization: "Bearer valid-userinfo-token" },
+    );
+    const body = (await res.json()) as {
+      result: {
+        tools: Array<{
+          name: string;
+          inputSchema: { properties?: Record<string, unknown> };
+        }>;
+      };
+    };
+    const whoami = body.result.tools.find(
+      (tool) => tool.name === "invoices_whoami",
+    );
+    expect(whoami).toBeDefined();
+    expect(whoami!.inputSchema.properties ?? {}).not.toHaveProperty("caller");
+  });
+
+  test("tools/call injects the userinfo-resolved subject", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    const session = await initialize(t);
+    const res = await rpc(
+      t,
+      session,
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "invoices_whoami", arguments: {} },
+      },
+      { authorization: "Bearer valid-userinfo-token" },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      result: { structuredContent?: { subject?: string; hasClaims?: boolean } };
+    };
+    expect(body.result.structuredContent).toEqual({
+      subject: "validator-resolved-sub",
+      hasClaims: false,
+    });
+  });
+
+  test("tools/call ignores a client-supplied caller argument", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    const session = await initialize(t);
+    const res = await rpc(
+      t,
+      session,
+      {
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: {
+          name: "invoices_whoami",
+          arguments: { caller: { subject: "attacker" } },
+        },
+      },
+      { authorization: "Bearer valid-userinfo-token" },
+    );
+    const body = (await res.json()) as {
+      result: { structuredContent?: { subject?: string } };
+    };
+    expect(body.result.structuredContent?.subject).toBe(
+      "validator-resolved-sub",
+    );
+  });
+
+  test("identityArg tool with no caller is denied (-32001) even when authorize allows", async () => {
+    // The /mcp-cors-array/ mount's authorize allows everything and has no
+    // resolveIdentity, so ctx.auth is the only identity source (null in
+    // tests). The gateway's identityArg guard must still deny.
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    const initRes = await t.fetch("/mcp-cors-array/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        origin: "https://allowed.example.com",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18" },
+      }),
+    });
+    const session = initRes.headers.get("mcp-session-id")!;
+    const res = await t.fetch("/mcp-cors-array/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-session-id": session,
+        origin: "https://allowed.example.com",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "invoices_whoami", arguments: {} },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      error?: { code: number; message: string };
+    };
+    expect(body.error?.code).toBe(-32001);
+    expect(body.error?.message).toMatch(/authenticated caller/i);
+  });
+
+  test("non-object args on an identityArg tool fail gracefully (no uncaught throw)", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    // A client can send `arguments: "x"` (a primitive). Stripping the
+    // identity key must not crash with a TypeError before the try/catch;
+    // runTool must return a structured error, not reject.
+    const result = await t.action(components.mcpGateway.dispatch.runTool, {
+      name: "invoices_whoami",
+      args: "not-an-object",
+      auditIdentitySubject: "alice",
+      identity: { subject: "alice" },
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  test("host strips a client-supplied caller before the denial audit", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    // /mcp-cors-array/ allows everything and has no resolveIdentity, so an
+    // identityArg call with no Bearer is denied (-32001) by the HOST before
+    // dispatch ever runs. The denial audit is therefore written host-side;
+    // a smuggled caller absent from that row proves the host-layer strip.
+    const initRes = await t.fetch("/mcp-cors-array/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        origin: "https://allowed.example.com",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18" },
+      }),
+    });
+    const session = initRes.headers.get("mcp-session-id")!;
+    await t.fetch("/mcp-cors-array/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-session-id": session,
+        origin: "https://allowed.example.com",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "invoices_whoami",
+          arguments: { caller: { subject: "attacker" } },
+        },
+      }),
+    });
+    const entries = await t.run(async (ctx) =>
+      ctx.runQuery(components.mcpGateway.audit.listEntries, {
+        toolName: "invoices_whoami",
+      }),
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.outcome).toBe("denied");
+    expect(entries[0]!.args).not.toHaveProperty("caller");
+  });
+
+  test("tools/call propagates resolved claims through to the tool", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    const session = await initialize(t);
+    // valid-userinfo-claims-token resolves to a caller WITH claims, so the
+    // claims half of the identity must survive the full HTTP -> inject path.
+    const res = await rpc(
+      t,
+      session,
+      {
+        jsonrpc: "2.0",
+        id: 5,
+        method: "tools/call",
+        params: { name: "invoices_whoami", arguments: {} },
+      },
+      { authorization: "Bearer valid-userinfo-claims-token" },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      result: { structuredContent?: { subject?: string; hasClaims?: boolean } };
+    };
+    expect(body.result.structuredContent).toEqual({
+      subject: "claims-resolved-sub",
+      hasClaims: true,
+    });
+  });
+
+  test("identityArg strip composes with auditArgs.redact in the audit row", async () => {
+    const t = newTest();
+    await t.run(async (ctx) => {
+      const handle = await createFunctionHandle(api.invoices.markPaid);
+      await ctx.runMutation(components.mcpGateway.registry.replaceTools, {
+        tools: [
+          {
+            name: "secret_identity",
+            description: "identityArg + field redaction",
+            kind: "mutation",
+            functionHandle: handle,
+            inputSchema: { type: "object" },
+            identityArg: "caller",
+            metadata: { auditArgs: { redact: ["password"] } },
+          },
+        ],
+      });
+    });
+    // dispatch fails (markPaid expects an id), but the audit row is written
+    // regardless. It must carry neither the injected caller (stripped) nor
+    // the secret (redacted).
+    await t.action(components.mcpGateway.dispatch.runTool, {
+      name: "secret_identity",
+      args: { caller: { subject: "attacker" }, password: "p@ss", username: "alice" },
+      auditIdentitySubject: "alice",
+      identity: { subject: "alice", claims: { email: "x@example.com" } },
+    });
+    const entries = await t.run(async (ctx) =>
+      ctx.runQuery(components.mcpGateway.audit.listEntries, {
+        toolName: "secret_identity",
+      }),
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.args).toEqual({
+      password: "[redacted]",
+      username: "alice",
+    });
   });
 });

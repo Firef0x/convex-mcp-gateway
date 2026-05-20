@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.0 (2026-05-20)
+
+### Added
+
+- **Caller-identity injection (`identityArg`).** A dispatched tool runs
+  inside the component, where `ctx.auth` is unavailable. Tools can now
+  opt in to receiving the authenticated caller: declare an argument with
+  the new `mcpCallerValidator` (shape `{ subject, claims? }`) and name it
+  in `identityArg`. The gateway fills that argument server-side with the
+  identity resolved at the request boundary, removes it from the
+  advertised `inputSchema` (clients never see it), strips any
+  client-supplied value (no spoofing), and rejects calls with no resolved
+  caller as `-32001 Unauthorized` (enforced both host-side and inside the
+  component's `runTool`). The injected argument is stripped before the
+  audit write, so the caller and its claims never reach the audit log;
+  the subject is still recorded in the audit row's `identitySubject`
+  column. New exports: `mcpCallerValidator`, `McpCaller`.
+
 ## 0.1.0 (2026-05-19) - initial version
 
 First public version of `convex-mcp-gateway`. Implements
@@ -12,7 +30,7 @@ to break, so the entries below describe the full surface area.
 
 - **Tool registration.** `defineMcpQuery` / `defineMcpMutation` /
   `defineMcpAction` declare a Convex function as an MCP tool with
-  end-to-end-typed `args` and (optional) `returns` validators —
+  end-to-end-typed `args` and (optional) `returns` validators,
   drift between the registered Convex function and the tool
   descriptor surfaces as a `_typeMismatch` at compile time, never at
   runtime.
@@ -54,7 +72,7 @@ to break, so the entries below describe the full surface area.
     `allowedRedirectPatterns` prevents open-redirect abuse, and
     error responses truncate echoed payloads to bound size.
   - `resolveIdentity` callback replaces Convex's JWT validation for
-    opaque tokens — typically a userinfo-endpoint fetch.
+    opaque tokens, typically a userinfo-endpoint fetch.
 - **Audit log.** One row per `tools/call` capturing tool, kind,
   outcome (`allowed` / `denied` / `error`), identity subject,
   duration, args, and error detail. Filtered reads via
@@ -68,7 +86,7 @@ to break, so the entries below describe the full surface area.
   a tool handler results in a generic `"Tool execution failed"` on
   the wire; the verbose message lands in the audit row only. Tools
   that want the LLM to see a specific message throw
-  `ConvexError(...)` — the deliberate user-facing channel.
+  `ConvexError(...)`, the deliberate user-facing channel.
 - **Sessions bound to creator's identity.** `sessions` rows record
   the `identitySubject` resolved at `initialize` time; `DELETE /mcp/`
   requires a matching subject and returns 403 otherwise, so a

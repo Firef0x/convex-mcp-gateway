@@ -96,7 +96,7 @@
   <rect x="200" y="144" width="160" height="12" rx="2" fill="#f5f4ed"/>
   <text x="280" y="154" fill="#1a70c7" font-size="8"
         font-family="ui-monospace, monospace" text-anchor="middle"
-        letter-spacing="0.7">POST /mcp/ — NO BEARER</text>
+        letter-spacing="0.7">POST /mcp/, NO BEARER</text>
 
   <!-- 2. 401 WWW-Authenticate -->
   <rect x="196" y="192" width="172" height="12" rx="2" fill="#f5f4ed"/>
@@ -120,7 +120,7 @@
   <rect x="420" y="328" width="240" height="12" rx="2" fill="#f5f4ed"/>
   <text x="540" y="338" fill="#f7591f" font-size="8"
         font-family="ui-monospace, monospace" text-anchor="middle"
-        letter-spacing="0.7">OAUTH 2.1 — DCR + PKCE + AUTH CODE</text>
+        letter-spacing="0.7">OAUTH 2.1, DCR + PKCE + AUTH CODE</text>
 
   <!-- 6. access_token (focal return) -->
   <rect x="460" y="368" width="160" height="12" rx="2" fill="#f5f4ed"/>
@@ -132,7 +132,7 @@
   <rect x="196" y="416" width="172" height="12" rx="2" fill="#f5f4ed"/>
   <text x="282" y="426" fill="#1a70c7" font-size="8"
         font-family="ui-monospace, monospace" text-anchor="middle"
-        letter-spacing="0.7">POST /mcp/ — BEARER TOKEN</text>
+        letter-spacing="0.7">POST /mcp/, BEARER TOKEN</text>
 
   <!-- 8. 200 result -->
   <rect x="232" y="456" width="96" height="12" rx="2" fill="#f5f4ed"/>

@@ -79,9 +79,9 @@ export const touchSession = mutation({
 /**
  * Outcome of a session-delete attempt:
  *
- *   - `"deleted"`   — row existed and identity check passed
- *   - `"not_found"` — no row with that id (404 to the client)
- *   - `"forbidden"` — row exists but the caller's identitySubject
+ *   - `"deleted"`: row existed and identity check passed
+ *   - `"not_found"`: no row with that id (404 to the client)
+ *   - `"forbidden"`: row exists but the caller's identitySubject
  *                     doesn't match what was bound at create time
  *                     (403 to the client, defends against
  *                     session-id-leak DoS)
