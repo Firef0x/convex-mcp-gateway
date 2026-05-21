@@ -101,6 +101,34 @@ export interface HandleMcpRequestOptions {
    * doesn't expose `package.json` to the runtime.
    */
   serverInfo?: { name: string; version: string };
+  /**
+   * Challenge anonymous requests with `401` instead of letting them
+   * through to `initialize` / `tools/list`. Default `false`.
+   *
+   * Leave this off for **mixed** servers (some tools `public`,
+   * some private): anonymous callers should still see the public
+   * catalog, so the default 200-with-filtered-list is correct.
+   *
+   * Turn it on for **all-private** servers that browser MCP clients
+   * (claude.ai) connect to. Such a client only does `initialize` +
+   * `tools/list` when a connector is added; with the default both
+   * return 200 (an empty, authorize-filtered list), so the client
+   * concludes "connected, no tools" and never starts the OAuth flow,
+   * its only trigger is a `401` + `WWW-Authenticate`. With
+   * `requireAuth: true` an anonymous POST gets that 401, so the login
+   * is prompted and discovery begins.
+   *
+   * Needs `setOAuthConfig` to have run so the `WWW-Authenticate`
+   * header can carry the protected-resource metadata URL. If
+   * `requireAuth` is set but no OAuth config exists, the gate still
+   * returns 401, but without the header (and `console.warn`s once);
+   * browser clients can't begin discovery until `setOAuthConfig` is
+   * called.
+   *
+   * Applies to `POST` only. `GET` already 405s, `DELETE` is
+   * identity-bound, and `OPTIONS` (CORS preflight) is left untouched.
+   */
+  requireAuth?: boolean;
 }
 
 type HandlerCtx = {
@@ -276,6 +304,47 @@ function jsonErrorEnvelope(
     jsonrpc: "2.0",
     id: id ?? null,
     error: { code, message },
+  });
+}
+
+let warnedRequireAuthWithoutOAuth = false;
+
+/**
+ * Build the `requireAuth` 401 challenge for an anonymous POST. Mirrors
+ * the `tools/call` UNAUTHORIZED branch: 401 + `WWW-Authenticate` when
+ * an OAuth server is configured (so the client begins RFC 9728
+ * discovery), or a bare 401 (plus a one-time warning) when it isn't.
+ */
+async function requireAuthChallenge(
+  ctx: HandlerCtx,
+  request: Request,
+  component: ComponentApi,
+  id: JsonRpcMessage["id"],
+): Promise<Response> {
+  const reason = "Unauthorized: authentication required";
+  const oauthConfig = await ctx.runQuery(component.registry.getOAuthConfig, {});
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+  };
+  if (oauthConfig) {
+    const requestUrl = new URL(request.url);
+    const mcpPath = requestUrl.pathname.replace(/\/+$/, "") || "/";
+    const metadataUrl = buildProtectedResourceMetadataUrl(
+      requestUrl.origin,
+      mcpPath,
+    );
+    headers["www-authenticate"] = `Bearer resource_metadata="${metadataUrl}"`;
+  } else if (!warnedRequireAuthWithoutOAuth) {
+    warnedRequireAuthWithoutOAuth = true;
+    console.warn(
+      "[mcp-gateway] requireAuth is set but no OAuth config exists; " +
+        "returning 401 without WWW-Authenticate. Browser clients can't " +
+        "begin OAuth discovery until setOAuthConfig is called.",
+    );
+  }
+  return new Response(jsonErrorEnvelope(id, UNAUTHORIZED, reason), {
+    status: 401,
+    headers,
   });
 }
 
@@ -456,6 +525,23 @@ async function handlePost(
     );
   }
 
+  // Resolve identity once at the boundary and reuse it everywhere below
+  // (the requireAuth gate, stale-session cleanup, audit subject, the
+  // authorize callback input, and the session-binding subject). One
+  // resolution avoids a duplicate resolveIdentity/userinfo round-trip.
+  const identity = await resolveCallerIdentity(ctx, request, options);
+  const auditIdentitySubject = identity?.subject ?? null;
+
+  // requireAuth gate: challenge anonymous POSTs with 401 before session
+  // handling / the method switch, so browser MCP clients (claude.ai)
+  // get the 401 + WWW-Authenticate they need to begin OAuth discovery
+  // instead of a 200 empty tools/list. Opt-in; default behaviour
+  // (200 with the filtered catalog) is unchanged. See
+  // HandleMcpRequestOptions.requireAuth.
+  if (options.requireAuth && identity === null) {
+    return await requireAuthChallenge(ctx, request, component, message.id);
+  }
+
   const isInitialize = message.method === "initialize";
 
   // MCP-Protocol-Version header: required on post-initialize requests
@@ -494,14 +580,9 @@ async function handlePost(
     const staleSessionId = request.headers.get("mcp-session-id");
     if (staleSessionId) {
       try {
-        const callerIdentity = await resolveCallerIdentity(
-          ctx,
-          request,
-          options,
-        );
         await ctx.runMutation(component.sessions.deleteSession, {
           sessionId: staleSessionId,
-          callerIdentitySubject: callerIdentity?.subject ?? null,
+          callerIdentitySubject: identity?.subject ?? null,
         });
       } catch (err) {
         console.warn(
@@ -552,13 +633,6 @@ async function handlePost(
       { status: 400, headers: { "content-type": "application/json" } },
     );
   }
-
-  // Read identity once at the boundary. Used as audit subject, as
-  // input to the authorize callback (so it doesn't need to re-read
-  // ctx.auth itself), and, for initialize, as the binding subject
-  // stored on the session row for later DELETE checks.
-  const identity = await resolveCallerIdentity(ctx, request, options);
-  const auditIdentitySubject = identity?.subject ?? null;
 
   let body: string;
   let raw: Response | null = null;

@@ -1953,3 +1953,138 @@ describe("identityArg (caller injection)", () => {
     });
   });
 });
+
+// =================================================================
+// requireAuth gate (host-mounted /mcp-require-auth/). An all-private
+// server with requireAuth:true challenges anonymous POSTs with 401 so
+// browser MCP clients (claude.ai) begin the OAuth flow instead of
+// seeing a 200 empty tools/list.
+// =================================================================
+
+describe("requireAuth gate (/mcp-require-auth/)", () => {
+  async function postRequireAuth(
+    t: ReturnType<typeof newTest>,
+    body: object,
+    headers: Record<string, string> = {},
+  ): Promise<Response> {
+    return await t.fetch("/mcp-require-auth/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        ...headers,
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  async function setOAuth(t: ReturnType<typeof newTest>): Promise<void> {
+    await t.run(async (ctx) => {
+      await ctx.runMutation(components.mcpGateway.registry.setOAuthConfig, {
+        authServerUrl: "https://idp.example.com/",
+      });
+    });
+  }
+
+  test("anonymous initialize is challenged with 401 + WWW-Authenticate", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    await setOAuth(t);
+
+    const res = await postRequireAuth(t, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18" },
+    });
+
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate") ?? "").toMatch(
+      /^Bearer resource_metadata="/,
+    );
+    // No session is created for a gated anonymous request.
+    expect(res.headers.get("mcp-session-id")).toBeNull();
+    const body = (await res.json()) as { error?: { code: number } };
+    expect(body.error?.code).toBe(-32001);
+  });
+
+  test("anonymous tools/list is challenged with 401 instead of 200-empty", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    await setOAuth(t);
+
+    // No Mcp-Session-Id needed: the gate fires before session handling.
+    const res = await postRequireAuth(t, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    });
+
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate") ?? "").toMatch(
+      /^Bearer resource_metadata="/,
+    );
+  });
+
+  test("authenticated request passes the gate and runs the normal flow", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    await setOAuth(t);
+    const auth = { authorization: "Bearer valid-userinfo-token" };
+
+    const initRes = await postRequireAuth(
+      t,
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18" },
+      },
+      auth,
+    );
+    expect(initRes.status).toBe(200);
+    const session = initRes.headers.get("mcp-session-id");
+    expect(session).toBeTruthy();
+
+    const listRes = await postRequireAuth(
+      t,
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      { ...auth, "mcp-session-id": session! },
+    );
+    expect(listRes.status).toBe(200);
+    const body = (await listRes.json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    expect(body.result.tools.length).toBeGreaterThan(0);
+  });
+
+  test("requireAuth without OAuth config returns 401 without WWW-Authenticate", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+    // Deliberately no setOAuthConfig.
+
+    const res = await postRequireAuth(t, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18" },
+    });
+
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toBeNull();
+  });
+
+  test("default mount stays opt-out: anonymous initialize + tools/list still 200", async () => {
+    const t = newTest();
+    await t.mutation(internal.mcp.registerDefaults, {});
+
+    // initialize() asserts the /mcp/ status is 200 internally.
+    const session = await initialize(t);
+    const res = await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    });
+    expect(res.status).toBe(200);
+  });
+});

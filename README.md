@@ -28,6 +28,9 @@ Built as a [Convex Component](https://www.convex.dev/components).
   RFC 6750 `WWW-Authenticate` headers, multi-tenant ready
 - **Optional OAuth bridge**: RFC 8414 AS metadata wrap + RFC 7591 DCR
   for browser MCP clients (claude.ai) against IdPs without DCR support
+- **`requireAuth` for all-private servers**: opt-in 401-challenge on
+  anonymous requests so browser clients (claude.ai) begin the OAuth flow
+  instead of seeing an empty `tools/list` and never prompting a login
 - **Audit log**: one row per call with per-tool argument redaction
   (verbatim / dropped / dotted-path redacted)
 - **Wire-error sanitization**: generic message on the wire, full detail
@@ -179,6 +182,13 @@ agent runtimes) handles the session and OAuth handshakes
 automatically. See [Getting Started](./docs/getting-started.md) for
 the full walkthrough.
 
+If your server has **no public tools** and you connect it to a browser
+client like **claude.ai**, add `requireAuth: true` to the
+`handleMcpRequest` options. Without it, anonymous `initialize` /
+`tools/list` return 200 (empty) and the client never starts OAuth, it
+only reacts to a 401. See
+[OAuth: all-private servers](./docs/oauth.md#all-private-servers-and-browser-clients-requireauth).
+
 ## Documentation
 
 - **[Getting Started](./docs/getting-started.md)**: install, register,
@@ -188,7 +198,7 @@ the full walkthrough.
 - **[Authorization](./docs/authorization.md)**: authorizer contract,
   `mode: "list"` vs `"call"`, scope/role recipes
 - **[OAuth 2.1 setup](./docs/oauth.md)**: RFC 9728 discovery, host-side
-  mount, multi-tenant
+  mount, multi-tenant, `requireAuth` for all-private servers
 - **[OAuth bridge mode](./docs/oauth-bridge.md)**: opt-in DCR + AS
   metadata wrap + userinfo token validation, for browser MCP clients
   (claude.ai) against IdPs that don't support Dynamic Client

@@ -147,6 +147,68 @@ await gateway.setOAuthConfig(ctx, {
 });
 ```
 
+### 4. Turn on `requireAuth` (all-private servers)
+
+The bridge above exists to serve **browser MCP clients** (claude.ai),
+and the `authorize` callback in this guide rejects every anonymous call
+(no `public` tools). That combination has a trap: claude.ai only does
+`initialize` + `tools/list` when a connector is added, both return
+HTTP 200 (an empty filtered list) by default, so claude.ai concludes
+"connected, no tools" and **never starts the OAuth flow**. Its only
+trigger is a `401` + `WWW-Authenticate`.
+
+Set `requireAuth: true` so anonymous POSTs are challenged with that 401
+at the door instead of being let through:
+
+```ts
+const mcpHandler = httpAction(async (ctx, req) =>
+  gateway.handleMcpRequest(ctx, req, {
+    authorize,
+    cors: true,
+    resolveIdentity,
+    requireAuth: true, // all-private + browser client → 401-challenge anonymous
+  }),
+);
+```
+
+This is the single most common reason a freshly-mounted all-private
+gateway "connects" in claude.ai but shows no tools and never prompts a
+login. See [oauth.md](./oauth.md#all-private-servers-and-browser-clients-requireauth)
+for the full rationale and the before/after diagram.
+
+## Adding the connector in claude.ai
+
+claude.ai connectors are configured in the UI, there is no file to
+commit, so the "config" is the server URL plus the matching server-side
+setup above. Once your deployment is mounted (bridge endpoints + OAuth
+config + `requireAuth`), add it as a **Custom Connector**:
+
+1. **Settings → Connectors → Add custom connector** (Pro/Team/Enterprise;
+   "Custom Connectors" must be enabled for the workspace).
+2. **Name**: anything, e.g. `My Convex App`.
+3. **Remote MCP server URL**: your `/mcp` endpoint, e.g.
+   `https://your-deployment.convex.site/mcp`. claude.ai strips a
+   trailing slash before POSTing, which is why the host mounts both
+   `/mcp` and `/mcp/` (see [Trailing-slash](#trailing-slash-url-normalisation)).
+4. Save. claude.ai fetches the MCP endpoint, gets a `401 +
+   WWW-Authenticate` (thanks to `requireAuth`), then walks the discovery
+   chain:
+   `/.well-known/oauth-protected-resource/mcp` →
+   `/.well-known/oauth-authorization-server` →
+   DCR at `/oauth/register` → upstream login.
+5. A browser window opens for the upstream IdP login. After consent,
+   claude.ai re-runs `initialize` with the Bearer and `tools/list`
+   returns the catalog the user is allowed to call.
+
+Checklist if the connector "won't connect":
+
+| Symptom | Likely cause |
+|---|---|
+| "Connected", no tools, no login prompt | `requireAuth` not set on an all-private server (this guide) |
+| Login prompt, then "couldn't connect" | upstream redirect URI missing `https://claude.ai/api/mcp/auth_callback` |
+| 404 on MCP traffic, OAuth looked fine | only `/mcp/` mounted, not `/mcp` (trailing slash) |
+| Login loops / id_token rejected | issuer mismatch, see [Pitfalls](#issuer-mismatch-with-upstream-token-claims) |
+
 ## Pitfalls (debugged the hard way)
 
 ### Trailing-slash URL normalisation

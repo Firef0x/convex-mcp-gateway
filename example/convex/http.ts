@@ -176,6 +176,28 @@ for (const method of ["POST", "GET", "DELETE", "OPTIONS"] as const) {
   http.route({ path: "/mcp-cors-array/", method, handler: mcpHandlerCorsArray });
 }
 
+// Test-only mount exercising the requireAuth gate. An all-private
+// server like this is unreachable by browser MCP clients (claude.ai)
+// without it: the client only does initialize + tools/list, both of
+// which would otherwise 200, so it never sees the 401 that triggers
+// OAuth. With requireAuth, anonymous POSTs get 401 + WWW-Authenticate.
+// Shares resolveIdentity so a Bearer token still authenticates.
+const mcpHandlerRequireAuth = httpAction(async (ctx, request) =>
+  gateway.handleMcpRequest(ctx, request, {
+    authorize,
+    cors: true,
+    requireAuth: true,
+    resolveIdentity,
+  }),
+);
+for (const method of ["POST", "GET", "DELETE", "OPTIONS"] as const) {
+  http.route({
+    path: "/mcp-require-auth/",
+    method,
+    handler: mcpHandlerRequireAuth,
+  });
+}
+
 // Test-only mount with an authorize callback that always throws.
 // Verifies the gateway's `safeAuthorize` path maps the throw to
 // `-32603 INTERNAL_ERROR` with an audit row outcome of `"error"`.

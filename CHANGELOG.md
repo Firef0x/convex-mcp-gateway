@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.0 (2026-05-21)
+
+### Added
+
+- **`requireAuth` option for all-private servers.** New opt-in boolean
+  on `HandleMcpRequestOptions`. When set, any anonymous POST (including
+  `initialize` / `tools/list`) is answered with `401` +
+  `WWW-Authenticate` instead of being let through. This is the trigger
+  browser MCP clients (claude.ai) need to begin the OAuth flow: with no
+  `public` tools, the default 200-empty `tools/list` makes such clients
+  conclude "connected, no tools" and they never prompt a login. The
+  header reuses the same RFC 6750 / RFC 9728 construction as the
+  `tools/call` denial path and needs `setOAuthConfig`; without OAuth
+  config the gate still returns 401 but omits the header and warns once.
+  Default is `false`, mixed public/private servers keep the 200 +
+  filtered-catalog behaviour unchanged. Applies to POST only (`GET`
+  still 405s, `DELETE` stays identity-bound, `OPTIONS` preflight is
+  untouched). Caller identity is now resolved once per request and
+  threaded through the gate, audit, authorize input, and session
+  binding, removing a duplicate userinfo round-trip on re-initialize.
+
 ## 0.2.0 (2026-05-20)
 
 ### Added

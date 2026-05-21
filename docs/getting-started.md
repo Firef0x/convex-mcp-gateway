@@ -232,6 +232,14 @@ and `tools/list` (it filters the catalog per tool with `mode: "list"`).
 See [authorization.md](./authorization.md) for scope/role/argument
 recipes.
 
+> **All-private server reached by a browser client (claude.ai)?** Pass
+> `requireAuth: true` in the options. With no `public` tools, anonymous
+> `initialize` / `tools/list` would otherwise return 200 (empty) and the
+> client never starts OAuth, it only reacts to a 401. `requireAuth`
+> challenges anonymous POSTs so the login is prompted. Needs OAuth
+> config (step 5). Leave it off for mixed public/private servers. Full
+> rationale: [oauth.md](./oauth.md#all-private-servers-and-browser-clients-requireauth).
+
 ## 5. (Optional) Mount OAuth discovery
 
 If you want MCP clients to discover your authorization server

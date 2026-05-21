@@ -127,6 +127,54 @@ inside an HTTP 200 envelope, no header. MCP clients that depend on
 discovery will not recover; clients that already have a token can still
 call the gateway.
 
+## All-private servers and browser clients (`requireAuth`)
+
+![requireAuth challenge flow](./diagrams/require-auth.svg)
+
+The 401-on-`tools/call` trigger above is enough for a **mixed** server
+(some tools `public`, some private): an anonymous caller sees the public
+catalog, picks a private tool, gets the 401, and OAuth begins.
+
+It is **not** enough for an **all-private** server reached by a browser
+MCP client like **claude.ai**. When a connector is added, claude.ai only
+does `initialize` + `tools/list`, it does not call a tool unprompted.
+With the default behaviour both return HTTP 200 (`tools/list` is the
+authorize-filtered, here empty, list), so claude.ai concludes
+"connected, no tools" and **never** starts the OAuth flow, its only
+trigger is a `401` + `WWW-Authenticate`. The user is never asked to log
+in.
+
+Opt into challenging anonymous requests at the door with `requireAuth`:
+
+```ts
+// convex/http.ts
+const mcpHandler = httpAction(async (ctx, request) =>
+  gateway.handleMcpRequest(ctx, request, {
+    authorize,
+    cors: true,
+    requireAuth: true, // all-private + browser client → challenge anonymous POSTs
+  }),
+);
+```
+
+With `requireAuth: true`, any anonymous POST (including `initialize` and
+`tools/list`) is answered with `401` + `WWW-Authenticate` instead of
+being let through, so the browser client gets the trigger it needs.
+claude.ai then re-runs `initialize` with the Bearer after login.
+
+Notes:
+
+- **Opt-in.** The default (200 with the filtered catalog) is unchanged
+  and stays correct for mixed servers, anonymous callers should still
+  see the public tools.
+- **Needs `setOAuthConfig`.** The `WWW-Authenticate` header carries the
+  protected-resource metadata URL, which only exists once OAuth config
+  is set. If `requireAuth` is on but no config exists, the gate still
+  returns 401 but without the header (and logs a one-time warning);
+  browser clients can't begin discovery until you call `setOAuthConfig`.
+- **POST only.** `GET` already 405s, `DELETE` is identity-bound, and the
+  CORS preflight (`OPTIONS`) is left untouched.
+
 ## Validating the inbound token
 
 Token validation is **Convex's job**, not the gateway's. Set your

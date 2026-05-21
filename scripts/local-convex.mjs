@@ -5,7 +5,7 @@
  * Boots this repo's local Convex backend on a private port pair, using the
  * upstream test fixture credentials checked into `get-convex/convex-backend`
  * under `crates/keybroker/dev/`. These are public, well-known credentials
- * intended for local development — no admin-key derivation step, no Docker.
+ * intended for local development (no admin-key derivation step, no Docker).
  *
  * Responsibilities:
  *  1. Lazy-install the pinned `convex-local-backend` binary on first run.

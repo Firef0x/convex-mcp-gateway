@@ -228,6 +228,7 @@ itself).
 | Audit-write fails | Logged via `console.error`, swallowed. Dispatch outcome unchanged. |
 | Session id missing on a non-`initialize` request | HTTP 400 |
 | Session id unknown / terminated | HTTP 404 (forces fresh `initialize`) |
+| Anonymous POST with `requireAuth: true` | HTTP 401 (+ `WWW-Authenticate` when OAuth is configured) before session handling, so browser clients begin OAuth. Opt-in; see [oauth.md](./oauth.md#all-private-servers-and-browser-clients-requireauth) |
 
 ## Going deeper
 
