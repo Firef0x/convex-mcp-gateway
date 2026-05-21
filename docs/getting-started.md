@@ -40,51 +40,41 @@ Convex doesn't propagate `ctx.auth` into component code, so the only place
 the gateway can read the JWT-validated identity is from a host-mounted
 `httpAction`.
 
-## 3. Register tools
+## 3. Declare your tools
+
+Declare the catalog once as a plain array and export it. You pass it to
+`handleMcpRequest` in step 4; the gateway reconciles the registry on
+each connect, so editing this list takes effect on the next `initialize`
+with no mutation to run by hand.
 
 ```ts
 // convex/mcp.ts
 import { v } from "convex/values";
-import {
-  McpGateway,
-  defineMcpQuery,
-  defineMcpMutation,
-} from "convex-mcp-gateway";
-import { api, components } from "./_generated/api.js";
-import { internalMutation } from "./_generated/server.js";
+import { defineMcpQuery, defineMcpMutation } from "convex-mcp-gateway";
+import { api } from "./_generated/api.js";
 
-const gateway = new McpGateway(components.mcpGateway);
-
-export const registerDefaults = internalMutation({
-  args: {},
-  handler: async (ctx) => {
-    await gateway.register(
-      ctx,
-      [
-        defineMcpQuery({
-          name: "invoices_summary",
-          description: "Total number of invoices. Public.",
-          fn: api.invoices.summary,
-          args: {},
-          metadata: { public: true },
-        }),
-        defineMcpQuery({
-          name: "invoices_list",
-          description: "List invoices for the authenticated user.",
-          fn: api.invoices.list,
-          args: { status: v.optional(v.string()) },
-        }),
-        defineMcpMutation({
-          name: "invoices_markPaid",
-          description: "Mark an invoice as paid.",
-          fn: api.invoices.markPaid,
-          args: { id: v.id("invoices") },
-          metadata: { roles: ["finance.admin"] },
-        }),
-      ],
-    );
-  },
-});
+export const tools = [
+  defineMcpQuery({
+    name: "invoices_summary",
+    description: "Total number of invoices. Public.",
+    fn: api.invoices.summary,
+    args: {},
+    metadata: { public: true },
+  }),
+  defineMcpQuery({
+    name: "invoices_list",
+    description: "List invoices for the authenticated user.",
+    fn: api.invoices.list,
+    args: { status: v.optional(v.string()) },
+  }),
+  defineMcpMutation({
+    name: "invoices_markPaid",
+    description: "Mark an invoice as paid.",
+    fn: api.invoices.markPaid,
+    args: { id: v.id("invoices") },
+    metadata: { roles: ["finance.admin"] },
+  }),
+];
 ```
 
 **Naming**: tool names must match `^[a-zA-Z0-9_-]{1,64}$`, letters,
@@ -128,7 +118,7 @@ export const whoami = query({
   handler: async (_ctx, { caller }) => ({ subject: caller.subject }),
 });
 
-// convex/mcp.ts (in registerDefaults)
+// convex/mcp.ts (add to the tools array)
 defineMcpQuery({
   name: "invoices_whoami",
   fn: api.invoices.whoami,
@@ -140,14 +130,6 @@ defineMcpQuery({
 See [architecture.md → Identity propagation](./architecture.md#identity-propagation)
 for the full data flow.
 
-`gateway.register` always replaces the registry atomically: tools no
-longer in the array are removed in the same Convex mutation. This is
-deliberate, incremental upserts leak stale registrations across
-deploys (the old tool stays exposed forever unless you remember to
-`unregisterTool`), which is exactly what this API is meant to
-prevent. For plugin systems that need genuine per-item upserts, call
-`gateway.registerTool` directly per tool.
-
 `defineMcp{Query,Mutation,Action}` validates `args` against
 `FunctionArgs<typeof fn>` at compile time. Passing the wrong validator or
 the wrong function kind is a type error, not a runtime surprise.
@@ -155,11 +137,20 @@ the wrong function kind is a type error, not a runtime surprise.
 `metadata` is host-defined free-form data. The gateway never inspects it;
 your authorize callback (step 4) reads it for public/role/scope checks.
 
-Run it once after `convex dev`:
+**No manual registration step.** Because step 4 passes this array to
+`handleMcpRequest`, the registry is reconciled on `initialize` and again
+whenever the list changes, you do not run anything by hand. The
+reconcile is change-detected: the list is fingerprinted and the registry
+is only rewritten when something actually changed, so an unchanged list
+costs a single cheap lookup per connect, not a rewrite.
 
-```sh
-npx convex run mcp:registerDefaults
-```
+> **Imperative alternative.** If you'd rather populate the registry from
+> a mutation (dynamic/plugin catalogs), call `gateway.register(ctx,
+> tools)` inside an `internalMutation` and run it after deploy instead of
+> passing `tools`. `register` replaces the registry atomically (tools no
+> longer in the array are removed in the same mutation, so stale
+> registrations can't leak across deploys); `gateway.registerTool` does
+> genuine per-item upserts.
 
 ## 4. Mount `/mcp/` with your authorize callback
 
@@ -178,6 +169,7 @@ import {
 } from "convex-mcp-gateway";
 import { components } from "./_generated/api.js";
 import { httpAction } from "./_generated/server.js";
+import { tools } from "./mcp.js";
 
 const gateway = new McpGateway(components.mcpGateway);
 
@@ -208,7 +200,7 @@ const authorize: McpAuthorizerHandler = async (ctx, args) => {
 const http = httpRouter();
 
 const mcpHandler = httpAction(async (ctx, request) =>
-  gateway.handleMcpRequest(ctx, request, { authorize }),
+  gateway.handleMcpRequest(ctx, request, { authorize, tools }),
 );
 // Mount both `/mcp/` and `/mcp`. Some MCP clients (e.g. claude.ai)
 // strip the trailing slash from the configured server URL before
@@ -248,10 +240,23 @@ the gateway and mount the RFC 9728 discovery route on your host's
 `httpRouter`:
 
 ```ts
-// convex/mcp.ts (in registerDefaults, before gateway.register)
-await gateway.setOAuthConfig(ctx, {
-  authServerUrl: "https://your-idp.example.com/",
+// convex/mcp.ts: OAuth config is stored in the DB, so set it once
+// from a mutation (it changes rarely, unlike the tool list).
+import { McpGateway } from "convex-mcp-gateway";
+import { components } from "./_generated/api.js";
+import { internalMutation } from "./_generated/server.js";
+
+const gateway = new McpGateway(components.mcpGateway);
+
+export const setupOAuth = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    await gateway.setOAuthConfig(ctx, {
+      authServerUrl: "https://your-idp.example.com/",
+    });
+  },
 });
+// run once: npx convex run mcp:setupOAuth
 ```
 
 ```ts
@@ -316,7 +321,8 @@ when you want to iterate without touching a real deployment:
 pnpm local:start                      # in one shell
 # in another shell:
 npx convex dev --once
-npx convex run mcp:registerDefaults
+# No registration step: the example's /mcp/ mount declares `tools`, so
+# the registry syncs on the initialize below.
 SESSION=$(curl -sSD - -X POST http://127.0.0.1:3311/mcp/ \
   -H 'content-type: application/json' \
   -H 'accept: application/json, text/event-stream' \
@@ -328,6 +334,57 @@ curl http://127.0.0.1:3311/mcp/ \
   -H "mcp-session-id: $SESSION" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 ```
+
+## Troubleshooting: circular type error from your tool list
+
+If `npx convex dev` or `tsc` fails with errors like:
+
+```text
+_generated/api.d.ts: error TS2502: 'api' is referenced directly or indirectly in its own type annotation.
+_generated/api.d.ts: error TS2615: Type of property 'mcp' circularly references itself in mapped type ...
+mcp.ts: error TS7022: 'tools' implicitly has type 'any' because it does not have a type annotation and is referenced directly or indirectly in its own initializer.
+```
+
+you've hit a Convex codegen circularity, not a bug in your tools and not
+a type-safety hole. It happens whenever you **export** a value from a
+file under `convex/` whose **inferred type reads `api.*`**, because
+Convex's generated `api` type already includes that same module. Your
+`tools` array is a classic trigger: each `defineMcp*({ fn: api.x.y })`
+embeds a reference to `api`, and `api` includes the module that exports
+`tools`, so the type chases its own tail. (This is general Convex
+behaviour; any `api`-referencing value you export from `convex/` can do
+it, tool lists just hit it most often.)
+
+Two ways to break the loop:
+
+**1. Annotate the export.** Keep it exported (e.g. so a registration
+mutation can reuse the same list) and give it an explicit type, so
+TypeScript uses the annotation instead of inferring from the
+`api`-referencing initializer:
+
+```ts
+import { defineMcpQuery, type McpToolRegistration } from "convex-mcp-gateway";
+
+export const tools: McpToolRegistration[] = [
+  defineMcpQuery({ /* ... */ }),
+];
+```
+
+**2. Don't export it from a Convex module.** A non-exported
+`const tools = [...]` declared inline in `http.ts` is never part of
+`api`, so it needs no annotation:
+
+```ts
+// convex/http.ts
+const tools = [defineMcpQuery({ /* ... */ })];
+const mcp = httpAction(async (ctx, req) =>
+  gateway.handleMcpRequest(ctx, req, { authorize, tools }),
+);
+```
+
+Either way the per-tool checks are unaffected: `args` and `returns` are
+validated against the function's real signature at each `defineMcp*`
+call, regardless of how (or whether) you type the surrounding array.
 
 ## Where to go next
 

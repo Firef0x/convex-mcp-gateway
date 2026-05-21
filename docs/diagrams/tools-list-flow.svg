@@ -25,15 +25,15 @@
   <line x1="520" y1="124" x2="520" y2="448" stroke="rgba(11,13,11,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
   <line x1="760" y1="124" x2="760" y2="448" stroke="rgba(11,13,11,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
 
-  <!-- PAR BLOCK FRAME (drawn first so it sits behind arrows + activations) -->
+  <!-- LOOP BLOCK FRAME (drawn first so it sits behind arrows + activations) -->
   <rect x="260" y="244" width="540" height="132" rx="4" fill="rgba(247,89,31,0.04)"
         stroke="rgba(247,89,31,0.45)" stroke-width="1" stroke-dasharray="4,3"/>
-  <!-- par tag -->
+  <!-- loop tag -->
   <rect x="268" y="232" width="92" height="20" rx="2" fill="#f5f4ed"/>
   <rect x="268" y="232" width="92" height="20" rx="2" fill="rgba(247,89,31,0.10)"
         stroke="#f7591f" stroke-width="1"/>
   <text x="278" y="246" fill="#f7591f" font-size="9" font-weight="600"
-        font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.12em">par × N tools</text>
+        font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.12em">loop × N tools</text>
 
   <!-- ARROWS (drawn before activation bars) -->
 
@@ -46,7 +46,7 @@
   <!-- 3. R -> H: all registered tools (dashed return) -->
   <line x1="520" y1="232" x2="280" y2="232" stroke="#52534e" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
 
-  <!-- 4. Three parallel authorize calls H -> Az (coral) -->
+  <!-- 4. Three per-tool authorize calls H -> Az (coral) -->
   <line x1="280" y1="276" x2="760" y2="276" stroke="#f7591f" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
   <line x1="280" y1="296" x2="760" y2="296" stroke="#f7591f" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
   <line x1="280" y1="316" x2="760" y2="316" stroke="#f7591f" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
@@ -82,7 +82,7 @@
   <text x="400" y="226" fill="#52534e" font-size="8" font-family="'Geist Mono', ui-monospace, monospace"
         text-anchor="middle" letter-spacing="0.06em">all registered tools</text>
 
-  <!-- 4. authorize mode=list (one label spanning the parallel arrows) -->
+  <!-- 4. authorize mode=list (one label spanning the per-tool arrows) -->
   <rect x="440" y="260" width="160" height="12" rx="2" fill="#f5f4ed"/>
   <text x="520" y="270" fill="#f7591f" font-size="8" font-family="'Geist Mono', ui-monospace, monospace"
         text-anchor="middle" letter-spacing="0.08em">AUTHORIZE mode=list</text>
@@ -144,7 +144,7 @@
         font-family="'Instrument Serif', Georgia, serif">
     <tspan x="840" dy="0">authorize is invoked</tspan>
     <tspan x="840" dy="16">once per registered</tspan>
-    <tspan x="840" dy="16">tool, all in parallel.</tspan>
+    <tspan x="840" dy="16">tool, in sequence.</tspan>
     <tspan x="840" dy="16">Tools that throw or</tspan>
     <tspan x="840" dy="16">return false are</tspan>
     <tspan x="840" dy="16">silently dropped.</tspan>

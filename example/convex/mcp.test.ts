@@ -1010,7 +1010,10 @@ describe("tool execution failures", () => {
 
   test("tools/call surfaces handler throw as result.isError:true (not JSON-RPC error)", async () => {
     const t = newTest();
-    // Register the throwing tool AND wire authorize to allow it.
+    const session = await initialize(t);
+    // Register the throwing tool AND wire authorize to allow it. Done
+    // after initialize because the /mcp/ mount auto-syncs the default
+    // catalog on initialize, which would otherwise replace this tool.
     await t.run(async (ctx) => {
       const handle = await createFunctionHandle(api.invoices.throwsAlways);
       await ctx.runMutation(components.mcpGateway.registry.replaceTools, {
@@ -1027,7 +1030,6 @@ describe("tool execution failures", () => {
       });
     });
 
-    const session = await initialize(t);
     const res = await rpc(t, session, {
       jsonrpc: "2.0",
       id: 7,
@@ -2086,5 +2088,238 @@ describe("requireAuth gate (/mcp-require-auth/)", () => {
       method: "tools/list",
     });
     expect(res.status).toBe(200);
+  });
+});
+
+// =================================================================
+// Declarative `tools` option: the /mcp/ mount passes `tools` to
+// handleMcpRequest, so the registry is reconciled on initialize with
+// no separate registerDefaults mutation.
+// =================================================================
+
+describe("declarative tools option (auto-sync on initialize)", () => {
+  test("initialize populates the registry without registerDefaults", async () => {
+    const t = newTest();
+    // Deliberately NOT calling registerDefaults: the /mcp/ mount declares
+    // `tools`, so initialize reconciles the registry on its own.
+    const session = await initialize(t);
+
+    const res = await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    });
+    const body = (await res.json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    // Anonymous caller sees only the public tool, which proves the
+    // catalog was synced (the registry would be empty otherwise).
+    expect(body.result.tools.map((tool) => tool.name)).toEqual([
+      "invoices_summary",
+    ]);
+  });
+
+  test("a tools/call works after auto-sync (no manual registration)", async () => {
+    const t = newTest();
+    const session = await initialize(t);
+    const res = await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "invoices_summary", arguments: {} },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { result?: { isError?: boolean } };
+    expect(body.result?.isError).toBe(false);
+  });
+
+  test("initialize reconciles: a stale tool registered out-of-band is removed", async () => {
+    const t = newTest();
+    // Seed a stale public tool that is NOT in the declared catalog,
+    // simulating a registration left over from an earlier deploy.
+    await t.run(async (ctx) => {
+      const handle = await createFunctionHandle(api.invoices.summary);
+      await ctx.runMutation(components.mcpGateway.registry.replaceTools, {
+        tools: [
+          {
+            name: "stale_tool",
+            description: "left over",
+            kind: "query",
+            functionHandle: handle,
+            inputSchema: { type: "object" },
+            metadata: { public: true },
+          },
+        ],
+      });
+    });
+
+    // initialize triggers the change-detected sync, which replaces the
+    // registry with the declared catalog (stale_tool gone).
+    const session = await initialize(t);
+    const res = await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    });
+    const body = (await res.json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    expect(body.result.tools.map((tool) => tool.name)).toEqual([
+      "invoices_summary",
+    ]);
+  });
+
+  test("change detection skips the rewrite when the list is unchanged", async () => {
+    const t = newTest();
+    // First initialize syncs the declared catalog and records its
+    // fingerprint.
+    await initialize(t);
+
+    // Inject drift directly via registerTool, which does NOT touch the
+    // fingerprint. If the second initialize re-synced unconditionally,
+    // this drift tool would be wiped; change detection must skip it.
+    await t.run(async (ctx) => {
+      const handle = await createFunctionHandle(api.invoices.summary);
+      await ctx.runMutation(components.mcpGateway.registry.registerTool, {
+        name: "drift_tool",
+        description: "injected out-of-band",
+        kind: "query",
+        functionHandle: handle,
+        inputSchema: { type: "object" },
+        metadata: { public: true },
+      });
+    });
+
+    // Second initialize: the declared list is unchanged, so the sync is
+    // a no-op and the out-of-band drift_tool survives.
+    const session = await initialize(t);
+    const res = await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    });
+    const body = (await res.json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    expect(body.result.tools.map((tool) => tool.name).sort()).toEqual([
+      "drift_tool",
+      "invoices_summary",
+    ]);
+  });
+
+  test("a changed list (non-null fingerprint) re-syncs the registry", async () => {
+    const t = newTest();
+    // Simulate a PRIOR declarative sync of a different list: a stale tool
+    // with a stale, non-null fingerprint. This is the A -> B transition
+    // (the from-empty case is covered by the reconcile test above).
+    await t.run(async (ctx) => {
+      const handle = await createFunctionHandle(api.invoices.summary);
+      await ctx.runMutation(components.mcpGateway.registry.replaceTools, {
+        tools: [
+          {
+            name: "old_tool",
+            description: "from a previous list",
+            kind: "query",
+            functionHandle: handle,
+            inputSchema: { type: "object" },
+            metadata: { public: true },
+          },
+        ],
+        fingerprint: "stale-fingerprint-A",
+      });
+    });
+
+    // initialize: the declared list differs from fingerprint "A", so the
+    // sync re-applies (old_tool gone, declared catalog in).
+    const session = await initialize(t);
+    const res = await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    });
+    const body = (await res.json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    expect(body.result.tools.map((tool) => tool.name)).toEqual([
+      "invoices_summary",
+    ]);
+
+    // The stored fingerprint advanced from the stale value to the
+    // declared list's real fingerprint.
+    const fp = await t.run(async (ctx) =>
+      ctx.runQuery(components.mcpGateway.registry.getToolsFingerprint, {}),
+    );
+    expect(fp).toBeTruthy();
+    expect(fp).not.toBe("stale-fingerprint-A");
+  });
+
+  test("clearTools also clears the fingerprint so a later initialize re-syncs", async () => {
+    const t = newTest();
+    // First initialize syncs and stamps the fingerprint.
+    await initialize(t);
+
+    // Clear the registry (the documented escape hatch). Without clearing
+    // the fingerprint too, the next initialize would skip the sync and
+    // leave the registry empty.
+    await t.run(async (ctx) => {
+      await ctx.runMutation(components.mcpGateway.registry.clearAllTools, {});
+    });
+
+    const session = await initialize(t);
+    const res = await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    });
+    const body = (await res.json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    // Registry was repopulated by the sync (not left empty).
+    expect(body.result.tools.map((tool) => tool.name)).toEqual([
+      "invoices_summary",
+    ]);
+  });
+
+  test("setOAuthConfig preserves the fingerprint (no forced re-sync)", async () => {
+    const t = newTest();
+    // First initialize stamps the fingerprint.
+    await initialize(t);
+
+    // An OAuth-config write must not drop the fingerprint.
+    await t.run(async (ctx) => {
+      await ctx.runMutation(components.mcpGateway.registry.setOAuthConfig, {
+        authServerUrl: "https://idp.example.com/",
+      });
+    });
+
+    // Inject out-of-band drift that does NOT touch the fingerprint.
+    await t.run(async (ctx) => {
+      const handle = await createFunctionHandle(api.invoices.summary);
+      await ctx.runMutation(components.mcpGateway.registry.registerTool, {
+        name: "drift_tool",
+        description: "injected after setOAuthConfig",
+        kind: "query",
+        functionHandle: handle,
+        inputSchema: { type: "object" },
+        metadata: { public: true },
+      });
+    });
+
+    // Second initialize: because setOAuthConfig preserved the fingerprint,
+    // the sync is skipped and the drift survives. (If the fingerprint had
+    // been dropped, this initialize would re-sync and wipe drift_tool.)
+    const session = await initialize(t);
+    const res = await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    });
+    const body = (await res.json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    expect(body.result.tools.map((tool) => tool.name).sort()).toEqual([
+      "drift_tool",
+      "invoices_summary",
+    ]);
   });
 });

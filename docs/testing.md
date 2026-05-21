@@ -123,6 +123,16 @@ routes), the full pipeline (envelope, sessions, authorize callback,
 identity, dispatch, audit) is reachable in unit tests. Two helpers
 remove most of the boilerplate:
 
+> **Registration in tests.** Layer 1 above calls
+> `internal.mcp.registerDefaults` to populate the registry imperatively,
+> which is the right tool for component-level tests that bypass HTTP. If
+> your host's `/mcp/` mount uses the declarative `tools` option (the
+> recommended setup), the registry is reconciled on the `initialize`
+> below, so the e2e tests need no separate registration call. If you
+> export a `tools` array from a Convex module, annotate it
+> `McpToolRegistration[]`, see
+> [getting-started.md → Troubleshooting](./getting-started.md#troubleshooting-circular-type-error-from-your-tool-list).
+
 ```ts
 async function initialize(t: ReturnType<typeof newTest>): Promise<string> {
   const res = await t.fetch("/mcp/", {

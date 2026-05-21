@@ -89,6 +89,18 @@ export const clearAllTools = mutation({
     for (const tool of tools) {
       await ctx.db.delete("tools", tool._id);
     }
+    // Also drop the declarative fingerprint: otherwise a later
+    // `initialize` would see a matching fingerprint and skip the sync,
+    // leaving the registry permanently empty after a clear.
+    const cfg = await ctx.db.query("config").unique();
+    if (cfg && cfg.toolsFingerprint !== undefined) {
+      await ctx.db.replace("config", cfg._id, {
+        authServerUrl: cfg.authServerUrl,
+        resourceUrl: cfg.resourceUrl,
+        authorizerHandle: cfg.authorizerHandle,
+        toolsFingerprint: undefined,
+      });
+    }
     return null;
   },
 });
@@ -115,6 +127,13 @@ export const replaceTools = mutation({
         metadata: v.optional(v.any()),
       }),
     ),
+    /**
+     * Fingerprint of the declarative source list, stored so a later
+     * `initialize` can skip re-syncing when nothing changed. Omitted by
+     * the imperative `register` path, which clears it so a subsequent
+     * declarative sync always re-applies.
+     */
+    fingerprint: v.optional(v.string()),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -152,7 +171,37 @@ export const replaceTools = mutation({
         await ctx.db.insert("tools", incoming);
       }
     }
+    // Persist (or clear) the declarative fingerprint without disturbing
+    // the OAuth fields on the singleton config row. `args.fingerprint`
+    // being undefined clears it, that's the imperative-register path
+    // invalidating any prior declarative sync.
+    const cfg = await ctx.db.query("config").unique();
+    if (cfg) {
+      await ctx.db.replace("config", cfg._id, {
+        authServerUrl: cfg.authServerUrl,
+        resourceUrl: cfg.resourceUrl,
+        authorizerHandle: cfg.authorizerHandle,
+        toolsFingerprint: args.fingerprint,
+      });
+    } else {
+      await ctx.db.insert("config", { toolsFingerprint: args.fingerprint });
+    }
     return null;
+  },
+});
+
+/**
+ * Fingerprint of the declarative tool catalog last synced via the
+ * `tools` option, or `null` if never synced that way. The host compares
+ * it against the current list's fingerprint to decide whether an
+ * `initialize` needs to rewrite the registry.
+ */
+export const getToolsFingerprint = query({
+  args: {},
+  returns: v.union(v.string(), v.null()),
+  handler: async (ctx) => {
+    const row = await ctx.db.query("config").unique();
+    return row?.toolsFingerprint ?? null;
   },
 });
 
@@ -185,6 +234,9 @@ async function patchConfigRow(
   const next = {
     authServerUrl: apply(patch.authServerUrl, existing?.authServerUrl),
     resourceUrl: apply(patch.resourceUrl, existing?.resourceUrl),
+    // Preserve the declarative tool fingerprint across OAuth-config
+    // writes so changing OAuth settings doesn't force a registry re-sync.
+    toolsFingerprint: existing?.toolsFingerprint,
   };
   if (existing) {
     await ctx.db.replace("config", existing._id, next);

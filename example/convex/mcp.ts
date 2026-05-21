@@ -4,6 +4,7 @@ import {
   defineMcpMutation,
   defineMcpQuery,
   mcpCallerValidator,
+  type McpToolRegistration,
 } from "convex-mcp-gateway";
 import { api, components } from "./_generated/api.js";
 import { internalMutation } from "./_generated/server.js";
@@ -11,9 +12,70 @@ import { internalMutation } from "./_generated/server.js";
 const gateway = new McpGateway(components.mcpGateway);
 
 /**
- * Run once (or whenever the tool list changes) to populate the
- * component registry. The authorize callback lives in `http.ts`
- * because it needs `ctx.auth` from the host's HTTP-action context.
+ * The declarative tool catalog. Declared once here and passed to
+ * `gateway.handleMcpRequest({ authorize, tools })` in `http.ts`, the
+ * gateway reconciles the registry on each `initialize`, so changing
+ * this list takes effect on the next connect with no manual mutation.
+ *
+ * The same list also backs `registerDefaults` below, which the
+ * component-level tests use to populate the registry without going
+ * through the HTTP path.
+ *
+ * The `McpToolRegistration[]` annotation is required because this array
+ * is exported from a Convex module: without it, the inferred type reads
+ * `api.*` from the tool `fn`s while `api` includes this module, and
+ * codegen hits a circular reference. It does not weaken type safety,
+ * `args`/`returns` are still checked at each `defineMcp*` call below.
+ */
+export const tools: McpToolRegistration[] = [
+  defineMcpQuery({
+    name: "invoices_list",
+    description: "List invoices, optionally filtered by status.",
+    fn: api.invoices.list,
+    args: {
+      status: v.optional(v.union(v.literal("open"), v.literal("paid"))),
+    },
+  }),
+  defineMcpMutation({
+    name: "invoices_markPaid",
+    description: "Mark an invoice as paid.",
+    fn: api.invoices.markPaid,
+    args: { id: v.id("invoices") },
+  }),
+  defineMcpQuery({
+    name: "invoices_whoami",
+    description:
+      "Return the authenticated caller. Identity is injected by " +
+      "the gateway into the `caller` arg (never sent by the client).",
+    fn: api.invoices.whoami,
+    args: { caller: mcpCallerValidator },
+    returns: v.object({ subject: v.string(), hasClaims: v.boolean() }),
+    // The gateway fills `caller` from the resolved identity, strips
+    // it from the advertised schema + client args, and rejects calls
+    // with no caller as Unauthorized.
+    identityArg: "caller",
+  }),
+  defineMcpQuery({
+    name: "invoices_summary",
+    description: "Return the total number of invoices. Public.",
+    fn: api.invoices.summary,
+    args: {},
+    // Declaring `returns` makes the gateway advertise an MCP
+    // `outputSchema` for this tool and ship a `structuredContent`
+    // block in every tools/call response. Type-checked against
+    // the Convex function's actual return type at compile time.
+    returns: v.object({ total: v.float64() }),
+    // The host's authorize callback in http.ts treats `public:
+    // true` as the opt-in for unauthenticated calls.
+    metadata: { public: true },
+  }),
+];
+
+/**
+ * Imperative alternative to the declarative `tools` option: populate
+ * the component registry from a mutation. Kept for advanced/dynamic
+ * cases and used by the component-level tests; hosts that pass `tools`
+ * to `handleMcpRequest` do not need to run this.
  *
  * ```sh
  * npx convex run mcp:registerDefaults
@@ -23,54 +85,7 @@ export const registerDefaults = internalMutation({
   args: {},
   returns: v.null(),
   handler: async (ctx) => {
-    await gateway.register(
-      ctx,
-      [
-        defineMcpQuery({
-          name: "invoices_list",
-          description: "List invoices, optionally filtered by status.",
-          fn: api.invoices.list,
-          args: {
-            status: v.optional(
-              v.union(v.literal("open"), v.literal("paid")),
-            ),
-          },
-        }),
-        defineMcpMutation({
-          name: "invoices_markPaid",
-          description: "Mark an invoice as paid.",
-          fn: api.invoices.markPaid,
-          args: { id: v.id("invoices") },
-        }),
-        defineMcpQuery({
-          name: "invoices_whoami",
-          description:
-            "Return the authenticated caller. Identity is injected by " +
-            "the gateway into the `caller` arg (never sent by the client).",
-          fn: api.invoices.whoami,
-          args: { caller: mcpCallerValidator },
-          returns: v.object({ subject: v.string(), hasClaims: v.boolean() }),
-          // The gateway fills `caller` from the resolved identity, strips
-          // it from the advertised schema + client args, and rejects calls
-          // with no caller as Unauthorized.
-          identityArg: "caller",
-        }),
-        defineMcpQuery({
-          name: "invoices_summary",
-          description: "Return the total number of invoices. Public.",
-          fn: api.invoices.summary,
-          args: {},
-          // Declaring `returns` makes the gateway advertise an MCP
-          // `outputSchema` for this tool and ship a `structuredContent`
-          // block in every tools/call response. Type-checked against
-          // the Convex function's actual return type at compile time.
-          returns: v.object({ total: v.float64() }),
-          // The host's authorize callback in http.ts treats `public:
-          // true` as the opt-in for unauthenticated calls.
-          metadata: { public: true },
-        }),
-      ],
-    );
+    await gateway.register(ctx, tools);
     return null;
   },
 });

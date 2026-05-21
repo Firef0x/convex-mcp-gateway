@@ -46,6 +46,7 @@ Your handler receives:
 | `args` | `Record<string, unknown>` | Caller-supplied arguments (`{}` in `mode: "list"`) |
 | `mode` | `"call" \| "list"` | See below |
 | `toolMetadata` | `unknown` | Whatever the host passed via `defineMcp*({ metadata })` |
+| `identity` | `{ subject, claims? } \| null` | Caller resolved once at the boundary (`resolveIdentity` result, or `ctx.auth.getUserIdentity()`); `null` if anonymous. Prefer this over re-reading `ctx.auth` |
 
 Return either `{ allowed: true }` or `{ allowed: false, reason?: string }`.
 

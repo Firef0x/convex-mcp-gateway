@@ -111,6 +111,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         } | null,
         Name
       >;
+      getToolsFingerprint: FunctionReference<
+        "query",
+        "internal",
+        {},
+        string | null,
+        Name
+      >;
       listTools: FunctionReference<
         "query",
         "internal",
@@ -149,6 +156,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "mutation",
         "internal",
         {
+          fingerprint?: string;
           tools: Array<{
             description: string;
             functionHandle: string;

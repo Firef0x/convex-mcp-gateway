@@ -1,5 +1,6 @@
 import {
   createFunctionHandle,
+  getFunctionName,
   type FunctionArgs,
   type FunctionReference,
   type FunctionReturnType,
@@ -18,6 +19,7 @@ import {
   type McpCaller,
   type McpToolDefinition,
   type McpToolKind,
+  type McpToolRegistration,
 } from "../shared.js";
 import {
   handleMcpRequest as handleMcpRequestImpl,
@@ -31,7 +33,9 @@ export type {
   McpAuthorizerHandler,
   McpCaller,
   McpToolDefinition,
+  McpToolFunctionReference,
   McpToolKind,
+  McpToolRegistration,
 } from "../shared.js";
 export type {
   HandleMcpRequestOptions,
@@ -319,6 +323,77 @@ export function defineMcpAction<
 }
 
 /**
+ * Resolve a declarative tool list into the registry's row shape,
+ * creating a `functionHandle` per tool. Shared by `register` and the
+ * declarative `tools` sync.
+ */
+async function resolveToolHandles(tools: McpToolRegistration[]) {
+  return await Promise.all(
+    tools.map(async (tool) => ({
+      name: tool.name,
+      description: tool.description,
+      kind: tool.kind,
+      functionHandle: await createFunctionHandle(tool.fn as any),
+      inputSchema: tool.inputSchema,
+      ...(tool.outputSchema !== undefined
+        ? { outputSchema: tool.outputSchema }
+        : {}),
+      ...(tool.identityArg !== undefined
+        ? { identityArg: tool.identityArg }
+        : {}),
+      ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
+    })),
+  );
+}
+
+/**
+ * Stable fingerprint of a declarative tool catalog, computed WITHOUT
+ * creating function handles (which is a runtime syscall). Covers every
+ * field the registry stores plus the target function's name, sorted by
+ * tool name so reordering the source array doesn't churn it.
+ */
+function toolsFingerprint(tools: McpToolRegistration[]): string {
+  const normalized = tools
+    .map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      kind: tool.kind,
+      fn: getFunctionName(tool.fn),
+      inputSchema: tool.inputSchema ?? null,
+      outputSchema: tool.outputSchema ?? null,
+      identityArg: tool.identityArg ?? null,
+      metadata: tool.metadata ?? null,
+    }))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return JSON.stringify(normalized);
+}
+
+/**
+ * Reconcile the component registry from a declarative `tools` list, but
+ * only when it actually changed. Compares the in-memory fingerprint
+ * against the one stored at the last sync; on a match it does nothing
+ * (one cheap query, no handle creation, no writes), so calling it on
+ * every `initialize` is cheap in the steady state.
+ */
+async function syncDeclaredTools(
+  ctx: RunMutationCtx,
+  component: ComponentApi,
+  tools: McpToolRegistration[],
+): Promise<void> {
+  const fingerprint = toolsFingerprint(tools);
+  const current = await ctx.runQuery(
+    component.registry.getToolsFingerprint,
+    {},
+  );
+  if (current === fingerprint) return;
+  const resolved = await resolveToolHandles(tools);
+  await ctx.runMutation(component.registry.replaceTools, {
+    tools: resolved,
+    fingerprint,
+  });
+}
+
+/**
  * Host-app handle for the MCP gateway component.
  *
  * Authorization is **not** registered ahead of time as a Convex
@@ -366,7 +441,7 @@ export class McpGateway {
    */
   async registerTool(
     ctx: RunMutationCtx,
-    tool: McpToolDefinition & { fn: AnyToolFunctionReference },
+    tool: McpToolRegistration,
   ): Promise<void> {
     const handle = await createFunctionHandle(tool.fn as any);
     await ctx.runMutation(this.component.registry.registerTool, {
@@ -402,24 +477,11 @@ export class McpGateway {
    */
   async register(
     ctx: RunMutationCtx,
-    tools: Array<McpToolDefinition & { fn: AnyToolFunctionReference }>,
+    tools: McpToolRegistration[],
   ): Promise<void> {
-    const resolved = await Promise.all(
-      tools.map(async (tool) => ({
-        name: tool.name,
-        description: tool.description,
-        kind: tool.kind,
-        functionHandle: await createFunctionHandle(tool.fn as any),
-        inputSchema: tool.inputSchema,
-        ...(tool.outputSchema !== undefined
-          ? { outputSchema: tool.outputSchema }
-          : {}),
-        ...(tool.identityArg !== undefined
-          ? { identityArg: tool.identityArg }
-          : {}),
-        ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
-      })),
-    );
+    const resolved = await resolveToolHandles(tools);
+    // No fingerprint: the imperative path clears any declarative
+    // fingerprint so a later `tools`-option sync re-applies.
     await ctx.runMutation(this.component.registry.replaceTools, {
       tools: resolved,
     });
@@ -564,15 +626,24 @@ export class McpGateway {
    * action context (so `ctx.auth.getUserIdentity()` works). The
    * callback decides per `tools/call` and per tool in `tools/list`.
    *
+   * Pass `tools` to declare the catalog inline (recommended): the
+   * gateway reconciles the registry on `initialize`, so you change the
+   * list in code and it just applies on the next connect, no separate
+   * registration mutation to run. The reconcile is change-detected: it
+   * fingerprints the list and only rewrites the registry when something
+   * actually changed, so the steady-state cost per connection is a
+   * single cheap lookup. The imperative `gateway.register(...)` mutation
+   * stays available for dynamic/plugin catalogs.
+   *
    * ```ts
    * import { httpRouter } from "convex/server";
    * import { httpAction } from "./_generated/server.js";
-   * import { gateway } from "./mcp.js";
+   * import { gateway, tools } from "./mcp.js";
    * import { authorize } from "./authorize.js";
    *
    * const http = httpRouter();
    * const mcp = httpAction(async (ctx, req) =>
-   *   gateway.handleMcpRequest(ctx, req, { authorize }),
+   *   gateway.handleMcpRequest(ctx, req, { authorize, tools }),
    * );
    * http.route({ path: "/mcp/", method: "POST",   handler: mcp });
    * http.route({ path: "/mcp/", method: "GET",    handler: mcp });
@@ -588,7 +659,16 @@ export class McpGateway {
     request: Request,
     options: HandleMcpRequestOptions,
   ): Promise<Response> {
-    return await handleMcpRequestImpl(ctx, request, this.component, options);
+    const { tools, ...rest } = options;
+    const syncTools = tools
+      ? async () => {
+          await syncDeclaredTools(ctx, this.component, tools);
+        }
+      : undefined;
+    return await handleMcpRequestImpl(ctx, request, this.component, {
+      ...rest,
+      syncTools,
+    });
   }
 
   /**

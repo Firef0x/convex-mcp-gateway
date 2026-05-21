@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import type { FunctionReference } from "convex/server";
 import type {
   GenericValidator,
   Infer,
@@ -84,6 +85,44 @@ export interface McpToolDefinition {
   identityArg?: string;
   metadata?: Record<string, unknown>;
 }
+
+/**
+ * A Convex function reference usable as an MCP tool: a query, mutation,
+ * or action of either visibility. The arg/return generics are `any`
+ * here on purpose, the per-tool arg/return type-checking happens in the
+ * `defineMcp*` config parameter, not at this widened element type.
+ */
+export type McpToolFunctionReference = FunctionReference<
+  McpToolKind,
+  "internal" | "public",
+  any,
+  any
+>;
+
+/**
+ * Element type of a declarative tool catalog: the result of
+ * `defineMcp{Query,Mutation,Action}`. Use it to annotate an exported
+ * `tools` array so it can be passed to `gateway.handleMcpRequest` or
+ * `gateway.register`:
+ *
+ * ```ts
+ * export const tools: McpToolRegistration[] = [defineMcpQuery({ ... })];
+ * ```
+ *
+ * The annotation is only needed when the array is **exported from a
+ * Convex module** (one under your `convex/` functions dir): without it,
+ * the inferred type reads `api.*` from the tool `fn`s while `api` itself
+ * includes that module, and Convex's generated `api.d.ts` hits a
+ * circular-reference error. A non-exported `const tools = [...]` (e.g.
+ * declared inline in `http.ts`) needs no annotation.
+ *
+ * Annotating does **not** weaken per-tool type safety: `args` / `returns`
+ * are validated at the `defineMcp*` call against the function's actual
+ * signature, independent of how the resulting array is typed.
+ */
+export type McpToolRegistration = McpToolDefinition & {
+  fn: McpToolFunctionReference;
+};
 
 /**
  * Validator for the caller identity the gateway injects into a tool's

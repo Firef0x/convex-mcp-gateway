@@ -43,7 +43,8 @@ The split:
   read `ctx.auth`.
 
 The component cannot reach the host's tables directly; everything goes
-through `createFunctionHandle` references the host registers via
+through `createFunctionHandle` references the host supplies, either via
+the declarative `tools` option of `handleMcpRequest` or the imperative
 `gateway.register`. The host never imports component internals; it only
 sees `components.mcpGateway.<module>.<function>` plus the `McpGateway`
 client class.
@@ -57,9 +58,11 @@ Four tables, all owned by the component:
 - `tools` is a per-tool row keyed by `name`. `functionHandle` is the
   opaque reference returned by `createFunctionHandle(fn)` and dispatched
   with `ctx.runQuery / runMutation / runAction`.
-- `config` is a singleton row holding the OAuth metadata. Authorization
-  itself is **not** stored here: it lives in the host as a regular JS
-  callback passed to `gateway.handleMcpRequest`.
+- `config` is a singleton row holding the OAuth metadata plus the
+  `toolsFingerprint` of the last declarative `tools` sync (so the host
+  can skip rewriting the registry when the list is unchanged).
+  Authorization itself is **not** stored here: it lives in the host as a
+  regular JS callback passed to `gateway.handleMcpRequest`.
 - `sessions` is the MCP Streamable HTTP session table. One row per
   active client, keyed on the cryptographically random session id the
   server issued during `initialize`. The row also stores the
@@ -97,6 +100,19 @@ that get `404` on a previously valid session id MUST start a fresh
 the host can schedule `gateway.pruneSessions(ctx, idleMs)` from a
 cron if needed.
 
+### Registry sync on `initialize`
+
+When the host passes the declarative `tools` option to
+`handleMcpRequest`, the registry is reconciled on each `initialize`. The
+sync is change-detected: the gateway fingerprints the list (function
+names + schemas + metadata, no handle creation) and compares it against
+the `config.toolsFingerprint` stored at the last sync. On a match it does
+nothing, so the steady-state cost per connection is a single cheap
+lookup; only an actual change triggers the atomic `replaceTools`. A sync
+failure (e.g. a duplicate tool name) fails the `initialize` loudly and
+logs the cause. Hosts that prefer to register imperatively omit `tools`
+and call `gateway.register` from a mutation instead.
+
 ## Request flow: `tools/call`
 
 ![tools/call dispatch flow](./diagrams/tools-call-flow.svg)
@@ -132,9 +148,10 @@ authorize callback would let them call. An unauthenticated client sees
 only public tools, and an authenticated user without a particular role
 never even sees the role-gated mutations in their tool list.
 
-The callback is invoked once per registered tool, in parallel via
-`Promise.all`. For 5 to 20 tools that is a non-issue; if your registry
-grows large, move expensive checks into `metadata` (which the callback
+The callback is invoked once per registered tool (sequentially; a
+throwing callback drops only that one tool from the list, not the whole
+catalog). For 5 to 20 tools that is a non-issue; if your registry grows
+large, move expensive checks into `metadata` (which the callback
 receives without needing to re-read the registry).
 
 ## Identity propagation
@@ -229,6 +246,7 @@ itself).
 | Session id missing on a non-`initialize` request | HTTP 400 |
 | Session id unknown / terminated | HTTP 404 (forces fresh `initialize`) |
 | Anonymous POST with `requireAuth: true` | HTTP 401 (+ `WWW-Authenticate` when OAuth is configured) before session handling, so browser clients begin OAuth. Opt-in; see [oauth.md](./oauth.md#all-private-servers-and-browser-clients-requireauth) |
+| Declarative `tools` sync fails on `initialize` (e.g. duplicate tool name) | `initialize` fails loudly; cause logged via `console.error` with the `[mcp-gateway]` prefix |
 
 ## Going deeper
 

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0 (2026-05-21)
+
+### Added
+
+- **Declarative `tools` option on `handleMcpRequest`.** Pass the tool
+  catalog (the same `defineMcp*` array `register` takes) directly to
+  `gateway.handleMcpRequest({ authorize, tools })` and the gateway
+  reconciles the component registry on `initialize`, so editing the list
+  in code takes effect on the next client connect with no separate
+  registration mutation to run by hand. The reconcile is
+  **change-detected**: the list is fingerprinted and the registry is only
+  rewritten when something actually changed, so the steady-state cost per
+  connection is a single cheap lookup, not a rewrite. The imperative
+  `gateway.register(...)` / `registerTool(...)` path stays for
+  dynamic/plugin catalogs. New exported type `McpToolRegistration` (and
+  `McpToolFunctionReference`) to annotate an exported `tools` array
+  against a Convex codegen circular-type error.
+
 ## 0.3.0 (2026-05-21)
 
 ### Added

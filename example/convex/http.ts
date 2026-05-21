@@ -5,6 +5,7 @@ import {
 } from "convex-mcp-gateway";
 import { components } from "./_generated/api.js";
 import { httpAction } from "./_generated/server.js";
+import { tools } from "./mcp.js";
 
 const gateway = new McpGateway(components.mcpGateway);
 
@@ -73,6 +74,10 @@ const mcpHandler = httpAction(async (ctx, request) =>
     authorize,
     cors: true,
     resolveIdentity,
+    // Declarative catalog: the registry is reconciled from this list on
+    // each initialize, so no separate registerDefaults mutation is
+    // needed for the HTTP path.
+    tools,
   }),
 );
 // Mount BOTH /mcp/ and /mcp (no trailing slash). claude.ai (and

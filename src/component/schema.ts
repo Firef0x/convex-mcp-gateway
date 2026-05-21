@@ -72,6 +72,15 @@ export default defineSchema({
      * future release.
      */
     authorizerHandle: v.optional(v.string()),
+    /**
+     * Fingerprint of the declarative tool catalog last synced via the
+     * `tools` option of `handleMcpRequest`. Lets the host skip rewriting
+     * the registry when the list is unchanged (the common case on every
+     * `initialize`). Set by the declarative sync, cleared by the
+     * imperative `register` path. Optional: absent means "never synced
+     * declaratively".
+     */
+    toolsFingerprint: v.optional(v.string()),
   }),
 
   /**

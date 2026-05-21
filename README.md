@@ -18,7 +18,10 @@ Built as a [Convex Component](https://www.convex.dev/components).
 
 - **Type-safe tool registration**: `defineMcpQuery` / `defineMcpMutation` /
   `defineMcpAction` declare a Convex function as an MCP tool with end-to-
-  end-typed `args` and (optional) `returns` validators
+  end-typed `args` and (optional) `returns` validators. Declare the list
+  once and pass it as `tools` to `handleMcpRequest`, the registry
+  auto-syncs on connect (no separate registration mutation), or call
+  `gateway.register(...)` for imperative/dynamic catalogs
 - **MCP 2025-06-18 Streamable HTTP**: sessions, `Accept` negotiation,
   `MCP-Protocol-Version` validation, identity-bound `DELETE`, single-
   frame SSE
@@ -89,37 +92,26 @@ export default app;
 ```
 
 ```ts
-// convex/mcp.ts, register tools
+// convex/mcp.ts, declare your tools once
 import { v } from "convex/values";
-import { McpGateway, defineMcpQuery } from "convex-mcp-gateway";
-import { api, components } from "./_generated/api.js";
-import { internalMutation } from "./_generated/server.js";
+import { defineMcpQuery } from "convex-mcp-gateway";
+import { api } from "./_generated/api.js";
 
-const gateway = new McpGateway(components.mcpGateway);
-
-export const registerDefaults = internalMutation({
-  args: {},
-  handler: async (ctx) => {
-    await gateway.register(
-      ctx,
-      [
-        defineMcpQuery({
-          name: "invoices_summary",
-          description: "Public invoice counter.",
-          fn: api.invoices.summary,
-          args: {},
-          metadata: { public: true },
-        }),
-        defineMcpQuery({
-          name: "invoices_list",
-          description: "List invoices for the authenticated user.",
-          fn: api.invoices.list,
-          args: { status: v.optional(v.string()) },
-        }),
-      ],
-    );
-  },
-});
+export const tools = [
+  defineMcpQuery({
+    name: "invoices_summary",
+    description: "Public invoice counter.",
+    fn: api.invoices.summary,
+    args: {},
+    metadata: { public: true },
+  }),
+  defineMcpQuery({
+    name: "invoices_list",
+    description: "List invoices for the authenticated user.",
+    fn: api.invoices.list,
+    args: { status: v.optional(v.string()) },
+  }),
+];
 ```
 
 ```ts
@@ -131,6 +123,7 @@ import {
 } from "convex-mcp-gateway";
 import { components } from "./_generated/api.js";
 import { httpAction } from "./_generated/server.js";
+import { tools } from "./mcp.js";
 
 const gateway = new McpGateway(components.mcpGateway);
 
@@ -143,8 +136,10 @@ const authorize: McpAuthorizerHandler = async (ctx, { toolMetadata }) => {
 };
 
 const http = httpRouter();
+// Pass `tools` and the registry syncs on each connect, no separate
+// registration mutation to run.
 const mcp = httpAction(async (ctx, req) =>
-  gateway.handleMcpRequest(ctx, req, { authorize }),
+  gateway.handleMcpRequest(ctx, req, { authorize, tools }),
 );
 // Mount both /mcp/ and /mcp, some clients (claude.ai) strip the
 // trailing slash from the configured URL before POSTing.
@@ -158,7 +153,8 @@ export default http;
 
 ```sh
 npx convex dev --once
-npx convex run mcp:registerDefaults
+# No registration step: passing `tools` to handleMcpRequest syncs the
+# registry on the initialize below.
 
 # Talk to it (Streamable HTTP, initialize first, then send commands).
 SESSION=$(curl -sSD - -X POST "$CONVEX_SITE_URL/mcp/" \
@@ -210,10 +206,10 @@ only reacts to a 401. See
 
 ## Design choices, briefly
 
-- **One authorizer query, deny-by-default.** The component has no
-  notion of scopes, roles, JWT claims, or tenants. It calls one
-  `internalQuery` per dispatch and lets it decide. Until that query is
-  registered, nothing works.
+- **One authorize callback, deny-by-default.** The component has no
+  notion of scopes, roles, JWT claims, or tenants. You pass a single JS
+  callback to `handleMcpRequest` that decides per call (it runs host-side
+  where `ctx.auth` works). Until you pass it, nothing reaches your tools.
 - **Scope-aware `tools/list`.** The catalog visible to a caller equals
   the set of tools they could actually invoke; the same authorizer
   filters both with a `mode: "list"` discriminator.

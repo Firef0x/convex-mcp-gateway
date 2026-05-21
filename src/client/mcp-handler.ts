@@ -5,6 +5,7 @@ import {
   type McpAuthorizerArgs,
   type McpAuthorizerDecision,
   type McpAuthorizerHandler,
+  type McpToolRegistration,
 } from "../shared.js";
 
 /**
@@ -129,7 +130,26 @@ export interface HandleMcpRequestOptions {
    * identity-bound, and `OPTIONS` (CORS preflight) is left untouched.
    */
   requireAuth?: boolean;
+  /**
+   * Declarative tool catalog. When set, the registry is reconciled from
+   * this list on `initialize` (change-detected, so an unchanged list is
+   * a cheap no-op), and no separate registration mutation is needed.
+   * Omit it to manage the registry yourself via `gateway.register(...)`.
+   * Annotate an exported list with `McpToolRegistration[]` to avoid a
+   * Convex codegen circular-type error (see that type's docs).
+   */
+  tools?: McpToolRegistration[];
 }
+
+/**
+ * Internal handler options: the public `HandleMcpRequestOptions` plus
+ * the `syncTools` callback that `McpGateway.handleMcpRequest` derives
+ * from the `tools` option and injects. Not exported, hosts never set
+ * `syncTools` directly.
+ */
+type InternalHandleMcpRequestOptions = HandleMcpRequestOptions & {
+  syncTools?: () => Promise<void>;
+};
 
 type HandlerCtx = {
   runQuery: (ref: any, args: any) => Promise<any>;
@@ -369,7 +389,7 @@ export async function handleMcpRequest(
   ctx: HandlerCtx,
   request: Request,
   component: ComponentApi,
-  options: HandleMcpRequestOptions,
+  options: InternalHandleMcpRequestOptions,
 ): Promise<Response> {
   if (request.method === "OPTIONS") {
     return preflightResponse(options.cors, request);
@@ -482,7 +502,7 @@ async function handlePost(
   ctx: HandlerCtx,
   request: Request,
   component: ComponentApi,
-  options: HandleMcpRequestOptions,
+  options: InternalHandleMcpRequestOptions,
 ): Promise<Response> {
   // MCP 2025-06-18 §"Sending Messages to the Server": clients MUST set
   // Accept to list both application/json and text/event-stream. Enforcing
@@ -639,6 +659,27 @@ async function handlePost(
 
   switch (message.method) {
     case "initialize": {
+      // Lazily reconcile the registry from the host's declarative `tools`
+      // option (if provided). Runs on initialize, which is when a client
+      // connects, so a tool-list change in the host's code takes effect
+      // on the next connect without a manual registration mutation. The
+      // sync is change-detected, so an unchanged list is a cheap no-op.
+      // A failure here (e.g. a duplicate tool name) should fail the
+      // connection loudly, but log first: it's the only fallible step in
+      // this handler whose cause would otherwise be invisible.
+      if (options.syncTools) {
+        try {
+          await options.syncTools();
+        } catch (err) {
+          console.error(
+            "[mcp-gateway] declarative tool sync failed during initialize; " +
+              "the connection will fail. Check the `tools` list passed to " +
+              "handleMcpRequest (e.g. duplicate tool names).",
+            err,
+          );
+          throw err;
+        }
+      }
       const requested = message.params?.protocolVersion;
       const negotiated =
         typeof requested === "string" &&
