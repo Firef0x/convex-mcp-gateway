@@ -247,26 +247,17 @@ See [docs/testing.md](./docs/testing.md) for `convex-test` patterns and
 
 ## Roadmap
 
-**Auth model: bring your own IdP.** Any OAuth 2.1 / OIDC issuer that
-Convex's `auth.config.ts` can validate against (Pocket-ID, Auth0,
-Clerk, Keycloak, AWS Cognito, Authentik, custom JWT issuer) plugs in
-without code changes. We deliberately do **not** ship a bundled
-authorization server: building DCR + PKCE + token issuance + key
-rotation duplicates what every IdP already does, and an MCP gateway
-that's also an IdP would be two security-critical surfaces in one
-component. The gateway only implements the resource-server side of
-MCP's OAuth profile (RFC 9728 discovery, RFC 6750 `WWW-Authenticate`).
-A separate bridge mode (RFC 8414 metadata + RFC 7591 DCR wrap) lets
-hosts whose upstream IdP doesn't speak DCR still serve browser MCP
-clients, see [docs/oauth-bridge.md](./docs/oauth-bridge.md).
-
-### Future
+By design the gateway is the **resource-server** half of MCP's OAuth
+profile only; it will not ship a bundled authorization server (that
+duplicates what every IdP already does and would put two
+security-critical surfaces in one component). Bring your own OAuth 2.1
+/ OIDC issuer. On the radar beyond that:
 
 - Capability tokens for agent-spawning workflows (small JWT helper,
   not a full AS: `gateway.signCapabilityToken({ tools, runId, ttl })`
   plus authorizer-side validation)
 - `mcpResource` and `mcpPrompt` MCP primitives
-- Multi-tenant pre-baked patterns (per-tenant URL, RFC 8707 audience
+- Pre-baked multi-tenant patterns (per-tenant URL, RFC 8707 audience
   binding)
 - Audit-log UI
 - Reverse direction (consume external MCP servers as Convex tools)
