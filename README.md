@@ -259,9 +259,6 @@ security-critical surfaces in one component). Bring your own OAuth 2.1
 - `mcpResource` and `mcpPrompt` MCP primitives
 - Pre-baked multi-tenant patterns (per-tenant URL, RFC 8707 audience
   binding)
-- Audit-log UI
-- Reverse direction (consume external MCP servers as Convex tools)
-- Smithery.ai listing
 - RFC 8693 token exchange for cross-domain identity
 
 See the repo's GitHub issues for finer-grained tracking.
