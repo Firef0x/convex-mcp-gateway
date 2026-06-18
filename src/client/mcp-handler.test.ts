@@ -461,6 +461,180 @@ describe("handleMcpRequest resources", () => {
     expect(state.resources).toEqual([]);
   });
 
+  test("authorizeResource filters resources/list per resource", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    const gateway = new McpGateway(component);
+
+    const init = await gateway.handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [
+          defineMcpResource({
+            uri: "docs://public",
+            name: "Public",
+            metadata: { scope: "public" },
+            read: async () => [{ uri: "docs://public", text: "public" }],
+          }),
+          defineMcpResource({
+            uri: "docs://private",
+            name: "Private",
+            metadata: { scope: "private" },
+            read: async () => [{ uri: "docs://private", text: "private" }],
+          }),
+        ],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+    expect(sessionId).toBeTruthy();
+
+    const seen: Array<{ uri: string; metadata: unknown }> = [];
+    const list = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 2, method: "resources/list" }, sessionId!),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        authorizeResource: async (_ctx, args) => {
+          seen.push({
+            uri: args.resourceUri,
+            metadata: args.resourceMetadata,
+          });
+          return {
+            allowed:
+              (args.resourceMetadata as { scope?: string } | null)?.scope !==
+              "private",
+          };
+        },
+      },
+    );
+
+    expect(await readJson(list)).toMatchObject({
+      result: {
+        resources: [
+          {
+            uri: "docs://public",
+            name: "Public",
+          },
+        ],
+      },
+    });
+    expect(seen).toEqual([
+      { uri: "docs://public", metadata: { scope: "public" } },
+      { uri: "docs://private", metadata: { scope: "private" } },
+    ]);
+  });
+
+  test("authorizeResource denies resources/read before provider execution", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    let readCalls = 0;
+    const resource = defineMcpResource({
+      uri: "docs://secret",
+      name: "Secret",
+      read: async () => {
+        readCalls += 1;
+        return [{ uri: "docs://secret", text: "secret" }];
+      },
+    });
+
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [resource],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+    expect(sessionId).toBeTruthy();
+
+    const read = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest(
+        {
+          id: 2,
+          method: "resources/read",
+          params: { uri: "docs://secret" },
+        },
+        sessionId!,
+      ),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [resource],
+        authorizeResource: async () => ({
+          allowed: false,
+          reason: "Forbidden: missing scope",
+        }),
+      },
+    );
+
+    expect(await readJson(read)).toMatchObject({
+      error: { code: -32003, message: "Forbidden: missing scope" },
+    });
+    expect(readCalls).toBe(0);
+  });
+
+  test("authorizeResource throw hides only that resource during resources/list", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const resources = [
+      defineMcpResource({
+        uri: "docs://ok",
+        name: "OK",
+        read: async () => [{ uri: "docs://ok", text: "ok" }],
+      }),
+      defineMcpResource({
+        uri: "docs://throws",
+        name: "Throws",
+        read: async () => [{ uri: "docs://throws", text: "throws" }],
+      }),
+    ];
+
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources,
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+    expect(sessionId).toBeTruthy();
+
+    const list = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 2, method: "resources/list" }, sessionId!),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources,
+        authorizeResource: async (_ctx, args) => {
+          if (args.resourceUri === "docs://throws") {
+            throw new Error("policy failed");
+          }
+          return { allowed: true };
+        },
+      },
+    );
+
+    expect(await readJson(list)).toMatchObject({
+      result: {
+        resources: [
+          {
+            uri: "docs://ok",
+            name: "OK",
+          },
+        ],
+      },
+    });
+  });
+
   test("returns a JSON-RPC error when a resource read handler throws", async () => {
     const component = createComponent();
     const { ctx } = createCtx(component);

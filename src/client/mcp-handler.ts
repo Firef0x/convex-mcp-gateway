@@ -106,6 +106,31 @@ export type McpResourceProvider = {
   ) => Promise<McpResourceContent[] | null>;
 };
 
+export interface McpResourceAuthorizerArgs {
+  /**
+   * `"resource_list"` when filtering `resources/list`,
+   * `"resource_read"` before a concrete `resources/read` handler runs.
+   */
+  mode: "resource_list" | "resource_read";
+  resourceUri: string;
+  /**
+   * Free-form metadata attached to a registered resource. Runtime-only
+   * provider resources that are not present in the registry pass `null`.
+   */
+  resourceMetadata: unknown;
+  /**
+   * The caller's identity resolved once at the gateway boundary. Resource
+   * methods currently require an authenticated caller, so this is non-null
+   * when the callback runs.
+   */
+  identity: { subject: string; claims?: Record<string, unknown> };
+}
+
+export type McpResourceAuthorizerHandler = (
+  ctx: McpHandlerCtx,
+  args: McpResourceAuthorizerArgs,
+) => Promise<McpAuthorizerDecision> | McpAuthorizerDecision;
+
 /**
  * Options for `gateway.handleMcpRequest`. The host supplies an
  * `authorize` callback that decides allowed vs denied per
@@ -176,6 +201,13 @@ export interface HandleMcpRequestOptions {
    */
   resources?: McpResourceProvider[];
   /**
+   * Optional central authorization hook for MCP resources. If omitted,
+   * authenticated callers can list/read all resources exposed by providers.
+   * If set, `resources/list` filters resources through `resource_list`, and
+   * `resources/read` checks `resource_read` before invoking the provider.
+   */
+  authorizeResource?: McpResourceAuthorizerHandler;
+  /**
    * Optional instructions appended to the `initialize` result. Useful for
    * telling clients how to use the resource catalog without modifying the
    * host's tool definitions.
@@ -223,6 +255,11 @@ type RegisteredTool = {
 
 type RegisteredResource = McpResource & {
   metadata?: unknown;
+};
+
+type ResourceCandidate = {
+  resource: McpResource;
+  metadata: unknown;
 };
 
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26"] as const;
@@ -432,6 +469,29 @@ async function safeAuthorize(
   }
 }
 
+async function safeAuthorizeResource(
+  authorizeResource: McpResourceAuthorizerHandler | undefined,
+  ctx: HandlerCtx,
+  args: McpResourceAuthorizerArgs,
+): Promise<{ decision: McpAuthorizerDecision; threw: boolean }> {
+  if (!authorizeResource) {
+    return { decision: { allowed: true }, threw: false };
+  }
+  try {
+    const result = await authorizeResource(ctx, args);
+    return { decision: parseAuthorizerDecision(result), threw: false };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      decision: {
+        allowed: false,
+        reason: `Resource authorizer threw: ${message}`,
+      },
+      threw: true,
+    };
+  }
+}
+
 function mergeInitializeInstructions(
   existing: unknown,
   instructions: string | undefined,
@@ -443,10 +503,16 @@ function mergeInitializeInstructions(
   return instructions;
 }
 
-function dedupeResources(resources: McpResource[]): McpResource[] {
-  const byUri = new Map<string, McpResource>();
-  for (const resource of resources) {
-    byUri.set(resource.uri, resource);
+function dedupeResourceCandidates(
+  candidates: ResourceCandidate[],
+): ResourceCandidate[] {
+  const byUri = new Map<string, ResourceCandidate>();
+  for (const candidate of candidates) {
+    const existing = byUri.get(candidate.resource.uri);
+    byUri.set(candidate.resource.uri, {
+      resource: candidate.resource,
+      metadata: candidate.metadata ?? existing?.metadata ?? null,
+    });
   }
   return Array.from(byUri.values());
 }
@@ -459,6 +525,15 @@ function publicResource(resource: RegisteredResource): McpResource {
       ? { description: resource.description }
       : {}),
     ...(resource.mimeType !== undefined ? { mimeType: resource.mimeType } : {}),
+  };
+}
+
+function registeredResourceCandidate(
+  resource: RegisteredResource,
+): ResourceCandidate {
+  return {
+    resource: publicResource(resource),
+    metadata: resource.metadata ?? null,
   };
 }
 
@@ -838,10 +913,42 @@ async function handlePost(
             providers.map((provider) => provider.list(ctx, { identity })),
           )
         ).flat();
-        const resources = dedupeResources([
-          ...registeredResources.map(publicResource),
-          ...providerResources,
+        const metadataByUri = new Map(
+          registeredResources.map((resource) => [
+            resource.uri,
+            resource.metadata ?? null,
+          ]),
+        );
+        const candidates = dedupeResourceCandidates([
+          ...registeredResources.map(registeredResourceCandidate),
+          ...providerResources.map((resource) => ({
+            resource,
+            metadata: metadataByUri.get(resource.uri) ?? null,
+          })),
         ]);
+        const resources = [];
+        for (const candidate of candidates) {
+          const { decision, threw } = await safeAuthorizeResource(
+            options.authorizeResource,
+            ctx,
+            {
+              mode: "resource_list",
+              resourceUri: candidate.resource.uri,
+              resourceMetadata: candidate.metadata,
+              identity,
+            },
+          );
+          if (threw) {
+            console.error(
+              "[mcp-gateway] resource authorizer threw during resources/list for resource",
+              candidate.resource.uri,
+              decision.reason,
+            );
+          }
+          if (decision.allowed) {
+            resources.push(candidate.resource);
+          }
+        }
         body = jsonResultEnvelope(message.id, { resources });
       } catch (err) {
         body = jsonErrorEnvelope(
@@ -882,6 +989,29 @@ async function handlePost(
           INVALID_PARAMS,
           "Missing resource uri",
         );
+        break;
+      }
+      const metadata =
+        registeredResources.find((resource) => resource.uri === uri)
+          ?.metadata ?? null;
+      const resourceAuthz = await safeAuthorizeResource(
+        options.authorizeResource,
+        ctx,
+        {
+          mode: "resource_read",
+          resourceUri: uri,
+          resourceMetadata: metadata,
+          identity,
+        },
+      );
+      if (!resourceAuthz.decision.allowed) {
+        const reason = resourceAuthz.decision.reason ?? "Forbidden";
+        const code = resourceAuthz.threw
+          ? INTERNAL_ERROR
+          : /^unauth/i.test(reason)
+            ? UNAUTHORIZED
+            : FORBIDDEN;
+        body = jsonErrorEnvelope(message.id, code, reason);
         break;
       }
       try {
