@@ -30,6 +30,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         {
           limit?: number;
           outcome?: "allowed" | "denied" | "error";
+          entryType?: "tool" | "resource";
+          resourceUri?: string;
           toolName?: string;
         },
         Array<{
@@ -37,12 +39,15 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           _id: string;
           args: any;
           durationMs: number;
+          entryType?: "tool" | "resource";
           errorCode?: number;
           errorMessage?: string;
           identitySubject: string | null;
           outcome: "allowed" | "denied" | "error";
-          toolKind: "query" | "mutation" | "action";
-          toolName: string;
+          resourceOperation?: "list" | "read";
+          resourceUri?: string;
+          toolKind?: "query" | "mutation" | "action";
+          toolName?: string;
         }>,
         Name
       >;
@@ -51,6 +56,22 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "internal",
         { cutoffMs: number },
         number,
+        Name
+      >;
+      recordResourceEntry: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          args: any;
+          durationMs: number;
+          errorCode?: number;
+          errorMessage?: string;
+          identitySubject: string | null;
+          outcome: "allowed" | "denied" | "error";
+          resourceOperation: "list" | "read";
+          resourceUri?: string;
+        },
+        string,
         Name
       >;
     };

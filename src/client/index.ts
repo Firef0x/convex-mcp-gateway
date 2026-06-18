@@ -46,6 +46,7 @@ export type {
   McpCorsOption,
   McpHandlerCtx,
   McpIdentityResolver,
+  McpResourceAuditOption,
   McpResourceAuthorizerArgs,
   McpResourceAuthorizerHandler,
   McpResource,

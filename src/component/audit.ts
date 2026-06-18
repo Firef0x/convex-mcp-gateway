@@ -1,16 +1,20 @@
 import { v } from "convex/values";
+import { internalMutation, mutation, query } from "./_generated/server.js";
 import {
-  internalMutation,
-  mutation,
-  query,
-} from "./_generated/server.js";
-import { auditOutcomeValidator, toolKindValidator } from "./schema.js";
+  auditEntryTypeValidator,
+  auditOutcomeValidator,
+  resourceAuditOperationValidator,
+  toolKindValidator,
+} from "./schema.js";
 
 const auditEntryValidator = v.object({
   _id: v.id("audit"),
   _creationTime: v.number(),
-  toolName: v.string(),
-  toolKind: toolKindValidator,
+  entryType: v.optional(auditEntryTypeValidator),
+  toolName: v.optional(v.string()),
+  toolKind: v.optional(toolKindValidator),
+  resourceUri: v.optional(v.string()),
+  resourceOperation: v.optional(resourceAuditOperationValidator),
   args: v.any(),
   outcome: auditOutcomeValidator,
   identitySubject: v.union(v.string(), v.null()),
@@ -39,7 +43,35 @@ export const recordEntry = internalMutation({
   },
   returns: v.id("audit"),
   handler: async (ctx, entry) => {
-    return await ctx.db.insert("audit", entry);
+    return await ctx.db.insert("audit", {
+      entryType: "tool",
+      ...entry,
+    });
+  },
+});
+
+/**
+ * Component-internal mutation that appends one resource operation audit row.
+ * Resource contents are intentionally never accepted here; callers store only
+ * operation metadata such as URI, duration, outcome, and error summary.
+ */
+export const recordResourceEntry = internalMutation({
+  args: {
+    resourceUri: v.optional(v.string()),
+    resourceOperation: resourceAuditOperationValidator,
+    args: v.any(),
+    outcome: auditOutcomeValidator,
+    identitySubject: v.union(v.string(), v.null()),
+    durationMs: v.number(),
+    errorCode: v.optional(v.number()),
+    errorMessage: v.optional(v.string()),
+  },
+  returns: v.id("audit"),
+  handler: async (ctx, entry) => {
+    return await ctx.db.insert("audit", {
+      entryType: "resource",
+      ...entry,
+    });
   },
 });
 
@@ -56,7 +88,9 @@ export const recordEntry = internalMutation({
  */
 export const listEntries = query({
   args: {
+    entryType: v.optional(auditEntryTypeValidator),
     toolName: v.optional(v.string()),
+    resourceUri: v.optional(v.string()),
     outcome: v.optional(auditOutcomeValidator),
     limit: v.optional(v.number()),
   },
@@ -64,24 +98,69 @@ export const listEntries = query({
   handler: async (ctx, args) => {
     const limit = Math.min(Math.max(args.limit ?? 100, 1), 1000);
 
-    if (args.toolName !== undefined && args.outcome !== undefined) {
-      const out: Array<unknown> = [];
-      for await (const entry of ctx.db
-        .query("audit")
-        .withIndex("by_toolName", (q) => q.eq("toolName", args.toolName!))
-        .order("desc")) {
+    async function filterByOutcome<T extends { outcome: string }>(
+      rows: AsyncIterable<T>,
+    ): Promise<T[]> {
+      const out: T[] = [];
+      for await (const entry of rows) {
         if (entry.outcome === args.outcome) {
           out.push(entry);
           if (out.length >= limit) break;
         }
       }
-      return out as never;
+      return out;
+    }
+
+    if (args.resourceUri !== undefined && args.outcome !== undefined) {
+      return (await filterByOutcome(
+        ctx.db
+          .query("audit")
+          .withIndex("by_resourceUri", (q) =>
+            q.eq("resourceUri", args.resourceUri!),
+          )
+          .order("desc"),
+      )) as never;
+    }
+
+    if (args.resourceUri !== undefined) {
+      return await ctx.db
+        .query("audit")
+        .withIndex("by_resourceUri", (q) =>
+          q.eq("resourceUri", args.resourceUri!),
+        )
+        .order("desc")
+        .take(limit);
+    }
+
+    if (args.toolName !== undefined && args.outcome !== undefined) {
+      return (await filterByOutcome(
+        ctx.db
+          .query("audit")
+          .withIndex("by_toolName", (q) => q.eq("toolName", args.toolName!))
+          .order("desc"),
+      )) as never;
     }
 
     if (args.toolName !== undefined) {
       return await ctx.db
         .query("audit")
         .withIndex("by_toolName", (q) => q.eq("toolName", args.toolName!))
+        .order("desc")
+        .take(limit);
+    }
+    if (args.entryType !== undefined && args.outcome !== undefined) {
+      return (await filterByOutcome(
+        ctx.db
+          .query("audit")
+          .withIndex("by_entryType", (q) => q.eq("entryType", args.entryType!))
+          .order("desc"),
+      )) as never;
+    }
+
+    if (args.entryType !== undefined) {
+      return await ctx.db
+        .query("audit")
+        .withIndex("by_entryType", (q) => q.eq("entryType", args.entryType!))
         .order("desc")
         .take(limit);
     }

@@ -17,6 +17,9 @@ function createComponent() {
       getResourcesFingerprint: Symbol("getResourcesFingerprint"),
       replaceResources: Symbol("replaceResources"),
     },
+    audit: {
+      recordResourceEntry: Symbol("recordResourceEntry"),
+    },
   } as unknown as ComponentApi;
 }
 
@@ -29,6 +32,7 @@ function createCtx(component: ComponentApi) {
     mimeType?: string;
     metadata?: unknown;
   }> = [];
+  const resourceAuditEntries: Record<string, unknown>[] = [];
   const sessions = new Map<
     string,
     {
@@ -88,6 +92,10 @@ function createCtx(component: ComponentApi) {
             typeof args.fingerprint === "string" ? args.fingerprint : null;
           return null;
         }
+        if (ref === component.audit.recordResourceEntry) {
+          resourceAuditEntries.push({ ...args });
+          return "audit-id";
+        }
         throw new Error("unexpected mutation");
       },
       runAction: async () => {
@@ -103,6 +111,7 @@ function createCtx(component: ComponentApi) {
     get resources() {
       return resources;
     },
+    resourceAuditEntries,
   };
 }
 
@@ -633,6 +642,222 @@ describe("handleMcpRequest resources", () => {
         ],
       },
     });
+  });
+
+  test("resource audit is opt-in and does not store read contents", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    const resource = defineMcpResource({
+      uri: "docs://audited",
+      name: "Audited",
+      read: async () => [
+        {
+          uri: "docs://audited",
+          mimeType: "text/plain",
+          text: "sensitive content",
+        },
+      ],
+    });
+
+    const init = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [resource],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+    expect(sessionId).toBeTruthy();
+
+    await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest(
+        {
+          id: 2,
+          method: "resources/read",
+          params: { uri: "docs://audited" },
+        },
+        sessionId!,
+      ),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [resource],
+      },
+    );
+    expect(state.resourceAuditEntries).toEqual([]);
+
+    await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest(
+        {
+          id: 3,
+          method: "resources/read",
+          params: { uri: "docs://audited" },
+        },
+        sessionId!,
+      ),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [resource],
+        auditResources: { read: true },
+      },
+    );
+
+    expect(state.resourceAuditEntries).toMatchObject([
+      {
+        resourceUri: "docs://audited",
+        resourceOperation: "read",
+        args: null,
+        outcome: "allowed",
+        identitySubject: "user-1",
+      },
+    ]);
+    expect(JSON.stringify(state.resourceAuditEntries)).not.toContain(
+      "sensitive content",
+    );
+  });
+
+  test("resource audit records denied reads before provider execution", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    let readCalls = 0;
+    const resource = defineMcpResource({
+      uri: "docs://denied-audit",
+      name: "Denied Audit",
+      read: async () => {
+        readCalls += 1;
+        return [{ uri: "docs://denied-audit", text: "secret" }];
+      },
+    });
+
+    const init = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [resource],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+    expect(sessionId).toBeTruthy();
+
+    await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest(
+        {
+          id: 2,
+          method: "resources/read",
+          params: { uri: "docs://denied-audit" },
+        },
+        sessionId!,
+      ),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [resource],
+        auditResources: true,
+        authorizeResource: async () => ({
+          allowed: false,
+          reason: "Forbidden: no scope",
+        }),
+      },
+    );
+
+    expect(readCalls).toBe(0);
+    expect(state.resourceAuditEntries).toMatchObject([
+      {
+        resourceUri: "docs://denied-audit",
+        resourceOperation: "read",
+        args: null,
+        outcome: "denied",
+        identitySubject: "user-1",
+        errorCode: -32003,
+        errorMessage: "Forbidden: no scope",
+      },
+    ]);
+  });
+
+  test("resource audit records list summaries and read errors", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    const resources = [
+      defineMcpResource({
+        uri: "docs://one",
+        name: "One",
+        read: async () => {
+          throw new Error("read failed");
+        },
+      }),
+      defineMcpResource({
+        uri: "docs://two",
+        name: "Two",
+        read: async () => [{ uri: "docs://two", text: "two" }],
+      }),
+    ];
+
+    const init = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources,
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+    expect(sessionId).toBeTruthy();
+
+    await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 2, method: "resources/list" }, sessionId!),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources,
+        auditResources: { list: true },
+      },
+    );
+
+    await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest(
+        {
+          id: 3,
+          method: "resources/read",
+          params: { uri: "docs://one" },
+        },
+        sessionId!,
+      ),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources,
+        auditResources: { read: true },
+      },
+    );
+
+    expect(state.resourceAuditEntries).toMatchObject([
+      {
+        resourceOperation: "list",
+        args: { resourceCount: 2 },
+        outcome: "allowed",
+        identitySubject: "user-1",
+      },
+      {
+        resourceUri: "docs://one",
+        resourceOperation: "read",
+        args: null,
+        outcome: "error",
+        identitySubject: "user-1",
+        errorCode: -32603,
+        errorMessage: "read failed",
+      },
+    ]);
   });
 
   test("returns a JSON-RPC error when a resource read handler throws", async () => {

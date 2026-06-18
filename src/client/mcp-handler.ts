@@ -131,6 +131,13 @@ export type McpResourceAuthorizerHandler = (
   args: McpResourceAuthorizerArgs,
 ) => Promise<McpAuthorizerDecision> | McpAuthorizerDecision;
 
+export type McpResourceAuditOption =
+  | boolean
+  | {
+      list?: boolean;
+      read?: boolean;
+    };
+
 /**
  * Options for `gateway.handleMcpRequest`. The host supplies an
  * `authorize` callback that decides allowed vs denied per
@@ -207,6 +214,12 @@ export interface HandleMcpRequestOptions {
    * `resources/read` checks `resource_read` before invoking the provider.
    */
   authorizeResource?: McpResourceAuthorizerHandler;
+  /**
+   * Opt-in audit for MCP resource operations. Defaults to `false`.
+   * `true` records both `resources/list` and `resources/read`; object form
+   * enables each operation independently. Resource contents are never stored.
+   */
+  auditResources?: McpResourceAuditOption;
   /**
    * Optional instructions appended to the `initialize` result. Useful for
    * telling clients how to use the resource catalog without modifying the
@@ -535,6 +548,42 @@ function registeredResourceCandidate(
     resource: publicResource(resource),
     metadata: resource.metadata ?? null,
   };
+}
+
+function shouldAuditResource(
+  auditResources: McpResourceAuditOption | undefined,
+  operation: "list" | "read",
+): boolean {
+  if (auditResources === true) return true;
+  if (!auditResources) return false;
+  return auditResources[operation] === true;
+}
+
+async function safeRecordResourceAudit(
+  ctx: HandlerCtx,
+  component: ComponentApi,
+  entry: {
+    resourceUri?: string;
+    resourceOperation: "list" | "read";
+    args: unknown;
+    outcome: "allowed" | "denied" | "error";
+    identitySubject: string | null;
+    durationMs: number;
+    errorCode?: number;
+    errorMessage?: string;
+  },
+): Promise<void> {
+  try {
+    await ctx.runMutation(component.audit.recordResourceEntry, entry);
+  } catch (err) {
+    console.error(
+      "[mcp-gateway] failed to record resource audit entry",
+      entry.resourceOperation,
+      entry.resourceUri ?? "(none)",
+      entry.outcome,
+      err,
+    );
+  }
 }
 
 export async function handleMcpRequest(
@@ -886,6 +935,7 @@ async function handlePost(
     }
 
     case "resources/list": {
+      const start = Date.now();
       const providers = options.resources ?? [];
       const registeredResources = (await ctx.runQuery(
         component.registry.listResources,
@@ -900,6 +950,17 @@ async function handlePost(
         break;
       }
       if (!identity) {
+        if (shouldAuditResource(options.auditResources, "list")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceOperation: "list",
+            args: null,
+            outcome: "denied",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+            errorCode: UNAUTHORIZED,
+            errorMessage: "Unauthorized: authentication required",
+          });
+        }
         body = jsonErrorEnvelope(
           message.id,
           UNAUTHORIZED,
@@ -949,18 +1010,36 @@ async function handlePost(
             resources.push(candidate.resource);
           }
         }
+        if (shouldAuditResource(options.auditResources, "list")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceOperation: "list",
+            args: { resourceCount: resources.length },
+            outcome: "allowed",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+          });
+        }
         body = jsonResultEnvelope(message.id, { resources });
       } catch (err) {
-        body = jsonErrorEnvelope(
-          message.id,
-          INTERNAL_ERROR,
-          err instanceof Error ? err.message : String(err),
-        );
+        const messageText = err instanceof Error ? err.message : String(err);
+        if (shouldAuditResource(options.auditResources, "list")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceOperation: "list",
+            args: null,
+            outcome: "error",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+            errorCode: INTERNAL_ERROR,
+            errorMessage: messageText,
+          });
+        }
+        body = jsonErrorEnvelope(message.id, INTERNAL_ERROR, messageText);
       }
       break;
     }
 
     case "resources/read": {
+      const start = Date.now();
       const providers = options.resources ?? [];
       const registeredResources = (await ctx.runQuery(
         component.registry.listResources,
@@ -975,6 +1054,21 @@ async function handlePost(
         break;
       }
       if (!identity) {
+        const maybeUri = message.params?.uri;
+        if (shouldAuditResource(options.auditResources, "read")) {
+          await safeRecordResourceAudit(ctx, component, {
+            ...(typeof maybeUri === "string" && maybeUri.length > 0
+              ? { resourceUri: maybeUri }
+              : {}),
+            resourceOperation: "read",
+            args: null,
+            outcome: "denied",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+            errorCode: UNAUTHORIZED,
+            errorMessage: "Unauthorized: authentication required",
+          });
+        }
         body = jsonErrorEnvelope(
           message.id,
           UNAUTHORIZED,
@@ -984,6 +1078,17 @@ async function handlePost(
       }
       const uri = message.params?.uri;
       if (typeof uri !== "string" || uri.length === 0) {
+        if (shouldAuditResource(options.auditResources, "read")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceOperation: "read",
+            args: null,
+            outcome: "error",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+            errorCode: INVALID_PARAMS,
+            errorMessage: "Missing resource uri",
+          });
+        }
         body = jsonErrorEnvelope(
           message.id,
           INVALID_PARAMS,
@@ -1011,6 +1116,18 @@ async function handlePost(
           : /^unauth/i.test(reason)
             ? UNAUTHORIZED
             : FORBIDDEN;
+        if (shouldAuditResource(options.auditResources, "read")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceUri: uri,
+            resourceOperation: "read",
+            args: null,
+            outcome: resourceAuthz.threw ? "error" : "denied",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+            errorCode: code,
+            errorMessage: reason,
+          });
+        }
         body = jsonErrorEnvelope(message.id, code, reason);
         break;
       }
@@ -1019,12 +1136,34 @@ async function handlePost(
         for (const provider of providers) {
           const contents = await provider.read(ctx, { uri, identity });
           if (contents) {
+            if (shouldAuditResource(options.auditResources, "read")) {
+              await safeRecordResourceAudit(ctx, component, {
+                resourceUri: uri,
+                resourceOperation: "read",
+                args: null,
+                outcome: "allowed",
+                identitySubject: auditIdentitySubject,
+                durationMs: Date.now() - start,
+              });
+            }
             body = jsonResultEnvelope(message.id, { contents });
             found = true;
             break;
           }
         }
         if (!found) {
+          if (shouldAuditResource(options.auditResources, "read")) {
+            await safeRecordResourceAudit(ctx, component, {
+              resourceUri: uri,
+              resourceOperation: "read",
+              args: null,
+              outcome: "error",
+              identitySubject: auditIdentitySubject,
+              durationMs: Date.now() - start,
+              errorCode: INVALID_PARAMS,
+              errorMessage: `Resource not found: ${uri}`,
+            });
+          }
           body = jsonErrorEnvelope(
             message.id,
             INVALID_PARAMS,
@@ -1032,11 +1171,20 @@ async function handlePost(
           );
         }
       } catch (err) {
-        body = jsonErrorEnvelope(
-          message.id,
-          INTERNAL_ERROR,
-          err instanceof Error ? err.message : String(err),
-        );
+        const messageText = err instanceof Error ? err.message : String(err);
+        if (shouldAuditResource(options.auditResources, "read")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceUri: uri,
+            resourceOperation: "read",
+            args: null,
+            outcome: "error",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+            errorCode: INTERNAL_ERROR,
+            errorMessage: messageText,
+          });
+        }
+        body = jsonErrorEnvelope(message.id, INTERNAL_ERROR, messageText);
       }
       break;
     }

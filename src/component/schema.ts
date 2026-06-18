@@ -13,6 +13,16 @@ export const auditOutcomeValidator = v.union(
   v.literal("error"),
 );
 
+export const auditEntryTypeValidator = v.union(
+  v.literal("tool"),
+  v.literal("resource"),
+);
+
+export const resourceAuditOperationValidator = v.union(
+  v.literal("list"),
+  v.literal("read"),
+);
+
 export default defineSchema({
   tools: defineTable({
     name: v.string(),
@@ -126,17 +136,24 @@ export default defineSchema({
     .index("by_lastSeenAt", ["lastSeenAt"]),
 
   /**
-   * One row per `tools/call` dispatch. Captures who called what, the
-   * outcome, and how long the underlying function ran. `identitySubject`
-   * is supplied by the host (resolved from `ctx.auth.getUserIdentity()`)
-   * and forwarded into `dispatch.runTool`; the component never reads
-   * identity directly. Arg storage respects `metadata.auditArgs`: full
-   * record by default, `null` when set to `false`, top-level keys
-   * replaced with `"[redacted]"` when set to `{ redact: [...] }`.
+   * Shared audit log for tool calls and opt-in resource operations.
+   * Tool rows capture the tool name/kind, outcome, duration, and
+   * optionally redacted args. Resource rows capture operation metadata
+   * (resource URI, list/read, outcome, duration) but never resource
+   * contents. `identitySubject` is supplied by the host after resolving
+   * auth at the HTTP boundary; component code never reads identity
+   * directly.
    */
   audit: defineTable({
-    toolName: v.string(),
-    toolKind: toolKindValidator,
+    /**
+     * Optional for forward compatibility with existing tool audit rows.
+     * New writes set this to either "tool" or "resource".
+     */
+    entryType: v.optional(auditEntryTypeValidator),
+    toolName: v.optional(v.string()),
+    toolKind: v.optional(toolKindValidator),
+    resourceUri: v.optional(v.string()),
+    resourceOperation: v.optional(resourceAuditOperationValidator),
     args: v.any(),
     outcome: auditOutcomeValidator,
     identitySubject: v.union(v.string(), v.null()),
@@ -145,5 +162,7 @@ export default defineSchema({
     errorMessage: v.optional(v.string()),
   })
     .index("by_toolName", ["toolName"])
+    .index("by_resourceUri", ["resourceUri"])
+    .index("by_entryType", ["entryType"])
     .index("by_outcome", ["outcome"]),
 });
