@@ -191,6 +191,7 @@ export interface HandleMcpRequestOptions {
  */
 type InternalHandleMcpRequestOptions = HandleMcpRequestOptions & {
   syncTools?: () => Promise<void>;
+  syncResources?: () => Promise<void>;
 };
 
 export type McpHandlerCtx = {
@@ -217,6 +218,10 @@ type RegisteredTool = {
   inputSchema: unknown;
   outputSchema?: unknown;
   identityArg?: string;
+  metadata?: unknown;
+};
+
+type RegisteredResource = McpResource & {
   metadata?: unknown;
 };
 
@@ -353,10 +358,7 @@ function sseEvent(id: number, payload: string): string {
   return `id: ${id}\nevent: message\ndata: ${payload}\n\n`;
 }
 
-function jsonResultEnvelope(
-  id: JsonRpcMessage["id"],
-  value: unknown,
-): string {
+function jsonResultEnvelope(id: JsonRpcMessage["id"], value: unknown): string {
   return JSON.stringify({ jsonrpc: "2.0", id: id ?? null, result: value });
 }
 
@@ -439,6 +441,25 @@ function mergeInitializeInstructions(
     return `${existing.trim()}\n\n${instructions}`;
   }
   return instructions;
+}
+
+function dedupeResources(resources: McpResource[]): McpResource[] {
+  const byUri = new Map<string, McpResource>();
+  for (const resource of resources) {
+    byUri.set(resource.uri, resource);
+  }
+  return Array.from(byUri.values());
+}
+
+function publicResource(resource: RegisteredResource): McpResource {
+  return {
+    uri: resource.uri,
+    name: resource.name,
+    ...(resource.description !== undefined
+      ? { description: resource.description }
+      : {}),
+    ...(resource.mimeType !== undefined ? { mimeType: resource.mimeType } : {}),
+  };
 }
 
 export async function handleMcpRequest(
@@ -582,10 +603,10 @@ async function handlePost(
     // Per MCP §"Sending Messages": server SHOULD return an HTTP error
     // status when it cannot accept the input. JSON-RPC body retained
     // for clients that read it.
-    return new Response(
-      jsonErrorEnvelope(null, -32700, "Parse error"),
-      { status: 400, headers: { "content-type": "application/json" } },
-    );
+    return new Response(jsonErrorEnvelope(null, -32700, "Parse error"), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
   }
 
   // MCP forbids batched requests over Streamable HTTP. Clearer error
@@ -740,6 +761,23 @@ async function handlePost(
           throw err;
         }
       }
+      if (options.syncResources) {
+        try {
+          await options.syncResources();
+        } catch (err) {
+          console.error(
+            "[mcp-gateway] declarative resource sync failed during initialize; " +
+              "the connection will fail. Check the static resources passed to " +
+              "handleMcpRequest (e.g. duplicate resource URIs).",
+            err,
+          );
+          throw err;
+        }
+      }
+      const registeredResources = (await ctx.runQuery(
+        component.registry.listResources,
+        {},
+      )) as RegisteredResource[];
       const requested = message.params?.protocolVersion;
       const negotiated =
         typeof requested === "string" &&
@@ -763,7 +801,8 @@ async function handlePost(
         ),
         capabilities: {
           tools: {},
-          ...((options.resources ?? []).length > 0
+          ...(registeredResources.length > 0 ||
+          (options.resources ?? []).length > 0
             ? { resources: {} }
             : {}),
         },
@@ -773,7 +812,11 @@ async function handlePost(
 
     case "resources/list": {
       const providers = options.resources ?? [];
-      if (providers.length === 0) {
+      const registeredResources = (await ctx.runQuery(
+        component.registry.listResources,
+        {},
+      )) as RegisteredResource[];
+      if (providers.length === 0 && registeredResources.length === 0) {
         body = jsonErrorEnvelope(
           message.id,
           -32601,
@@ -790,11 +833,15 @@ async function handlePost(
         break;
       }
       try {
-        const resources = (
+        const providerResources = (
           await Promise.all(
             providers.map((provider) => provider.list(ctx, { identity })),
           )
         ).flat();
+        const resources = dedupeResources([
+          ...registeredResources.map(publicResource),
+          ...providerResources,
+        ]);
         body = jsonResultEnvelope(message.id, { resources });
       } catch (err) {
         body = jsonErrorEnvelope(
@@ -808,7 +855,11 @@ async function handlePost(
 
     case "resources/read": {
       const providers = options.resources ?? [];
-      if (providers.length === 0) {
+      const registeredResources = (await ctx.runQuery(
+        component.registry.listResources,
+        {},
+      )) as RegisteredResource[];
+      if (providers.length === 0 && registeredResources.length === 0) {
         body = jsonErrorEnvelope(
           message.id,
           -32601,
@@ -870,14 +921,18 @@ async function handlePost(
       )) as RegisteredTool[];
       const visible = [];
       for (const tool of allTools) {
-        const { decision, threw } = await safeAuthorize(options.authorize, ctx, {
-          toolName: tool.name,
-          toolKind: tool.kind,
-          args: {},
-          mode: "list",
-          toolMetadata: tool.metadata ?? null,
-          identity,
-        });
+        const { decision, threw } = await safeAuthorize(
+          options.authorize,
+          ctx,
+          {
+            toolName: tool.name,
+            toolKind: tool.kind,
+            args: {},
+            mode: "list",
+            toolMetadata: tool.metadata ?? null,
+            identity,
+          },
+        );
         if (threw) {
           // A buggy authorize callback drops only the offending tool,
           // not the whole list. Surface to the deployment log so the
@@ -913,10 +968,7 @@ async function handlePost(
         body = jsonErrorEnvelope(message.id, -32602, "Missing tool name");
         break;
       }
-      const args = (message.params?.arguments ?? {}) as Record<
-        string,
-        unknown
-      >;
+      const args = (message.params?.arguments ?? {}) as Record<string, unknown>;
 
       const tool = (await ctx.runQuery(component.registry.getTool, {
         name,
@@ -924,11 +976,7 @@ async function handlePost(
       if (!tool) {
         // Anti-DoS: unknown-tool calls are not audited because anonymous
         // callers can spam arbitrary names with arbitrary args.
-        body = jsonErrorEnvelope(
-          message.id,
-          -32602,
-          `Unknown tool: ${name}`,
-        );
+        body = jsonErrorEnvelope(message.id, -32602, `Unknown tool: ${name}`);
         break;
       }
 
@@ -1001,25 +1049,19 @@ async function handlePost(
           );
           if (oauthConfig) {
             const requestUrl = new URL(request.url);
-            const mcpPath =
-              requestUrl.pathname.replace(/\/+$/, "") || "/";
+            const mcpPath = requestUrl.pathname.replace(/\/+$/, "") || "/";
             const metadataUrl = buildProtectedResourceMetadataUrl(
               requestUrl.origin,
               mcpPath,
             );
-            raw = new Response(
-              jsonErrorEnvelope(message.id, code, reason),
-              {
-                status: 401,
-                headers: {
-                  "content-type": "application/json",
-                  "www-authenticate": `Bearer resource_metadata="${metadataUrl}"`,
-                  ...(issueSessionHeader
-                    ? { "mcp-session-id": sessionId }
-                    : {}),
-                },
+            raw = new Response(jsonErrorEnvelope(message.id, code, reason), {
+              status: 401,
+              headers: {
+                "content-type": "application/json",
+                "www-authenticate": `Bearer resource_metadata="${metadataUrl}"`,
+                ...(issueSessionHeader ? { "mcp-session-id": sessionId } : {}),
               },
-            );
+            });
             body = "";
             break;
           }

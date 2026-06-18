@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { ComponentApi } from "../component/_generated/component.js";
-import { defineMcpResource } from "./index.js";
+import { defineMcpResource, McpGateway } from "./index.js";
 import { handleMcpRequest, type McpResourceProvider } from "./mcp-handler.js";
 
 function createComponent() {
@@ -13,11 +13,22 @@ function createComponent() {
     registry: {
       getOAuthConfig: Symbol("getOAuthConfig"),
       listTools: Symbol("listTools"),
+      listResources: Symbol("listResources"),
+      getResourcesFingerprint: Symbol("getResourcesFingerprint"),
+      replaceResources: Symbol("replaceResources"),
     },
   } as unknown as ComponentApi;
 }
 
 function createCtx(component: ComponentApi) {
+  let resourcesFingerprint: string | null = null;
+  let resources: Array<{
+    uri: string;
+    name: string;
+    description?: string;
+    mimeType?: string;
+    metadata?: unknown;
+  }> = [];
   const sessions = new Map<
     string,
     {
@@ -40,6 +51,12 @@ function createCtx(component: ComponentApi) {
         if (ref === component.registry.listTools) {
           return [];
         }
+        if (ref === component.registry.listResources) {
+          return resources;
+        }
+        if (ref === component.registry.getResourcesFingerprint) {
+          return resourcesFingerprint;
+        }
         throw new Error("unexpected query");
       },
       runMutation: async (ref: unknown, args: Record<string, unknown>) => {
@@ -57,6 +74,20 @@ function createCtx(component: ComponentApi) {
         if (ref === component.sessions.touchSession) {
           return sessions.has(String(args.sessionId));
         }
+        if (ref === component.registry.replaceResources) {
+          resources = (
+            args.resources as Array<{
+              uri: string;
+              name: string;
+              description?: string;
+              mimeType?: string;
+              metadata?: unknown;
+            }>
+          ).map((resource) => ({ ...resource }));
+          resourcesFingerprint =
+            typeof args.fingerprint === "string" ? args.fingerprint : null;
+          return null;
+        }
         throw new Error("unexpected mutation");
       },
       runAction: async () => {
@@ -68,6 +99,9 @@ function createCtx(component: ComponentApi) {
           email: "user@example.com",
         }),
       },
+    },
+    get resources() {
+      return resources;
     },
   };
 }
@@ -297,6 +331,134 @@ describe("handleMcpRequest resources", () => {
         ],
       },
     });
+  });
+
+  test("lists resources persisted in the registry", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const gateway = new McpGateway(component);
+
+    const init = await gateway.handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [
+          defineMcpResource({
+            uri: "docs://registered",
+            name: "Registered",
+            read: async () => [
+              { uri: "docs://registered", text: "registered" },
+            ],
+          }),
+        ],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+    expect(sessionId).toBeTruthy();
+
+    const list = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 2, method: "resources/list" }, sessionId!),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+      },
+    );
+    expect(await readJson(list)).toMatchObject({
+      result: {
+        resources: [
+          {
+            uri: "docs://registered",
+            name: "Registered",
+          },
+        ],
+      },
+    });
+
+    const readWithoutProvider = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest(
+        {
+          id: 3,
+          method: "resources/read",
+          params: { uri: "docs://registered" },
+        },
+        sessionId!,
+      ),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+      },
+    );
+    expect(await readJson(readWithoutProvider)).toMatchObject({
+      error: { code: -32602, message: "Resource not found: docs://registered" },
+    });
+  });
+
+  test("McpGateway declaratively syncs static resources on initialize", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    const gateway = new McpGateway(component);
+    const resource = defineMcpResource({
+      uri: "docs://synced",
+      name: "Synced",
+      description: "Synced docs",
+      mimeType: "text/plain",
+      read: async () => [{ uri: "docs://synced", text: "ok" }],
+    });
+
+    const response = await gateway.handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [resource],
+      },
+    );
+
+    expect(response.headers.get("mcp-session-id")).toBeTruthy();
+    expect(state.resources).toEqual([
+      {
+        uri: "docs://synced",
+        name: "Synced",
+        description: "Synced docs",
+        mimeType: "text/plain",
+      },
+    ]);
+  });
+
+  test("McpGateway clears stale declarative resources when resources is empty", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    const gateway = new McpGateway(component);
+
+    await gateway.handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [
+          defineMcpResource({
+            uri: "docs://stale",
+            name: "Stale",
+            read: async () => [{ uri: "docs://stale", text: "old" }],
+          }),
+        ],
+      },
+    );
+    expect(state.resources).toHaveLength(1);
+
+    await gateway.handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 2, method: "initialize" }),
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [],
+      },
+    );
+
+    expect(state.resources).toEqual([]);
   });
 
   test("returns a JSON-RPC error when a resource read handler throws", async () => {

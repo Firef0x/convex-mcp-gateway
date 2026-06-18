@@ -38,6 +38,14 @@ export default defineSchema({
     metadata: v.optional(v.any()),
   }).index("by_name", ["name"]),
 
+  resources: defineTable({
+    uri: v.string(),
+    name: v.string(),
+    description: v.optional(v.string()),
+    mimeType: v.optional(v.string()),
+    metadata: v.optional(v.any()),
+  }).index("by_uri", ["uri"]),
+
   /**
    * Singleton row holding the OAuth 2.1 protected-resource metadata.
    * Empty until the host calls `gateway.setOAuthConfig`.
@@ -81,6 +89,12 @@ export default defineSchema({
      * declaratively".
      */
     toolsFingerprint: v.optional(v.string()),
+    /**
+     * Fingerprint of the declarative resource catalog last synced via
+     * `handleMcpRequest`. Resource contents/read handlers are not stored
+     * here; the registry stores stable catalog metadata only.
+     */
+    resourcesFingerprint: v.optional(v.string()),
   }),
 
   /**

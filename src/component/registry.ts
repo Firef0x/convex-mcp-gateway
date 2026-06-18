@@ -16,6 +16,26 @@ const toolReturnValidator = v.object({
   metadata: v.optional(v.any()),
 });
 
+const resourceReturnValidator = v.object({
+  _id: v.id("resources"),
+  _creationTime: v.number(),
+  uri: v.string(),
+  name: v.string(),
+  description: v.optional(v.string()),
+  mimeType: v.optional(v.string()),
+  metadata: v.optional(v.any()),
+});
+
+const resourceInputFields = {
+  uri: v.string(),
+  name: v.string(),
+  description: v.optional(v.string()),
+  mimeType: v.optional(v.string()),
+  metadata: v.optional(v.any()),
+};
+
+const resourceInputValidator = v.object(resourceInputFields);
+
 export const registerTool = mutation({
   args: {
     name: v.string(),
@@ -44,6 +64,58 @@ export const registerTool = mutation({
     }
 
     return await ctx.db.insert("tools", args);
+  },
+});
+
+export const registerResource = mutation({
+  args: resourceInputFields,
+  returns: v.id("resources"),
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("resources")
+      .withIndex("by_uri", (q) => q.eq("uri", args.uri))
+      .unique();
+
+    if (existing) {
+      await ctx.db.replace("resources", existing._id, args);
+      return existing._id;
+    }
+
+    return await ctx.db.insert("resources", args);
+  },
+});
+
+export const unregisterResource = mutation({
+  args: { uri: v.string() },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("resources")
+      .withIndex("by_uri", (q) => q.eq("uri", args.uri))
+      .unique();
+    if (!existing) return false;
+    await ctx.db.delete("resources", existing._id);
+    return true;
+  },
+});
+
+export const listResources = query({
+  args: {},
+  returns: v.array(resourceReturnValidator),
+  handler: async (ctx) => {
+    return await ctx.db.query("resources").collect();
+  },
+});
+
+export const getResource = query({
+  args: { uri: v.string() },
+  returns: v.union(resourceReturnValidator, v.null()),
+  handler: async (ctx, args) => {
+    const resource = await ctx.db
+      .query("resources")
+      .withIndex("by_uri", (q) => q.eq("uri", args.uri))
+      .unique();
+    return resource ?? null;
   },
 });
 
@@ -99,6 +171,85 @@ export const clearAllTools = mutation({
         resourceUrl: cfg.resourceUrl,
         authorizerHandle: cfg.authorizerHandle,
         toolsFingerprint: undefined,
+        resourcesFingerprint: cfg.resourcesFingerprint,
+      });
+    }
+    return null;
+  },
+});
+
+export const clearAllResources = mutation({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    const resources = await ctx.db.query("resources").collect();
+    for (const resource of resources) {
+      await ctx.db.delete("resources", resource._id);
+    }
+    const cfg = await ctx.db.query("config").unique();
+    if (cfg && cfg.resourcesFingerprint !== undefined) {
+      await ctx.db.replace("config", cfg._id, {
+        authServerUrl: cfg.authServerUrl,
+        resourceUrl: cfg.resourceUrl,
+        authorizerHandle: cfg.authorizerHandle,
+        toolsFingerprint: cfg.toolsFingerprint,
+        resourcesFingerprint: undefined,
+      });
+    }
+    return null;
+  },
+});
+
+export const replaceResources = mutation({
+  args: {
+    resources: v.array(resourceInputValidator),
+    fingerprint: v.optional(v.string()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const incomingUris = new Set(args.resources.map((r) => r.uri));
+    if (incomingUris.size !== args.resources.length) {
+      const seen = new Set<string>();
+      const dupes: string[] = [];
+      for (const r of args.resources) {
+        if (seen.has(r.uri)) dupes.push(r.uri);
+        seen.add(r.uri);
+      }
+      throw new ConvexError(
+        `replaceResources received duplicate resource URIs: ${dupes.join(", ")}`,
+      );
+    }
+
+    const existing = await ctx.db.query("resources").collect();
+    for (const resource of existing) {
+      if (!incomingUris.has(resource.uri)) {
+        await ctx.db.delete("resources", resource._id);
+      }
+    }
+    for (const incoming of args.resources) {
+      const existingRow = await ctx.db
+        .query("resources")
+        .withIndex("by_uri", (q) => q.eq("uri", incoming.uri))
+        .unique();
+      if (existingRow) {
+        await ctx.db.replace("resources", existingRow._id, incoming);
+      } else {
+        await ctx.db.insert("resources", incoming);
+      }
+    }
+
+    const cfg = await ctx.db.query("config").unique();
+    if (cfg) {
+      await ctx.db.replace("config", cfg._id, {
+        authServerUrl: cfg.authServerUrl,
+        resourceUrl: cfg.resourceUrl,
+        authorizerHandle: cfg.authorizerHandle,
+        toolsFingerprint: cfg.toolsFingerprint,
+        resourcesFingerprint: args.fingerprint,
+      });
+    } else {
+      await ctx.db.insert("config", {
+        resourcesFingerprint: args.fingerprint,
       });
     }
     return null;
@@ -182,6 +333,7 @@ export const replaceTools = mutation({
         resourceUrl: cfg.resourceUrl,
         authorizerHandle: cfg.authorizerHandle,
         toolsFingerprint: args.fingerprint,
+        resourcesFingerprint: cfg.resourcesFingerprint,
       });
     } else {
       await ctx.db.insert("config", { toolsFingerprint: args.fingerprint });
@@ -202,6 +354,15 @@ export const getToolsFingerprint = query({
   handler: async (ctx) => {
     const row = await ctx.db.query("config").unique();
     return row?.toolsFingerprint ?? null;
+  },
+});
+
+export const getResourcesFingerprint = query({
+  args: {},
+  returns: v.union(v.string(), v.null()),
+  handler: async (ctx) => {
+    const row = await ctx.db.query("config").unique();
+    return row?.resourcesFingerprint ?? null;
   },
 });
 
@@ -237,6 +398,7 @@ async function patchConfigRow(
     // Preserve the declarative tool fingerprint across OAuth-config
     // writes so changing OAuth settings doesn't force a registry re-sync.
     toolsFingerprint: existing?.toolsFingerprint,
+    resourcesFingerprint: existing?.resourcesFingerprint,
   };
   if (existing) {
     await ctx.db.replace("config", existing._id, next);

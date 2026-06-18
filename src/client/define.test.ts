@@ -189,6 +189,7 @@ describe("defineMcpResource", () => {
       name: "Getting Started",
       description: "Intro docs",
       mimeType: "text/markdown",
+      metadata: { internal: true },
       read: async (_ctx, args) => [
         {
           uri: args.uri,
@@ -207,6 +208,7 @@ describe("defineMcpResource", () => {
         mimeType: "text/markdown",
       },
     ]);
+    expect(resource.resource.metadata).toEqual({ internal: true });
     await expect(
       resource.read({} as any, {
         uri: "docs://getting-started",

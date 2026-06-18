@@ -85,6 +85,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       >;
     };
     registry: {
+      clearAllResources: FunctionReference<
+        "mutation",
+        "internal",
+        {},
+        null,
+        Name
+      >;
       clearAllTools: FunctionReference<"mutation", "internal", {}, null, Name>;
       getOAuthConfig: FunctionReference<
         "query",
@@ -118,6 +125,28 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         string | null,
         Name
       >;
+      getResource: FunctionReference<
+        "query",
+        "internal",
+        { uri: string },
+        {
+          _creationTime: number;
+          _id: string;
+          description?: string;
+          metadata?: any;
+          mimeType?: string;
+          name: string;
+          uri: string;
+        } | null,
+        Name
+      >;
+      getResourcesFingerprint: FunctionReference<
+        "query",
+        "internal",
+        {},
+        string | null,
+        Name
+      >;
       listTools: FunctionReference<
         "query",
         "internal",
@@ -136,6 +165,34 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         }>,
         Name
       >;
+      listResources: FunctionReference<
+        "query",
+        "internal",
+        {},
+        Array<{
+          _creationTime: number;
+          _id: string;
+          description?: string;
+          metadata?: any;
+          mimeType?: string;
+          name: string;
+          uri: string;
+        }>,
+        Name
+      >;
+      registerResource: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          description?: string;
+          metadata?: any;
+          mimeType?: string;
+          name: string;
+          uri: string;
+        },
+        string,
+        Name
+      >;
       registerTool: FunctionReference<
         "mutation",
         "internal",
@@ -150,6 +207,22 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           outputSchema?: any;
         },
         string,
+        Name
+      >;
+      replaceResources: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          fingerprint?: string;
+          resources: Array<{
+            description?: string;
+            metadata?: any;
+            mimeType?: string;
+            name: string;
+            uri: string;
+          }>;
+        },
+        null,
         Name
       >;
       replaceTools: FunctionReference<
@@ -176,6 +249,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "internal",
         { authServerUrl: string | null; resourceUrl?: string | null },
         null,
+        Name
+      >;
+      unregisterResource: FunctionReference<
+        "mutation",
+        "internal",
+        { uri: string },
+        boolean,
         Name
       >;
       unregisterTool: FunctionReference<

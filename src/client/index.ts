@@ -82,7 +82,15 @@ export type McpResourceReadHandler = (
   },
 ) => Promise<McpResourceContent[]>;
 
-export type McpResourceConfig = McpResource & {
+export type McpResourceDescriptor = McpResource & {
+  metadata?: Record<string, unknown>;
+};
+
+export type McpResourceRegistration = McpResourceProvider & {
+  resource: McpResourceDescriptor;
+};
+
+export type McpResourceConfig = McpResourceDescriptor & {
   /**
    * Read this concrete resource. The gateway only calls this handler when
    * `resources/read` requests `uri`, so handlers can focus on loading content
@@ -362,7 +370,7 @@ export function defineMcpAction<
  */
 export function defineMcpResource(
   config: McpResourceConfig,
-): McpResourceProvider {
+): McpResourceRegistration {
   if (typeof config.uri !== "string" || config.uri.length === 0) {
     throw new Error("MCP resource uri must be a non-empty string");
   }
@@ -373,23 +381,80 @@ export function defineMcpResource(
     throw new Error("MCP resource read must be a function");
   }
 
-  const resource: McpResource = {
+  const resource: McpResourceDescriptor = {
     uri: config.uri,
     name: config.name,
     ...(config.description !== undefined
       ? { description: config.description }
       : {}),
     ...(config.mimeType !== undefined ? { mimeType: config.mimeType } : {}),
+    ...(config.metadata !== undefined ? { metadata: config.metadata } : {}),
+  };
+  const publicResource: McpResource = {
+    uri: resource.uri,
+    name: resource.name,
+    ...(resource.description !== undefined
+      ? { description: resource.description }
+      : {}),
+    ...(resource.mimeType !== undefined ? { mimeType: resource.mimeType } : {}),
   };
 
   return {
     name: config.name,
-    list: async () => [resource],
+    resource,
+    list: async () => [publicResource],
     read: async (ctx, args) => {
       if (args.uri !== config.uri) return null;
       return await config.read(ctx, args);
     },
   };
+}
+
+function isStaticResourceProvider(
+  provider: McpResourceProvider,
+): provider is McpResourceRegistration {
+  return (
+    typeof (provider as { resource?: unknown }).resource === "object" &&
+    (provider as { resource?: unknown }).resource !== null
+  );
+}
+
+function declaredResourcesFromProviders(
+  providers: McpResourceProvider[] | undefined,
+): McpResourceDescriptor[] {
+  return (providers ?? [])
+    .filter(isStaticResourceProvider)
+    .map((provider) => provider.resource);
+}
+
+function resourcesFingerprint(resources: McpResourceDescriptor[]): string {
+  const normalized = resources
+    .map((resource) => ({
+      uri: resource.uri,
+      name: resource.name,
+      description: resource.description ?? null,
+      mimeType: resource.mimeType ?? null,
+      metadata: resource.metadata ?? null,
+    }))
+    .sort((a, b) => (a.uri < b.uri ? -1 : a.uri > b.uri ? 1 : 0));
+  return JSON.stringify(normalized);
+}
+
+async function syncDeclaredResources(
+  ctx: RunMutationCtx,
+  component: ComponentApi,
+  resources: McpResourceDescriptor[],
+): Promise<void> {
+  const fingerprint = resourcesFingerprint(resources);
+  const current = await ctx.runQuery(
+    component.registry.getResourcesFingerprint,
+    {},
+  );
+  if (current === fingerprint) return;
+  await ctx.runMutation(component.registry.replaceResources, {
+    resources,
+    fingerprint,
+  });
 }
 
 /**
@@ -570,6 +635,43 @@ export class McpGateway {
   }
 
   /**
+   * Upsert a single resource by URI. This stores catalog metadata only;
+   * resource contents are still served by the resource provider passed to
+   * `handleMcpRequest({ resources })`.
+   */
+  async registerResource(
+    ctx: RunMutationCtx,
+    resource: McpResourceDescriptor,
+  ): Promise<void> {
+    await ctx.runMutation(this.component.registry.registerResource, resource);
+  }
+
+  /**
+   * Atomically replace the entire resource registry with the given catalog.
+   * Any resource currently in the registry whose URI is not in `resources`
+   * is removed; matching URIs are upserted. This mirrors `register` for
+   * tools, but persists metadata only, not read handlers or contents.
+   */
+  async registerResources(
+    ctx: RunMutationCtx,
+    resources: McpResourceDescriptor[],
+  ): Promise<void> {
+    await ctx.runMutation(this.component.registry.replaceResources, {
+      resources,
+    });
+  }
+
+  /**
+   * Remove a single resource by URI. Returns `true` if a row was deleted,
+   * `false` if no resource with that URI was registered.
+   */
+  async unregisterResource(ctx: RunMutationCtx, uri: string): Promise<boolean> {
+    return await ctx.runMutation(this.component.registry.unregisterResource, {
+      uri,
+    });
+  }
+
+  /**
    * List every tool currently in the registry, raw rows from the
    * component table. Useful for debugging or building admin UIs.
    * For the spec-compliant, authorize-filtered catalog that MCP
@@ -578,6 +680,15 @@ export class McpGateway {
    */
   async listTools(ctx: RunQueryCtx) {
     return await ctx.runQuery(this.component.registry.listTools, {});
+  }
+
+  /**
+   * List every resource currently in the registry, raw rows from the
+   * component table. For the spec-compliant catalog that MCP clients see,
+   * use `resources/list` via `handleMcpRequest`.
+   */
+  async listResources(ctx: RunQueryCtx) {
+    return await ctx.runQuery(this.component.registry.listResources, {});
   }
 
   /**
@@ -656,6 +767,14 @@ export class McpGateway {
   }
 
   /**
+   * Wipe the entire resource registry. Does not touch tools, config,
+   * audit, or sessions.
+   */
+  async clearResources(ctx: RunMutationCtx): Promise<void> {
+    await ctx.runMutation(this.component.registry.clearAllResources, {});
+  }
+
+  /**
    * Configure OAuth 2.1 protected-resource discovery so MCP clients can
    * find the authorization server that issues their Bearer tokens.
    *
@@ -726,15 +845,24 @@ export class McpGateway {
     request: Request,
     options: HandleMcpRequestOptions,
   ): Promise<Response> {
-    const { tools, ...rest } = options;
+    const { tools, resources, ...rest } = options;
     const syncTools = tools
       ? async () => {
           await syncDeclaredTools(ctx, this.component, tools);
         }
       : undefined;
+    const declaredResources = declaredResourcesFromProviders(resources);
+    const syncResources =
+      resources !== undefined
+        ? async () => {
+            await syncDeclaredResources(ctx, this.component, declaredResources);
+          }
+        : undefined;
     return await handleMcpRequestImpl(ctx, request, this.component, {
       ...rest,
+      resources,
       syncTools,
+      syncResources,
     });
   }
 

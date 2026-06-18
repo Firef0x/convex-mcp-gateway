@@ -241,12 +241,162 @@ describe("registry", () => {
     });
   });
 
+  test("registerResource inserts and is idempotent on URI", async () => {
+    const t = convexTest(schema, modules);
+
+    await t.run(async (ctx) => {
+      await ctx.runMutation(api.registry.registerResource, {
+        uri: "docs://intro",
+        name: "Intro",
+        description: "first",
+        mimeType: "text/markdown",
+      });
+
+      let resources = await ctx.runQuery(api.registry.listResources, {});
+      expect(resources).toHaveLength(1);
+      expect(resources[0]!.description).toBe("first");
+
+      await ctx.runMutation(api.registry.registerResource, {
+        uri: "docs://intro",
+        name: "Intro v2",
+        description: "second",
+      });
+
+      resources = await ctx.runQuery(api.registry.listResources, {});
+      expect(resources).toHaveLength(1);
+      expect(resources[0]!.name).toBe("Intro v2");
+      expect(resources[0]!.description).toBe("second");
+      expect(resources[0]!.mimeType).toBeUndefined();
+    });
+  });
+
+  test("getResource returns null for unknown URIs", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      const resource = await ctx.runQuery(api.registry.getResource, {
+        uri: "docs://missing",
+      });
+      expect(resource).toBeNull();
+    });
+  });
+
+  test("replaceResources rejects duplicate URIs in the input array", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      await expect(
+        ctx.runMutation(api.registry.replaceResources, {
+          resources: [
+            {
+              uri: "docs://dup",
+              name: "first",
+            },
+            {
+              uri: "docs://dup",
+              name: "second",
+            },
+          ],
+        }),
+      ).rejects.toThrow(/duplicate resource URIs/);
+    });
+  });
+
+  test("replaceResources deletes resources not in the incoming set and upserts the rest", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      for (const uri of ["docs://alpha", "docs://beta", "docs://gamma"]) {
+        await ctx.runMutation(api.registry.registerResource, {
+          uri,
+          name: uri,
+        });
+      }
+      expect(await ctx.runQuery(api.registry.listResources, {})).toHaveLength(
+        3,
+      );
+
+      await ctx.runMutation(api.registry.replaceResources, {
+        resources: [
+          {
+            uri: "docs://beta",
+            name: "Fresh Beta",
+            mimeType: "text/plain",
+          },
+          {
+            uri: "docs://delta",
+            name: "Fresh Delta",
+            metadata: { audience: "operators" },
+          },
+        ],
+        fingerprint: "fingerprint-v1",
+      });
+
+      const after = await ctx.runQuery(api.registry.listResources, {});
+      const uris = after.map((r) => r.uri).sort();
+      expect(uris).toEqual(["docs://beta", "docs://delta"]);
+      const beta = after.find((r) => r.uri === "docs://beta")!;
+      expect(beta.name).toBe("Fresh Beta");
+      expect(beta.mimeType).toBe("text/plain");
+      const delta = after.find((r) => r.uri === "docs://delta")!;
+      expect(delta.metadata).toEqual({ audience: "operators" });
+      expect(await ctx.runQuery(api.registry.getResourcesFingerprint, {})).toBe(
+        "fingerprint-v1",
+      );
+    });
+  });
+
+  test("unregisterResource removes the row and reports whether it existed", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      await ctx.runMutation(api.registry.registerResource, {
+        uri: "docs://tmp",
+        name: "Temporary",
+      });
+
+      const removedExisting = await ctx.runMutation(
+        api.registry.unregisterResource,
+        { uri: "docs://tmp" },
+      );
+      expect(removedExisting).toBe(true);
+
+      const removedMissing = await ctx.runMutation(
+        api.registry.unregisterResource,
+        { uri: "docs://tmp" },
+      );
+      expect(removedMissing).toBe(false);
+
+      const resources = await ctx.runQuery(api.registry.listResources, {});
+      expect(resources).toHaveLength(0);
+    });
+  });
+
+  test("clearAllResources removes all resources and clears the resource fingerprint", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      await ctx.runMutation(api.registry.replaceResources, {
+        resources: [
+          { uri: "docs://one", name: "One" },
+          { uri: "docs://two", name: "Two" },
+        ],
+        fingerprint: "fingerprint-v2",
+      });
+      expect(await ctx.runQuery(api.registry.getResourcesFingerprint, {})).toBe(
+        "fingerprint-v2",
+      );
+
+      await ctx.runMutation(api.registry.clearAllResources, {});
+
+      expect(await ctx.runQuery(api.registry.listResources, {})).toHaveLength(
+        0,
+      );
+      expect(
+        await ctx.runQuery(api.registry.getResourcesFingerprint, {}),
+      ).toBeNull();
+    });
+  });
+
   test("setOAuthConfig writes the issuer + optional resource into config", async () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
-      expect(
-        await ctx.runQuery(api.registry.getOAuthConfig, {}),
-      ).toBeNull();
+      expect(await ctx.runQuery(api.registry.getOAuthConfig, {})).toBeNull();
 
       await ctx.runMutation(api.registry.setOAuthConfig, {
         authServerUrl: "https://idp.example.com/",
@@ -271,9 +421,7 @@ describe("registry", () => {
       await ctx.runMutation(api.registry.setOAuthConfig, {
         authServerUrl: null,
       });
-      expect(
-        await ctx.runQuery(api.registry.getOAuthConfig, {}),
-      ).toBeNull();
+      expect(await ctx.runQuery(api.registry.getOAuthConfig, {})).toBeNull();
 
       // Re-enabling without resourceUrl must NOT resurrect the previously
       // set resourceUrl (regression for db.patch ignoring undefined).
@@ -312,5 +460,4 @@ describe("registry", () => {
       ).rejects.toThrow(/http or https/);
     });
   });
-
 });
