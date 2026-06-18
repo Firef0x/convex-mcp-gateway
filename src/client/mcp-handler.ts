@@ -77,6 +77,35 @@ export type McpIdentityResolver = (
   token: string,
 ) => Promise<{ subject: string; claims?: Record<string, unknown> } | null>;
 
+export type McpResource = {
+  uri: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+};
+
+export type McpResourceContent = {
+  uri: string;
+  mimeType?: string;
+  text?: string;
+  blob?: string;
+};
+
+export type McpResourceProvider = {
+  name: string;
+  list: (
+    ctx: McpHandlerCtx,
+    args: { identity: { subject: string; claims?: Record<string, unknown> } },
+  ) => Promise<McpResource[]>;
+  read: (
+    ctx: McpHandlerCtx,
+    args: {
+      uri: string;
+      identity: { subject: string; claims?: Record<string, unknown> };
+    },
+  ) => Promise<McpResourceContent[] | null>;
+};
+
 /**
  * Options for `gateway.handleMcpRequest`. The host supplies an
  * `authorize` callback that decides allowed vs denied per
@@ -139,6 +168,19 @@ export interface HandleMcpRequestOptions {
    * Convex codegen circular-type error (see that type's docs).
    */
   tools?: McpToolRegistration[];
+  /**
+   * Optional MCP resources exposed by this gateway. Resources are listed
+   * in `initialize.capabilities.resources`, served via `resources/list`,
+   * and read via `resources/read`. Resource providers receive the resolved
+   * caller identity; anonymous resource requests are rejected.
+   */
+  resources?: McpResourceProvider[];
+  /**
+   * Optional instructions appended to the `initialize` result. Useful for
+   * telling clients how to use the resource catalog without modifying the
+   * host's tool definitions.
+   */
+  initializeInstructions?: string;
 }
 
 /**
@@ -151,12 +193,14 @@ type InternalHandleMcpRequestOptions = HandleMcpRequestOptions & {
   syncTools?: () => Promise<void>;
 };
 
-type HandlerCtx = {
+export type McpHandlerCtx = {
   runQuery: (ref: any, args: any) => Promise<any>;
   runMutation: (ref: any, args: any) => Promise<any>;
   runAction: (ref: any, args: any) => Promise<any>;
   auth: { getUserIdentity: () => Promise<any> };
 };
+
+type HandlerCtx = McpHandlerCtx;
 
 type JsonRpcMessage = {
   jsonrpc?: "2.0";
@@ -183,6 +227,7 @@ const SERVER_VERSION = "0.0.0";
 
 const UNAUTHORIZED = -32001;
 const FORBIDDEN = -32003;
+const INVALID_PARAMS = -32602;
 const INTERNAL_ERROR = -32603;
 
 function resolveCorsOrigin(
@@ -383,6 +428,17 @@ async function safeAuthorize(
       threw: true,
     };
   }
+}
+
+function mergeInitializeInstructions(
+  existing: unknown,
+  instructions: string | undefined,
+): string | unknown {
+  if (!instructions) return existing;
+  if (typeof existing === "string" && existing.trim()) {
+    return `${existing.trim()}\n\n${instructions}`;
+  }
+  return instructions;
 }
 
 export async function handleMcpRequest(
@@ -654,7 +710,11 @@ async function handlePost(
     );
   }
 
-  let body: string;
+  let body: string = jsonErrorEnvelope(
+    message.id,
+    INTERNAL_ERROR,
+    "Handler did not produce a response",
+  );
   let raw: Response | null = null;
 
   switch (message.method) {
@@ -697,8 +757,106 @@ async function handlePost(
           name: SERVER_NAME,
           version: SERVER_VERSION,
         },
-        capabilities: { tools: {} },
+        instructions: mergeInitializeInstructions(
+          undefined,
+          options.initializeInstructions,
+        ),
+        capabilities: {
+          tools: {},
+          ...((options.resources ?? []).length > 0
+            ? { resources: {} }
+            : {}),
+        },
       });
+      break;
+    }
+
+    case "resources/list": {
+      const providers = options.resources ?? [];
+      if (providers.length === 0) {
+        body = jsonErrorEnvelope(
+          message.id,
+          -32601,
+          `Unsupported method: ${message.method}`,
+        );
+        break;
+      }
+      if (!identity) {
+        body = jsonErrorEnvelope(
+          message.id,
+          UNAUTHORIZED,
+          "Unauthorized: authentication required",
+        );
+        break;
+      }
+      try {
+        const resources = (
+          await Promise.all(
+            providers.map((provider) => provider.list(ctx, { identity })),
+          )
+        ).flat();
+        body = jsonResultEnvelope(message.id, { resources });
+      } catch (err) {
+        body = jsonErrorEnvelope(
+          message.id,
+          INTERNAL_ERROR,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+      break;
+    }
+
+    case "resources/read": {
+      const providers = options.resources ?? [];
+      if (providers.length === 0) {
+        body = jsonErrorEnvelope(
+          message.id,
+          -32601,
+          `Unsupported method: ${message.method}`,
+        );
+        break;
+      }
+      if (!identity) {
+        body = jsonErrorEnvelope(
+          message.id,
+          UNAUTHORIZED,
+          "Unauthorized: authentication required",
+        );
+        break;
+      }
+      const uri = message.params?.uri;
+      if (typeof uri !== "string" || uri.length === 0) {
+        body = jsonErrorEnvelope(
+          message.id,
+          INVALID_PARAMS,
+          "Missing resource uri",
+        );
+        break;
+      }
+      try {
+        let found = false;
+        for (const provider of providers) {
+          const contents = await provider.read(ctx, { uri, identity });
+          if (contents) {
+            body = jsonResultEnvelope(message.id, { contents });
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          body = jsonErrorEnvelope(
+            message.id,
+            INVALID_PARAMS,
+            `Resource not found: ${uri}`,
+          );
+        }
+      } catch (err) {
+        body = jsonErrorEnvelope(
+          message.id,
+          INTERNAL_ERROR,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
       break;
     }
 

@@ -24,6 +24,10 @@ import {
 import {
   handleMcpRequest as handleMcpRequestImpl,
   type HandleMcpRequestOptions,
+  type McpHandlerCtx,
+  type McpResource,
+  type McpResourceContent,
+  type McpResourceProvider,
 } from "./mcp-handler.js";
 
 export type {
@@ -40,7 +44,11 @@ export type {
 export type {
   HandleMcpRequestOptions,
   McpCorsOption,
+  McpHandlerCtx,
   McpIdentityResolver,
+  McpResource,
+  McpResourceContent,
+  McpResourceProvider,
 } from "./mcp-handler.js";
 export {
   buildProtectedResourceMetadataUrl,
@@ -66,6 +74,23 @@ export type RunMutationCtx = RunQueryCtx & {
   ) => Promise<FunctionReturnType<Mutation>>;
 };
 
+export type McpResourceReadHandler = (
+  ctx: McpHandlerCtx,
+  args: {
+    uri: string;
+    identity: { subject: string; claims?: Record<string, unknown> };
+  },
+) => Promise<McpResourceContent[]>;
+
+export type McpResourceConfig = McpResource & {
+  /**
+   * Read this concrete resource. The gateway only calls this handler when
+   * `resources/read` requests `uri`, so handlers can focus on loading content
+   * and applying any resource-specific checks.
+   */
+  read: McpResourceReadHandler;
+};
+
 type ToolFunctionReference<Kind extends McpToolKind> = FunctionReference<
   Kind,
   "internal" | "public",
@@ -80,22 +105,24 @@ type AnyToolFunctionReference = ToolFunctionReference<McpToolKind>;
  * If they don't, TypeScript surfaces a `_typeMismatch` error on the config
  * object that makes the failing field obvious.
  */
-type ValidateArgs<Ref extends AnyToolFunctionReference, ArgsV> =
-  ArgsV extends PropertyValidators
-    ? ObjectType<ArgsV> extends FunctionArgs<Ref>
-      ? FunctionArgs<Ref> extends ObjectType<ArgsV>
-        ? unknown
-        : {
-            _typeMismatch: "args validator does not match the function's expected arguments";
-            expected: FunctionArgs<Ref>;
-            received: ObjectType<ArgsV>;
-          }
+type ValidateArgs<
+  Ref extends AnyToolFunctionReference,
+  ArgsV,
+> = ArgsV extends PropertyValidators
+  ? ObjectType<ArgsV> extends FunctionArgs<Ref>
+    ? FunctionArgs<Ref> extends ObjectType<ArgsV>
+      ? unknown
       : {
           _typeMismatch: "args validator does not match the function's expected arguments";
           expected: FunctionArgs<Ref>;
           received: ObjectType<ArgsV>;
         }
-    : { _typeMismatch: "args must be a Convex property validators object" };
+    : {
+        _typeMismatch: "args validator does not match the function's expected arguments";
+        expected: FunctionArgs<Ref>;
+        received: ObjectType<ArgsV>;
+      }
+  : { _typeMismatch: "args must be a Convex property validators object" };
 
 /**
  * Mirror of `ValidateArgs` for the optional `returns:` validator.
@@ -104,24 +131,26 @@ type ValidateArgs<Ref extends AnyToolFunctionReference, ArgsV> =
  * inferred type must equal the function's actual return type, drift
  * between them surfaces as a `_typeMismatch` on the config object.
  */
-type ValidateReturns<Ref extends AnyToolFunctionReference, ReturnsV> =
-  ReturnsV extends undefined
-    ? unknown
-    : ReturnsV extends GenericValidator
-      ? Infer<ReturnsV> extends FunctionReturnType<Ref>
-        ? FunctionReturnType<Ref> extends Infer<ReturnsV>
-          ? unknown
-          : {
-              _typeMismatch: "returns validator does not match the function's return type";
-              expected: FunctionReturnType<Ref>;
-              received: Infer<ReturnsV>;
-            }
+type ValidateReturns<
+  Ref extends AnyToolFunctionReference,
+  ReturnsV,
+> = ReturnsV extends undefined
+  ? unknown
+  : ReturnsV extends GenericValidator
+    ? Infer<ReturnsV> extends FunctionReturnType<Ref>
+      ? FunctionReturnType<Ref> extends Infer<ReturnsV>
+        ? unknown
         : {
             _typeMismatch: "returns validator does not match the function's return type";
             expected: FunctionReturnType<Ref>;
             received: Infer<ReturnsV>;
           }
-      : { _typeMismatch: "returns must be a Convex validator" };
+      : {
+          _typeMismatch: "returns validator does not match the function's return type";
+          expected: FunctionReturnType<Ref>;
+          received: Infer<ReturnsV>;
+        }
+    : { _typeMismatch: "returns must be a Convex validator" };
 
 /**
  * Keys of `ArgsV` whose validator accepts the injected caller identity
@@ -320,6 +349,47 @@ export function defineMcpAction<
     "action",
     config as unknown as McpToolConfigBase<Ref, ArgsV, ReturnsV>,
   );
+}
+
+/**
+ * Declare a concrete MCP resource. The returned provider can be passed to
+ * `gateway.handleMcpRequest({ resources: [...] })`.
+ *
+ * This is intentionally a lightweight primitive: it gives resources the same
+ * first-class declaration style as `defineMcpQuery` / `defineMcpMutation` /
+ * `defineMcpAction`, while registry sync, audit, authorization hooks, resource
+ * templates, and subscriptions remain separate feature layers.
+ */
+export function defineMcpResource(
+  config: McpResourceConfig,
+): McpResourceProvider {
+  if (typeof config.uri !== "string" || config.uri.length === 0) {
+    throw new Error("MCP resource uri must be a non-empty string");
+  }
+  if (typeof config.name !== "string" || config.name.length === 0) {
+    throw new Error("MCP resource name must be a non-empty string");
+  }
+  if (typeof config.read !== "function") {
+    throw new Error("MCP resource read must be a function");
+  }
+
+  const resource: McpResource = {
+    uri: config.uri,
+    name: config.name,
+    ...(config.description !== undefined
+      ? { description: config.description }
+      : {}),
+    ...(config.mimeType !== undefined ? { mimeType: config.mimeType } : {}),
+  };
+
+  return {
+    name: config.name,
+    list: async () => [resource],
+    read: async (ctx, args) => {
+      if (args.uri !== config.uri) return null;
+      return await config.read(ctx, args);
+    },
+  };
 }
 
 /**
@@ -535,10 +605,7 @@ export class McpGateway {
    * insufficient. The component does not garbage-collect sessions
    * on its own.
    */
-  async pruneSessions(
-    ctx: RunMutationCtx,
-    idleMs: number,
-  ): Promise<number> {
+  async pruneSessions(ctx: RunMutationCtx, idleMs: number): Promise<number> {
     return await ctx.runMutation(this.component.sessions.pruneSessions, {
       olderThanMs: idleMs,
     });
@@ -853,8 +920,7 @@ export class McpGateway {
       return new Response(
         JSON.stringify({
           error: "upstream_metadata_unreachable",
-          error_description:
-            err instanceof Error ? err.message : String(err),
+          error_description: err instanceof Error ? err.message : String(err),
         }),
         {
           status: 502,
@@ -953,7 +1019,12 @@ export class McpGateway {
     try {
       body = (await request.json()) as typeof body;
     } catch {
-      return jsonError(400, "invalid_client_metadata", "Invalid JSON body", corsHeaders);
+      return jsonError(
+        400,
+        "invalid_client_metadata",
+        "Invalid JSON body",
+        corsHeaders,
+      );
     }
     const redirectUris = Array.isArray(body.redirect_uris)
       ? (body.redirect_uris as unknown[])
@@ -974,12 +1045,10 @@ export class McpGateway {
       // Truncate each echoed URI to bound response size against an
       // attacker probing the (public, unauthenticated) DCR endpoint
       // with megabyte-scale payloads.
-      const sample = invalid
-        .slice(0, 5)
-        .map((u) => {
-          const s = typeof u === "string" ? u : JSON.stringify(u);
-          return s.length > 200 ? `${s.slice(0, 200)}...` : s;
-        });
+      const sample = invalid.slice(0, 5).map((u) => {
+        const s = typeof u === "string" ? u : JSON.stringify(u);
+        return s.length > 200 ? `${s.slice(0, 200)}...` : s;
+      });
       const description =
         invalid.length === 1
           ? `redirect_uri not allowed: ${sample[0]}`

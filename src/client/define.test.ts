@@ -1,7 +1,12 @@
 import { describe, expect, test } from "vitest";
 import { v } from "convex/values";
 import type { FunctionReference } from "convex/server";
-import { defineMcpQuery, mcpCallerValidator, type McpCaller } from "./index.js";
+import {
+  defineMcpQuery,
+  defineMcpResource,
+  mcpCallerValidator,
+  type McpCaller,
+} from "./index.js";
 
 // defineMcpQuery's TS signature requires a real Convex function
 // reference; runtime validation runs first regardless of TS, so we
@@ -45,17 +50,14 @@ describe("defineMcp* name validation", () => {
       "ümlaut",
       "",
     ]) {
-      expect(
-        () => call(bad),
-        `name "${bad}" should be rejected`,
-      ).toThrow(/violates the required pattern/);
+      expect(() => call(bad), `name "${bad}" should be rejected`).toThrow(
+        /violates the required pattern/,
+      );
     }
   });
 
   test("rejects names longer than 64 chars", () => {
-    expect(() => call("a".repeat(65))).toThrow(
-      /violates the required pattern/,
-    );
+    expect(() => call("a".repeat(65))).toThrow(/violates the required pattern/);
   });
 
   test("accepts hyphens, digits, underscores up to 64 chars", () => {
@@ -177,5 +179,76 @@ describe("defineMcp* outputSchema (from returns: validator)", () => {
   test("v.any() → permissive empty schema", () => {
     const tool = callWithReturns(v.any()) as any;
     expect(tool.outputSchema).toEqual({});
+  });
+});
+
+describe("defineMcpResource", () => {
+  test("creates a concrete resource provider", async () => {
+    const resource = defineMcpResource({
+      uri: "docs://getting-started",
+      name: "Getting Started",
+      description: "Intro docs",
+      mimeType: "text/markdown",
+      read: async (_ctx, args) => [
+        {
+          uri: args.uri,
+          mimeType: "text/markdown",
+          text: "# Getting Started",
+        },
+      ],
+    });
+
+    const identity = { subject: "user-1" };
+    await expect(resource.list({} as any, { identity })).resolves.toEqual([
+      {
+        uri: "docs://getting-started",
+        name: "Getting Started",
+        description: "Intro docs",
+        mimeType: "text/markdown",
+      },
+    ]);
+    await expect(
+      resource.read({} as any, {
+        uri: "docs://getting-started",
+        identity,
+      }),
+    ).resolves.toEqual([
+      {
+        uri: "docs://getting-started",
+        mimeType: "text/markdown",
+        text: "# Getting Started",
+      },
+    ]);
+    await expect(
+      resource.read({} as any, {
+        uri: "docs://missing",
+        identity,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  test("rejects invalid resource declarations", () => {
+    expect(() =>
+      (defineMcpResource as unknown as (config: unknown) => unknown)({
+        uri: "",
+        name: "Missing URI",
+        read: async () => [],
+      }),
+    ).toThrow(/uri must be a non-empty string/);
+
+    expect(() =>
+      (defineMcpResource as unknown as (config: unknown) => unknown)({
+        uri: "docs://missing-name",
+        name: "",
+        read: async () => [],
+      }),
+    ).toThrow(/name must be a non-empty string/);
+
+    expect(() =>
+      (defineMcpResource as unknown as (config: unknown) => unknown)({
+        uri: "docs://missing-read",
+        name: "Missing Read",
+      }),
+    ).toThrow(/read must be a function/);
   });
 });
