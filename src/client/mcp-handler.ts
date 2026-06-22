@@ -802,6 +802,28 @@ function publicResource(resource: RegisteredResource): McpResource {
 }
 
 /**
+ * Project an arbitrary resource-shaped object down to exactly the known
+ * `McpResource` fields. Applied to every `resources/list` entry before it
+ * ships, so a provider's stray/internal keys never leak to the client (the
+ * template path does the same via `pickTemplateFields`).
+ */
+function pickResourceFields(resource: McpResource): McpResource {
+  return {
+    uri: resource.uri,
+    name: resource.name,
+    ...(resource.title !== undefined ? { title: resource.title } : {}),
+    ...(resource.description !== undefined
+      ? { description: resource.description }
+      : {}),
+    ...(resource.mimeType !== undefined ? { mimeType: resource.mimeType } : {}),
+    ...(resource.annotations !== undefined
+      ? { annotations: resource.annotations }
+      : {}),
+    ...(resource.size !== undefined ? { size: resource.size } : {}),
+  };
+}
+
+/**
  * Project an arbitrary template-shaped object down to exactly the known
  * `McpResourceTemplate` fields. Shared by the request handler (response
  * shaping), `defineMcpResourceTemplate`, and the registry-sync projection so
@@ -1364,7 +1386,7 @@ async function handlePost(
             );
           }
           if (decision.allowed) {
-            resources.push(candidate.resource);
+            resources.push(pickResourceFields(candidate.resource));
           }
         }
         if (shouldAuditResource(options.auditResources, "list")) {
@@ -1649,7 +1671,12 @@ async function handlePost(
             );
             continue;
           }
-          if (contents) {
+          // A provider declines a URI by returning null OR an empty array;
+          // declining via `[]` keeps it from shipping empty contents and
+          // shadowing a later provider/template. Anything else (including a
+          // malformed non-array) still goes to serveContents, which validates
+          // it and surfaces -32603 on a bad shape.
+          if (contents && !(Array.isArray(contents) && contents.length === 0)) {
             await serveContents(contents);
             break;
           }
@@ -1675,7 +1702,10 @@ async function handlePost(
               );
               continue;
             }
-            if (contents) {
+            if (
+              contents &&
+              !(Array.isArray(contents) && contents.length === 0)
+            ) {
               await serveContents(contents);
               break;
             }

@@ -2245,6 +2245,89 @@ describe("handleMcpRequest resources", () => {
     );
     expect(state.resourceTemplates).toEqual([]);
   });
+
+  test("resources/list strips unknown fields from provider output", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    // A hand-built provider that returns stray/internal keys must not leak
+    // them to the client (the response carries only known McpResource fields).
+    const provider = {
+      name: "p",
+      list: async () => [
+        { uri: "docs://a", name: "A", secret: "do-not-leak", _id: "row1" },
+      ],
+      read: async () => null,
+    } as unknown as McpResourceProvider;
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      { authorize: async () => ({ allowed: true }), resources: [provider] },
+    );
+    const sessionId = init.headers.get("mcp-session-id")!;
+    const list = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 2, method: "resources/list" }, sessionId),
+      component,
+      { authorize: async () => ({ allowed: true }), resources: [provider] },
+    );
+    const body = await readJson(list);
+    expect(body.result?.resources).toEqual([{ uri: "docs://a", name: "A" }]);
+  });
+
+  test("resources/read: a provider returning [] declines rather than serving empty", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    // The concrete provider returns [] (an easy mistake for "not mine");
+    // the template should still get a chance and serve the real content.
+    const empty: McpResourceProvider = {
+      name: "empty",
+      list: async () => [],
+      read: async () => [],
+    };
+    const template = defineMcpResourceTemplate({
+      uriTemplate: "docs://{id}",
+      name: "Docs",
+      read: async (_ctx, args) => [{ uri: args.uri, text: "served" }],
+    });
+    const options = {
+      authorize: async () => ({ allowed: true }),
+      resources: [empty],
+      resourceTemplates: [template],
+    };
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      options,
+    );
+    const sessionId = init.headers.get("mcp-session-id")!;
+    const read = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest(
+        { id: 2, method: "resources/read", params: { uri: "docs://x" } },
+        sessionId,
+      ),
+      component,
+      options,
+    );
+    // The empty-array provider did not shadow the template.
+    expect(await readJson(read)).toMatchObject({
+      result: { contents: [{ uri: "docs://x", text: "served" }] },
+    });
+
+    // And when nothing serves non-empty content, it's a clean not-found.
+    const readMiss = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest(
+        { id: 3, method: "resources/read", params: { uri: "other://x" } },
+        sessionId,
+      ),
+      component,
+      { authorize: async () => ({ allowed: true }), resources: [empty] },
+    );
+    expect((await readJson(readMiss)).error?.code).toBe(-32602);
+  });
 });
 
 describe("resource shape validators", () => {

@@ -493,11 +493,16 @@ function compileUriTemplate(
         );
       }
       const expr = uriTemplate.slice(i + 1, end);
-      if (!/^[A-Za-z0-9_]+$/.test(expr)) {
+      // The variable name becomes a regex named-capture group, which must be
+      // a valid identifier (letter/underscore first, then letters/digits/
+      // underscore). Allowing a leading digit here would pass this check but
+      // make `new RegExp("(?<2x>...)")` throw an opaque SyntaxError below.
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(expr)) {
         throw new Error(
           `MCP resource template "${uriTemplate}" uses an unsupported ` +
             `expression "{${expr}}". Only simple level-1 placeholders ` +
-            `("{name}", characters A-Z a-z 0-9 _) are supported; operators ` +
+            `("{name}", where name is a letter/underscore followed by ` +
+            `letters, digits, or underscores) are supported; operators ` +
             `(+ # . / ; ? &) and comma lists ("{a,b}") are not.`,
         );
       }
@@ -988,14 +993,19 @@ export class McpGateway {
   }
 
   /**
-   * Inspect the audit log written by the component on every `tools/call`.
-   * Returns newest entries first. Use `toolName` and/or `outcome` to filter;
-   * `limit` defaults to 100 and is capped server-side at 1000.
+   * Inspect the audit log written by the component on every `tools/call`
+   * and (when enabled) resource operation. Returns newest entries first.
+   * Filter by `entryType` (`"tool"` | `"resource"`), `toolName`,
+   * `resourceUri`, and/or `outcome`; `limit` defaults to 100 and is capped
+   * server-side at 1000. (The server applies one index per call; combining
+   * `resourceUri` and `toolName` is not meaningful since a row has only one.)
    */
   async listAuditEntries(
     ctx: RunQueryCtx,
     args: {
+      entryType?: "tool" | "resource";
       toolName?: string;
+      resourceUri?: string;
       outcome?: "allowed" | "denied" | "error";
       limit?: number;
     } = {},

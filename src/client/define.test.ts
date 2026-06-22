@@ -385,6 +385,12 @@ describe("defineMcpResourceTemplate", () => {
     expect(() => call({ uriTemplate: "file://{+path}", name: "Op" })).toThrow(
       /unsupported/i,
     );
+    // A variable name starting with a digit is not a valid regex
+    // named-capture identifier; it must fail loud with the friendly
+    // "unsupported" error, not an opaque RegExp SyntaxError.
+    expect(() => call({ uriTemplate: "x://{2day}", name: "Digit" })).toThrow(
+      /unsupported/i,
+    );
     // Unclosed expression.
     expect(() =>
       call({ uriTemplate: "db://{table", name: "Unclosed" }),
