@@ -10,3 +10,7 @@ coverage
 .tools
 .claude
 .playwright-cli
+
+# Agent configurations
+AGENTS.md
+CLAUDE.md

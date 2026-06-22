@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **MCP resources.** First-class resource support alongside tools, with the
+  same deny-by-default, host-owns-authorization model.
+  - `defineMcpResource` (concrete `uri`) and `defineMcpResourceTemplate`
+    (RFC 6570 `uriTemplate`) serve `resources/list`, `resources/read`, and
+    `resources/templates/list`; raw `McpResourceProvider` objects stay
+    supported as an escape hatch.
+  - Resources and templates are persisted in the component registry and
+    reconciled on `initialize` via change-detected fingerprints (mirroring
+    the `tools` catalog), with imperative `registerResource(s)` /
+    `registerResourceTemplate(s)` / `unregister*` / `clear*` APIs.
+  - One central `authorizeResource` hook gates list / read / templates-list;
+    resource reads require an authenticated caller.
+  - Opt-in `auditResources` records `list` / `read` / `templates_list`
+    operations (URI, operation, identity, outcome, duration) — never the
+    resource contents.
+  - Templates resolve `resources/read` server-side (concrete resources take
+    precedence), with level-1 `{var}` matching validated at declaration time.
+  - Opt-in resource-subscription capability: per-session, owner-bound
+    `resources/subscribe` / `resources/unsubscribe` state plus notification
+    builders, for hosts that front the gateway with a push-capable transport.
+  - Resource/template types gain `title`, `annotations`, and `size`; provider
+    output is runtime-validated and projected so malformed or stray data
+    never reaches the client.
+  - New `docs/resources.md` and a runnable, tested example under
+    `example`.
+
 ## 0.4.0 (2026-05-21)
 
 ### Added

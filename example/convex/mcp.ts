@@ -3,7 +3,11 @@ import {
   McpGateway,
   defineMcpMutation,
   defineMcpQuery,
+  defineMcpResource,
+  defineMcpResourceTemplate,
   mcpCallerValidator,
+  type McpResourceRegistration,
+  type McpResourceTemplateProvider,
   type McpToolRegistration,
 } from "convex-mcp-gateway";
 import { api, components } from "./_generated/api.js";
@@ -68,6 +72,66 @@ export const tools: McpToolRegistration[] = [
     // The host's authorize callback in http.ts treats `public:
     // true` as the opt-in for unauthenticated calls.
     metadata: { public: true },
+  }),
+];
+
+/**
+ * MCP resources exposed by this gateway, passed to
+ * `gateway.handleMcpRequest({ resources })` in `http.ts`.
+ *
+ * `invoices://summary` is a concrete resource declared with
+ * `defineMcpResource`: a fixed URI whose read handler loads content (here
+ * the invoice total) and stamps the authenticated caller. Resource reads
+ * receive the resolved caller identity; anonymous reads are rejected by the
+ * gateway before this handler runs.
+ *
+ * The `McpResourceRegistration[]` annotation mirrors the `tools` array: it
+ * keeps Convex codegen from chasing the `api.*` references in the read
+ * handler into a circular type.
+ */
+export const resources: McpResourceRegistration[] = [
+  defineMcpResource({
+    uri: "invoices://summary",
+    name: "invoice-summary",
+    title: "Invoice summary",
+    description: "Total invoice count for the authenticated caller.",
+    mimeType: "application/json",
+    annotations: { audience: ["assistant"], priority: 0.5 },
+    read: async (ctx, { uri, identity }) => {
+      const summary = await ctx.runQuery(api.invoices.summary, {});
+      return [
+        {
+          uri,
+          mimeType: "application/json",
+          text: JSON.stringify({ ...summary, caller: identity.subject }),
+        },
+      ];
+    },
+  }),
+];
+
+/**
+ * MCP resource templates (RFC 6570), passed to
+ * `gateway.handleMcpRequest({ resourceTemplates })`. `invoice://{id}` is a
+ * parameterized resource: clients discover the shape via
+ * `resources/templates/list`, then read a concrete `invoice://<id>` which
+ * the gateway resolves through this handler (concrete resources above take
+ * precedence on any URI that matches both).
+ */
+export const resourceTemplates: McpResourceTemplateProvider[] = [
+  defineMcpResourceTemplate({
+    uriTemplate: "invoice://{id}",
+    name: "invoice",
+    title: "Invoice by id",
+    description: "Read a single invoice by its id.",
+    mimeType: "application/json",
+    read: async (ctx, { uri, params }) => {
+      const invoice = await ctx.runQuery(api.invoices.get, { id: params.id });
+      if (!invoice) return null;
+      return [
+        { uri, mimeType: "application/json", text: JSON.stringify(invoice) },
+      ];
+    },
   }),
 ];
 

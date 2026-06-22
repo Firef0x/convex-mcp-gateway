@@ -1,7 +1,13 @@
 import { describe, expect, test } from "vitest";
 import { v } from "convex/values";
 import type { FunctionReference } from "convex/server";
-import { defineMcpQuery, mcpCallerValidator, type McpCaller } from "./index.js";
+import {
+  defineMcpQuery,
+  defineMcpResource,
+  defineMcpResourceTemplate,
+  mcpCallerValidator,
+  type McpCaller,
+} from "./index.js";
 
 // defineMcpQuery's TS signature requires a real Convex function
 // reference; runtime validation runs first regardless of TS, so we
@@ -45,17 +51,14 @@ describe("defineMcp* name validation", () => {
       "ümlaut",
       "",
     ]) {
-      expect(
-        () => call(bad),
-        `name "${bad}" should be rejected`,
-      ).toThrow(/violates the required pattern/);
+      expect(() => call(bad), `name "${bad}" should be rejected`).toThrow(
+        /violates the required pattern/,
+      );
     }
   });
 
   test("rejects names longer than 64 chars", () => {
-    expect(() => call("a".repeat(65))).toThrow(
-      /violates the required pattern/,
-    );
+    expect(() => call("a".repeat(65))).toThrow(/violates the required pattern/);
   });
 
   test("accepts hyphens, digits, underscores up to 64 chars", () => {
@@ -177,5 +180,254 @@ describe("defineMcp* outputSchema (from returns: validator)", () => {
   test("v.any() → permissive empty schema", () => {
     const tool = callWithReturns(v.any()) as any;
     expect(tool.outputSchema).toEqual({});
+  });
+});
+
+describe("defineMcpResource", () => {
+  test("creates a concrete resource provider", async () => {
+    const resource = defineMcpResource({
+      uri: "docs://getting-started",
+      name: "Getting Started",
+      description: "Intro docs",
+      mimeType: "text/markdown",
+      metadata: { internal: true },
+      read: async (_ctx, args) => [
+        {
+          uri: args.uri,
+          mimeType: "text/markdown",
+          text: "# Getting Started",
+        },
+      ],
+    });
+
+    const identity = { subject: "user-1" };
+    await expect(resource.list({} as any, { identity })).resolves.toEqual([
+      {
+        uri: "docs://getting-started",
+        name: "Getting Started",
+        description: "Intro docs",
+        mimeType: "text/markdown",
+      },
+    ]);
+    expect(resource.resource.metadata).toEqual({ internal: true });
+    await expect(
+      resource.read({} as any, {
+        uri: "docs://getting-started",
+        identity,
+      }),
+    ).resolves.toEqual([
+      {
+        uri: "docs://getting-started",
+        mimeType: "text/markdown",
+        text: "# Getting Started",
+      },
+    ]);
+    await expect(
+      resource.read({} as any, {
+        uri: "docs://missing",
+        identity,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  test("rejects invalid resource declarations", () => {
+    expect(() =>
+      (defineMcpResource as unknown as (config: unknown) => unknown)({
+        uri: "",
+        name: "Missing URI",
+        read: async () => [],
+      }),
+    ).toThrow(/uri must be a non-empty string/);
+
+    expect(() =>
+      (defineMcpResource as unknown as (config: unknown) => unknown)({
+        uri: "docs://missing-name",
+        name: "",
+        read: async () => [],
+      }),
+    ).toThrow(/name must be a non-empty string/);
+
+    expect(() =>
+      (defineMcpResource as unknown as (config: unknown) => unknown)({
+        uri: "docs://missing-read",
+        name: "Missing Read",
+      }),
+    ).toThrow(/read must be a function/);
+  });
+
+  test("carries extended metadata (title, annotations, size)", async () => {
+    const resource = defineMcpResource({
+      uri: "docs://x",
+      name: "X",
+      title: "Doc X",
+      annotations: {
+        audience: ["user"],
+        priority: 0.5,
+        lastModified: "2026-01-01T00:00:00Z",
+      },
+      size: 1024,
+      read: async (_ctx, args) => [{ uri: args.uri, text: "x" }],
+    });
+
+    await expect(
+      resource.list({} as any, { identity: { subject: "u" } }),
+    ).resolves.toEqual([
+      {
+        uri: "docs://x",
+        name: "X",
+        title: "Doc X",
+        annotations: {
+          audience: ["user"],
+          priority: 0.5,
+          lastModified: "2026-01-01T00:00:00Z",
+        },
+        size: 1024,
+      },
+    ]);
+  });
+
+  test("rejects invalid extended metadata", () => {
+    const call = defineMcpResource as unknown as (config: unknown) => unknown;
+    const base = { uri: "docs://x", name: "X", read: async () => [] };
+    expect(() => call({ ...base, size: -1 })).toThrow(
+      /size must be a non-negative number/,
+    );
+    expect(() => call({ ...base, title: 5 })).toThrow(/title must be a string/);
+    expect(() => call({ ...base, annotations: { priority: 2 } })).toThrow(
+      /priority must be a number between 0 and 1/,
+    );
+    expect(() =>
+      call({ ...base, annotations: { audience: ["nope"] } }),
+    ).toThrow(/audience/);
+  });
+});
+
+describe("defineMcpResourceTemplate", () => {
+  test("creates a template provider that matches and extracts params", () => {
+    const template = defineMcpResourceTemplate({
+      uriTemplate: "db://{table}/{id}",
+      name: "Row",
+      description: "A database row",
+      mimeType: "application/json",
+      read: async () => null,
+    });
+
+    expect(template.template).toEqual({
+      uriTemplate: "db://{table}/{id}",
+      name: "Row",
+      description: "A database row",
+      mimeType: "application/json",
+    });
+    expect(template.match("db://users/42")).toEqual({
+      table: "users",
+      id: "42",
+    });
+    // A variable matches a single path segment, so an extra segment fails.
+    expect(template.match("db://users/42/extra")).toBeNull();
+    expect(template.match("other://users/42")).toBeNull();
+  });
+
+  test("matcher handles edge cases: empty segments, regex-special literals, adjacency", () => {
+    const multi = defineMcpResourceTemplate({
+      uriTemplate: "db://{table}/{id}",
+      name: "Row",
+    });
+    // `[^/]+` requires at least one char per segment, so a trailing empty
+    // segment does not match.
+    expect(multi.match("db://users/")).toBeNull();
+    expect(multi.match("db:///42")).toBeNull();
+
+    // Regex-special characters in the literal portion are escaped, so they
+    // match literally rather than as metacharacters.
+    const special = defineMcpResourceTemplate({
+      uriTemplate: "v1.0+api://{id}",
+      name: "Versioned",
+    });
+    expect(special.match("v1.0+api://42")).toEqual({ id: "42" });
+    // The `.` must be literal: `v1X0+api://42` must NOT match.
+    expect(special.match("v1X0+api://42")).toBeNull();
+
+    // Adjacent placeholders with no delimiter are greedy/ambiguous; pin the
+    // documented-as-undefined-but-deterministic behavior: the first capture
+    // takes all but the last char of the segment.
+    const adjacent = defineMcpResourceTemplate({
+      uriTemplate: "x://{a}{b}",
+      name: "Adjacent",
+    });
+    expect(adjacent.match("x://hello")).toEqual({ a: "hell", b: "o" });
+  });
+
+  test("supports listing-only templates (no read handler)", () => {
+    const template = defineMcpResourceTemplate({
+      uriTemplate: "file://{path}",
+      name: "File",
+    });
+    expect(template.read).toBeUndefined();
+    expect(template.match("file://readme")).toEqual({ path: "readme" });
+  });
+
+  test("rejects invalid template declarations", () => {
+    const call = defineMcpResourceTemplate as unknown as (
+      config: unknown,
+    ) => unknown;
+
+    expect(() => call({ uriTemplate: "", name: "Empty" })).toThrow(
+      /uriTemplate must be a non-empty string/,
+    );
+    expect(() => call({ uriTemplate: "db://{table}", name: "" })).toThrow(
+      /name must be a non-empty string/,
+    );
+    // No placeholder → should be a concrete resource instead.
+    expect(() => call({ uriTemplate: "db://static", name: "Static" })).toThrow(
+      /contains no .* placeholder/,
+    );
+    // Unsupported RFC 6570 operator.
+    expect(() => call({ uriTemplate: "file://{+path}", name: "Op" })).toThrow(
+      /unsupported/i,
+    );
+    // A variable name starting with a digit is not a valid regex
+    // named-capture identifier; it must fail loud with the friendly
+    // "unsupported" error, not an opaque RegExp SyntaxError.
+    expect(() => call({ uriTemplate: "x://{2day}", name: "Digit" })).toThrow(
+      /unsupported/i,
+    );
+    // Unclosed expression.
+    expect(() =>
+      call({ uriTemplate: "db://{table", name: "Unclosed" }),
+    ).toThrow(/unclosed/i);
+    // Duplicate variable.
+    expect(() => call({ uriTemplate: "db://{id}/{id}", name: "Dup" })).toThrow(
+      /repeats the variable/,
+    );
+    // read present but not a function.
+    expect(() =>
+      call({ uriTemplate: "db://{id}", name: "BadRead", read: "nope" }),
+    ).toThrow(/read must be a function/);
+  });
+
+  test("carries extended template metadata and rejects invalid annotations", () => {
+    const tmpl = defineMcpResourceTemplate({
+      uriTemplate: "db://{id}",
+      name: "Row",
+      title: "Row template",
+      annotations: { priority: 1, audience: ["assistant"] },
+    });
+    expect(tmpl.template).toEqual({
+      uriTemplate: "db://{id}",
+      name: "Row",
+      title: "Row template",
+      annotations: { priority: 1, audience: ["assistant"] },
+    });
+
+    const call = defineMcpResourceTemplate as unknown as (
+      config: unknown,
+    ) => unknown;
+    expect(() =>
+      call({
+        uriTemplate: "db://{id}",
+        name: "X",
+        annotations: { priority: -1 },
+      }),
+    ).toThrow(/priority must be a number between 0 and 1/);
   });
 });

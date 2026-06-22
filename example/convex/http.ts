@@ -2,10 +2,11 @@ import { httpRouter } from "convex/server";
 import {
   McpGateway,
   type McpAuthorizerHandler,
+  type McpResourceAuthorizerHandler,
 } from "convex-mcp-gateway";
 import { components } from "./_generated/api.js";
 import { httpAction } from "./_generated/server.js";
-import { tools } from "./mcp.js";
+import { resources, resourceTemplates, tools } from "./mcp.js";
 
 const gateway = new McpGateway(components.mcpGateway);
 
@@ -31,8 +32,7 @@ export const authorize: McpAuthorizerHandler = async (ctx, args) => {
     const idObj = identity as { claims?: unknown; roles?: unknown };
     const claims = (idObj.claims ?? idObj) as { roles?: unknown };
     const roles = claims.roles;
-    const isAdmin =
-      Array.isArray(roles) && roles.includes("finance.admin");
+    const isAdmin = Array.isArray(roles) && roles.includes("finance.admin");
     if (!isAdmin) {
       return {
         allowed: false,
@@ -41,6 +41,35 @@ export const authorize: McpAuthorizerHandler = async (ctx, args) => {
     }
   }
   return { allowed: true };
+};
+
+/**
+ * Per-resource authorization, the resource counterpart of `authorize`.
+ * The gateway has already rejected anonymous callers before this runs, so
+ * `args.identity` is non-null. Policy:
+ * - `resource_list` / `resource_templates_list`: visible to any
+ *   authenticated caller.
+ * - `resource_read` of `invoices://summary`: any authenticated caller.
+ * - `resource_read` of an individual `invoice://{id}` (the expanded URI is
+ *   passed as `resourceUri`): requires the `finance.admin` role.
+ *
+ * Note: list-visibility and read-access are separate decisions. A template
+ * read is authorized here on the concrete expanded URI under
+ * `resource_read`, not under `resource_templates_list`.
+ */
+export const authorizeResource: McpResourceAuthorizerHandler = async (
+  _ctx,
+  args,
+) => {
+  if (args.mode !== "resource_read") return { allowed: true };
+  if (args.resourceUri === "invoices://summary") return { allowed: true };
+
+  const claims = (args.identity.claims ?? {}) as { roles?: unknown };
+  const roles = claims.roles;
+  if (Array.isArray(roles) && roles.includes("finance.admin")) {
+    return { allowed: true };
+  }
+  return { allowed: false, reason: "Forbidden: finance.admin role required" };
 };
 
 const http = httpRouter();
@@ -63,6 +92,14 @@ const resolveIdentity = async (token: string) => {
       claims: { email: "claims@example.com" },
     };
   }
+  // Carries the finance.admin role so the resource authorizer permits
+  // reading an individual `invoice://{id}` (see authorizeResource).
+  if (token === "valid-admin-token") {
+    return {
+      subject: "admin-resolved-sub",
+      claims: { roles: ["finance.admin"] },
+    };
+  }
   if (token === "boom-token") {
     throw new Error("simulated validator failure");
   }
@@ -78,6 +115,17 @@ const mcpHandler = httpAction(async (ctx, request) =>
     // each initialize, so no separate registerDefaults mutation is
     // needed for the HTTP path.
     tools,
+    // MCP resources: a concrete resource plus an RFC 6570 template. Reads
+    // run through `authorizeResource` and are recorded in the audit log.
+    resources,
+    resourceTemplates,
+    authorizeResource,
+    auditResources: { read: true },
+    // Advertise subscription capability. The gateway tracks per-session
+    // subscribe/unsubscribe state; this example's transport doesn't push,
+    // so a real deployment would deliver notifications/resources/updated
+    // over its own channel (see docs/resources.md).
+    resourceSubscriptions: { subscribe: true, listChanged: true },
   }),
 );
 // Mount BOTH /mcp/ and /mcp (no trailing slash). claude.ai (and
@@ -178,7 +226,11 @@ const mcpHandlerCorsArray = httpAction(async (ctx, request) =>
   }),
 );
 for (const method of ["POST", "GET", "DELETE", "OPTIONS"] as const) {
-  http.route({ path: "/mcp-cors-array/", method, handler: mcpHandlerCorsArray });
+  http.route({
+    path: "/mcp-cors-array/",
+    method,
+    handler: mcpHandlerCorsArray,
+  });
 }
 
 // Test-only mount exercising the requireAuth gate. An all-private
