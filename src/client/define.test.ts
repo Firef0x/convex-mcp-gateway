@@ -4,6 +4,7 @@ import type { FunctionReference } from "convex/server";
 import {
   defineMcpQuery,
   defineMcpResource,
+  defineMcpResourceTemplate,
   mcpCallerValidator,
   type McpCaller,
 } from "./index.js";
@@ -251,6 +252,104 @@ describe("defineMcpResource", () => {
         uri: "docs://missing-read",
         name: "Missing Read",
       }),
+    ).toThrow(/read must be a function/);
+  });
+});
+
+describe("defineMcpResourceTemplate", () => {
+  test("creates a template provider that matches and extracts params", () => {
+    const template = defineMcpResourceTemplate({
+      uriTemplate: "db://{table}/{id}",
+      name: "Row",
+      description: "A database row",
+      mimeType: "application/json",
+      read: async () => null,
+    });
+
+    expect(template.template).toEqual({
+      uriTemplate: "db://{table}/{id}",
+      name: "Row",
+      description: "A database row",
+      mimeType: "application/json",
+    });
+    expect(template.match("db://users/42")).toEqual({
+      table: "users",
+      id: "42",
+    });
+    // A variable matches a single path segment, so an extra segment fails.
+    expect(template.match("db://users/42/extra")).toBeNull();
+    expect(template.match("other://users/42")).toBeNull();
+  });
+
+  test("matcher handles edge cases: empty segments, regex-special literals, adjacency", () => {
+    const multi = defineMcpResourceTemplate({
+      uriTemplate: "db://{table}/{id}",
+      name: "Row",
+    });
+    // `[^/]+` requires at least one char per segment, so a trailing empty
+    // segment does not match.
+    expect(multi.match("db://users/")).toBeNull();
+    expect(multi.match("db:///42")).toBeNull();
+
+    // Regex-special characters in the literal portion are escaped, so they
+    // match literally rather than as metacharacters.
+    const special = defineMcpResourceTemplate({
+      uriTemplate: "v1.0+api://{id}",
+      name: "Versioned",
+    });
+    expect(special.match("v1.0+api://42")).toEqual({ id: "42" });
+    // The `.` must be literal: `v1X0+api://42` must NOT match.
+    expect(special.match("v1X0+api://42")).toBeNull();
+
+    // Adjacent placeholders with no delimiter are greedy/ambiguous; pin the
+    // documented-as-undefined-but-deterministic behavior: the first capture
+    // takes all but the last char of the segment.
+    const adjacent = defineMcpResourceTemplate({
+      uriTemplate: "x://{a}{b}",
+      name: "Adjacent",
+    });
+    expect(adjacent.match("x://hello")).toEqual({ a: "hell", b: "o" });
+  });
+
+  test("supports listing-only templates (no read handler)", () => {
+    const template = defineMcpResourceTemplate({
+      uriTemplate: "file://{path}",
+      name: "File",
+    });
+    expect(template.read).toBeUndefined();
+    expect(template.match("file://readme")).toEqual({ path: "readme" });
+  });
+
+  test("rejects invalid template declarations", () => {
+    const call = defineMcpResourceTemplate as unknown as (
+      config: unknown,
+    ) => unknown;
+
+    expect(() => call({ uriTemplate: "", name: "Empty" })).toThrow(
+      /uriTemplate must be a non-empty string/,
+    );
+    expect(() => call({ uriTemplate: "db://{table}", name: "" })).toThrow(
+      /name must be a non-empty string/,
+    );
+    // No placeholder → should be a concrete resource instead.
+    expect(() => call({ uriTemplate: "db://static", name: "Static" })).toThrow(
+      /contains no .* placeholder/,
+    );
+    // Unsupported RFC 6570 operator.
+    expect(() => call({ uriTemplate: "file://{+path}", name: "Op" })).toThrow(
+      /unsupported/i,
+    );
+    // Unclosed expression.
+    expect(() => call({ uriTemplate: "db://{table", name: "Unclosed" })).toThrow(
+      /unclosed/i,
+    );
+    // Duplicate variable.
+    expect(() =>
+      call({ uriTemplate: "db://{id}/{id}", name: "Dup" }),
+    ).toThrow(/repeats the variable/);
+    // read present but not a function.
+    expect(() =>
+      call({ uriTemplate: "db://{id}", name: "BadRead", read: "nope" }),
     ).toThrow(/read must be a function/);
   });
 });

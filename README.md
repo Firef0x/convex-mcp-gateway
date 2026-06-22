@@ -193,6 +193,8 @@ only reacts to a 401. See
   flow, sequence diagrams
 - **[Authorization](./docs/authorization.md)**: authorizer contract,
   `mode: "list"` vs `"call"`, scope/role recipes
+- **[Resources & templates](./docs/resources.md)**: concrete resources
+  vs RFC 6570 templates, `resources/templates/list`, read resolution
 - **[OAuth 2.1 setup](./docs/oauth.md)**: RFC 9728 discovery, host-side
   mount, multi-tenant, `requireAuth` for all-private servers
 - **[OAuth bridge mode](./docs/oauth-bridge.md)**: opt-in DCR + AS

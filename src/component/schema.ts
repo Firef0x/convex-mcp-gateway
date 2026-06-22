@@ -21,6 +21,7 @@ export const auditEntryTypeValidator = v.union(
 export const resourceAuditOperationValidator = v.union(
   v.literal("list"),
   v.literal("read"),
+  v.literal("templates_list"),
 );
 
 export default defineSchema({

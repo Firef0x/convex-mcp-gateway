@@ -44,7 +44,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           errorMessage?: string;
           identitySubject: string | null;
           outcome: "allowed" | "denied" | "error";
-          resourceOperation?: "list" | "read";
+          resourceOperation?: "list" | "read" | "templates_list";
           resourceUri?: string;
           toolKind?: "query" | "mutation" | "action";
           toolName?: string;
@@ -68,7 +68,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           errorMessage?: string;
           identitySubject: string | null;
           outcome: "allowed" | "denied" | "error";
-          resourceOperation: "list" | "read";
+          resourceOperation: "list" | "read" | "templates_list";
           resourceUri?: string;
         },
         string,

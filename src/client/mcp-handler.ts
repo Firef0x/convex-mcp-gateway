@@ -106,12 +106,65 @@ export type McpResourceProvider = {
   ) => Promise<McpResourceContent[] | null>;
 };
 
+/**
+ * An RFC 6570 resource template advertised via `resources/templates/list`.
+ * `uriTemplate` is a level-1 template (simple `{var}` placeholders, each
+ * matching a single URI path segment); clients expand it to a concrete URI
+ * and read it through `resources/read`.
+ */
+export type McpResourceTemplate = {
+  uriTemplate: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+};
+
+/**
+ * Server-side read handler for a resource template: invoked when a
+ * `resources/read` URI matches the template, with the extracted template
+ * variables in `params`. Returns `null` to decline the URI (a later
+ * template or a not-found is then used).
+ */
+export type McpResourceTemplateReadHandler = (
+  ctx: McpHandlerCtx,
+  args: {
+    uri: string;
+    params: Record<string, string>;
+    identity: { subject: string; claims?: Record<string, unknown> };
+  },
+) => Promise<McpResourceContent[] | null>;
+
+/**
+ * Runtime form of a resource template, as produced by
+ * `defineMcpResourceTemplate`. `match` returns the extracted template
+ * variables when a concrete URI matches `template.uriTemplate`, or `null`
+ * when it doesn't. `read` is optional: present means the gateway resolves
+ * expanded-URI reads server-side; absent means the template is
+ * listing-only (the client reads the expansion via another provider).
+ */
+export type McpResourceTemplateProvider = {
+  template: McpResourceTemplate;
+  match: (uri: string) => Record<string, string> | null;
+  read?: McpResourceTemplateReadHandler;
+};
+
 export interface McpResourceAuthorizerArgs {
   /**
    * `"resource_list"` when filtering `resources/list`,
-   * `"resource_read"` before a concrete `resources/read` handler runs.
+   * `"resource_read"` before a `resources/read` handler runs,
+   * `"resource_templates_list"` when filtering `resources/templates/list`
+   * (here `resourceUri` carries the template's `uriTemplate`).
+   *
+   * Note on templates: `resources/read` of a template-expanded URI is
+   * authorized under `"resource_read"` with the **concrete expanded URI**
+   * (e.g. `weather://london/current`), not the `uriTemplate`, and with
+   * `resourceMetadata: null`. So a template hidden at list time
+   * (`"resource_templates_list"` → denied) is NOT automatically unreadable:
+   * `"resource_read"` is the read gate for both concrete and template URIs.
+   * Enforce read access in the `resource_read` branch (match the URI shape)
+   * and/or inside the template's own `read` handler.
    */
-  mode: "resource_list" | "resource_read";
+  mode: "resource_list" | "resource_read" | "resource_templates_list";
   resourceUri: string;
   /**
    * Free-form metadata attached to a registered resource. Runtime-only
@@ -136,6 +189,7 @@ export type McpResourceAuditOption =
   | {
       list?: boolean;
       read?: boolean;
+      templatesList?: boolean;
     };
 
 /**
@@ -208,6 +262,14 @@ export interface HandleMcpRequestOptions {
    */
   resources?: McpResourceProvider[];
   /**
+   * Optional MCP resource templates (RFC 6570) exposed by this gateway.
+   * Advertised via `resources/templates/list` and, for templates declared
+   * with a `read` handler, resolved server-side when `resources/read`
+   * requests a URI that matches the template (concrete resources take
+   * precedence). Build these with `defineMcpResourceTemplate`.
+   */
+  resourceTemplates?: McpResourceTemplateProvider[];
+  /**
    * Optional central authorization hook for MCP resources. If omitted,
    * authenticated callers can list/read all resources exposed by providers.
    * If set, `resources/list` filters resources through `resource_list`, and
@@ -216,8 +278,10 @@ export interface HandleMcpRequestOptions {
   authorizeResource?: McpResourceAuthorizerHandler;
   /**
    * Opt-in audit for MCP resource operations. Defaults to `false`.
-   * `true` records both `resources/list` and `resources/read`; object form
-   * enables each operation independently. Resource contents are never stored.
+   * `true` records `resources/list`, `resources/read`, and
+   * `resources/templates/list`; the object form (`{ list, read,
+   * templatesList }`) enables each operation independently. Resource
+   * contents are never stored.
    */
   auditResources?: McpResourceAuditOption;
   /**
@@ -541,6 +605,19 @@ function publicResource(resource: RegisteredResource): McpResource {
   };
 }
 
+function publicResourceTemplate(
+  template: McpResourceTemplate,
+): McpResourceTemplate {
+  return {
+    uriTemplate: template.uriTemplate,
+    name: template.name,
+    ...(template.description !== undefined
+      ? { description: template.description }
+      : {}),
+    ...(template.mimeType !== undefined ? { mimeType: template.mimeType } : {}),
+  };
+}
+
 function registeredResourceCandidate(
   resource: RegisteredResource,
 ): ResourceCandidate {
@@ -552,7 +629,7 @@ function registeredResourceCandidate(
 
 function shouldAuditResource(
   auditResources: McpResourceAuditOption | undefined,
-  operation: "list" | "read",
+  operation: "list" | "read" | "templatesList",
 ): boolean {
   if (auditResources === true) return true;
   if (!auditResources) return false;
@@ -564,7 +641,7 @@ async function safeRecordResourceAudit(
   component: ComponentApi,
   entry: {
     resourceUri?: string;
-    resourceOperation: "list" | "read";
+    resourceOperation: "list" | "read" | "templates_list";
     args: unknown;
     outcome: "allowed" | "denied" | "error";
     identitySubject: string | null;
@@ -926,7 +1003,8 @@ async function handlePost(
         capabilities: {
           tools: {},
           ...(registeredResources.length > 0 ||
-          (options.resources ?? []).length > 0
+          (options.resources ?? []).length > 0 ||
+          (options.resourceTemplates ?? []).length > 0
             ? { resources: {} }
             : {}),
         },
@@ -937,11 +1015,16 @@ async function handlePost(
     case "resources/list": {
       const start = Date.now();
       const providers = options.resources ?? [];
+      const templates = options.resourceTemplates ?? [];
       const registeredResources = (await ctx.runQuery(
         component.registry.listResources,
         {},
       )) as RegisteredResource[];
-      if (providers.length === 0 && registeredResources.length === 0) {
+      if (
+        providers.length === 0 &&
+        registeredResources.length === 0 &&
+        templates.length === 0
+      ) {
         body = jsonErrorEnvelope(
           message.id,
           -32601,
@@ -1053,14 +1136,104 @@ async function handlePost(
       break;
     }
 
+    case "resources/templates/list": {
+      const start = Date.now();
+      const templates = options.resourceTemplates ?? [];
+      // Templates are a distinct capability surface: when none are
+      // configured the method is unsupported, even if concrete resources
+      // exist. (Concrete resources still serve resources/list + read.)
+      if (templates.length === 0) {
+        body = jsonErrorEnvelope(
+          message.id,
+          -32601,
+          `Unsupported method: ${message.method}`,
+        );
+        break;
+      }
+      if (!identity) {
+        if (shouldAuditResource(options.auditResources, "templatesList")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceOperation: "templates_list",
+            args: null,
+            outcome: "denied",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+            errorCode: UNAUTHORIZED,
+            errorMessage: "Unauthorized: authentication required",
+          });
+        }
+        body = jsonErrorEnvelope(
+          message.id,
+          UNAUTHORIZED,
+          "Unauthorized: authentication required",
+        );
+        break;
+      }
+      try {
+        const resourceTemplates = [];
+        for (const provider of templates) {
+          const { decision, threw } = await safeAuthorizeResource(
+            options.authorizeResource,
+            ctx,
+            {
+              mode: "resource_templates_list",
+              resourceUri: provider.template.uriTemplate,
+              resourceMetadata: null,
+              identity,
+            },
+          );
+          if (threw) {
+            console.error(
+              "[mcp-gateway] resource authorizer threw during resources/templates/list for template",
+              provider.template.uriTemplate,
+              decision.reason,
+            );
+          }
+          if (decision.allowed) {
+            resourceTemplates.push(publicResourceTemplate(provider.template));
+          }
+        }
+        if (shouldAuditResource(options.auditResources, "templatesList")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceOperation: "templates_list",
+            args: { resourceTemplateCount: resourceTemplates.length },
+            outcome: "allowed",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+          });
+        }
+        body = jsonResultEnvelope(message.id, { resourceTemplates });
+      } catch (err) {
+        const messageText = err instanceof Error ? err.message : String(err);
+        if (shouldAuditResource(options.auditResources, "templatesList")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceOperation: "templates_list",
+            args: null,
+            outcome: "error",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+            errorCode: INTERNAL_ERROR,
+            errorMessage: messageText,
+          });
+        }
+        body = jsonErrorEnvelope(message.id, INTERNAL_ERROR, messageText);
+      }
+      break;
+    }
+
     case "resources/read": {
       const start = Date.now();
       const providers = options.resources ?? [];
+      const templates = options.resourceTemplates ?? [];
       const registeredResources = (await ctx.runQuery(
         component.registry.listResources,
         {},
       )) as RegisteredResource[];
-      if (providers.length === 0 && registeredResources.length === 0) {
+      if (
+        providers.length === 0 &&
+        registeredResources.length === 0 &&
+        templates.length === 0
+      ) {
         body = jsonErrorEnvelope(
           message.id,
           -32601,
@@ -1151,8 +1324,27 @@ async function handlePost(
         // Track a provider throw so a buggy provider can't mask a resource
         // a later provider could serve. Providers decline a URI by returning
         // null; a throw must not be *more* powerful than declining, so we
-        // isolate it, log it, and keep trying the remaining providers.
+        // isolate it, log it, and keep trying the remaining providers (then
+        // the templates).
         let providerError: string | null = null;
+        const serveContents = async (contents: McpResourceContent[]) => {
+          if (shouldAuditResource(options.auditResources, "read")) {
+            await safeRecordResourceAudit(ctx, component, {
+              resourceUri: uri,
+              resourceOperation: "read",
+              args: null,
+              outcome: "allowed",
+              identitySubject: auditIdentitySubject,
+              durationMs: Date.now() - start,
+            });
+          }
+          body = jsonResultEnvelope(message.id, { contents });
+          found = true;
+        };
+
+        // Concrete providers first: a concrete resource always wins over a
+        // template that might also match the same URI, so dispatch stays
+        // unambiguous.
         for (const provider of providers) {
           let contents: McpResourceContent[] | null;
           try {
@@ -1168,26 +1360,43 @@ async function handlePost(
             continue;
           }
           if (contents) {
-            if (shouldAuditResource(options.auditResources, "read")) {
-              await safeRecordResourceAudit(ctx, component, {
-                resourceUri: uri,
-                resourceOperation: "read",
-                args: null,
-                outcome: "allowed",
-                identitySubject: auditIdentitySubject,
-                durationMs: Date.now() - start,
-              });
-            }
-            body = jsonResultEnvelope(message.id, { contents });
-            found = true;
+            await serveContents(contents);
             break;
           }
         }
+
+        // Template-backed resolution, only when no concrete provider served.
+        // A template with no `read` handler is listing-only and skipped here.
         if (!found) {
-          // Distinguish "every provider cleanly declined" (a genuine
-          // not-found → INVALID_PARAMS) from "a provider threw and no
-          // provider served" (a real fault → INTERNAL_ERROR), so a
-          // provider bug isn't reported to the client as a benign miss.
+          for (const provider of templates) {
+            if (!provider.read) continue;
+            const params = provider.match(uri);
+            if (!params) continue;
+            let contents: McpResourceContent[] | null;
+            try {
+              contents = await provider.read(ctx, { uri, params, identity });
+            } catch (err) {
+              providerError = err instanceof Error ? err.message : String(err);
+              console.error(
+                "[mcp-gateway] resource template threw during resources/read",
+                provider.template.uriTemplate,
+                uri,
+                err,
+              );
+              continue;
+            }
+            if (contents) {
+              await serveContents(contents);
+              break;
+            }
+          }
+        }
+
+        if (!found) {
+          // Distinguish "everything cleanly declined" (a genuine not-found →
+          // INVALID_PARAMS) from "a provider/template threw and nothing
+          // served" (a real fault → INTERNAL_ERROR), so a bug isn't reported
+          // to the client as a benign miss.
           const code = providerError ? INTERNAL_ERROR : INVALID_PARAMS;
           const errorMessage = providerError ?? `Resource not found: ${uri}`;
           if (shouldAuditResource(options.auditResources, "read")) {

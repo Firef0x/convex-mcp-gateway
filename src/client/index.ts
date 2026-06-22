@@ -28,6 +28,9 @@ import {
   type McpResource,
   type McpResourceContent,
   type McpResourceProvider,
+  type McpResourceTemplate,
+  type McpResourceTemplateProvider,
+  type McpResourceTemplateReadHandler,
 } from "./mcp-handler.js";
 
 export type {
@@ -52,6 +55,9 @@ export type {
   McpResource,
   McpResourceContent,
   McpResourceProvider,
+  McpResourceTemplate,
+  McpResourceTemplateProvider,
+  McpResourceTemplateReadHandler,
 } from "./mcp-handler.js";
 export {
   buildProtectedResourceMetadataUrl,
@@ -410,6 +416,132 @@ export function defineMcpResource(
       if (args.uri !== config.uri) return null;
       return await config.read(ctx, args);
     },
+  };
+}
+
+export type McpResourceTemplateConfig = McpResourceTemplate & {
+  /**
+   * Optional server-side read handler for URIs that match `uriTemplate`.
+   * When present, the gateway resolves matching `resources/read` requests by
+   * calling this with the extracted `params` (concrete resources still take
+   * precedence). When omitted, the template is listing-only: clients expand
+   * it and read the concrete URI through another provider.
+   */
+  read?: McpResourceTemplateReadHandler;
+};
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Compile an RFC 6570 *level-1* URI template (simple `{var}` placeholders)
+ * into a matcher. Each `{var}` matches exactly one URI path segment (no
+ * `/`) — the correct behavior for simple string expansion, where reserved
+ * characters are percent-encoded and so never appear literally. Operators
+ * (`{+var}`, `{#var}`, `{/var}`, `{?var}`, `{&var}`, `{;var}`, `{.var}`)
+ * and comma-separated variable lists (`{a,b}`) are intentionally
+ * unsupported in this phase: they throw at definition time so an
+ * unsupported template fails loudly instead of silently never matching.
+ */
+function compileUriTemplate(
+  uriTemplate: string,
+): (uri: string) => Record<string, string> | null {
+  const varNames: string[] = [];
+  let pattern = "";
+  let i = 0;
+  while (i < uriTemplate.length) {
+    const ch = uriTemplate[i];
+    if (ch === "{") {
+      const end = uriTemplate.indexOf("}", i);
+      if (end === -1) {
+        throw new Error(
+          `MCP resource template "${uriTemplate}" has an unclosed "{" expression.`,
+        );
+      }
+      const expr = uriTemplate.slice(i + 1, end);
+      if (!/^[A-Za-z0-9_]+$/.test(expr)) {
+        throw new Error(
+          `MCP resource template "${uriTemplate}" uses an unsupported ` +
+            `expression "{${expr}}". Only simple level-1 placeholders ` +
+            `("{name}", characters A-Z a-z 0-9 _) are supported; operators ` +
+            `(+ # . / ; ? &) and comma lists ("{a,b}") are not.`,
+        );
+      }
+      if (varNames.includes(expr)) {
+        throw new Error(
+          `MCP resource template "${uriTemplate}" repeats the variable ` +
+            `"{${expr}}"; each variable must be unique.`,
+        );
+      }
+      varNames.push(expr);
+      pattern += `(?<${expr}>[^/]+)`;
+      i = end + 1;
+    } else {
+      pattern += escapeRegExp(ch);
+      i += 1;
+    }
+  }
+  if (varNames.length === 0) {
+    throw new Error(
+      `MCP resource template "${uriTemplate}" contains no "{var}" ` +
+        `placeholder; use defineMcpResource for a concrete resource instead.`,
+    );
+  }
+  const regex = new RegExp(`^${pattern}$`);
+  return (uri: string) => {
+    const match = regex.exec(uri);
+    if (!match || !match.groups) return null;
+    return { ...match.groups };
+  };
+}
+
+/**
+ * Declare an MCP resource template (RFC 6570). The returned provider can be
+ * passed to `gateway.handleMcpRequest({ resourceTemplates: [...] })`: it is
+ * advertised via `resources/templates/list`, and — when a `read` handler is
+ * supplied — used to resolve `resources/read` requests whose URI matches
+ * `uriTemplate` (concrete resources declared via `defineMcpResource` always
+ * take precedence).
+ *
+ * Use a template when resources are parameterized (e.g.
+ * `weather://{city}/current`); use `defineMcpResource` for a fixed, concrete
+ * URI. Only simple level-1 `{var}` placeholders are supported; an
+ * unsupported template throws here at definition time.
+ */
+export function defineMcpResourceTemplate(
+  config: McpResourceTemplateConfig,
+): McpResourceTemplateProvider {
+  if (
+    typeof config.uriTemplate !== "string" ||
+    config.uriTemplate.length === 0
+  ) {
+    throw new Error(
+      "MCP resource template uriTemplate must be a non-empty string",
+    );
+  }
+  if (typeof config.name !== "string" || config.name.length === 0) {
+    throw new Error("MCP resource template name must be a non-empty string");
+  }
+  if (config.read !== undefined && typeof config.read !== "function") {
+    throw new Error(
+      "MCP resource template read must be a function when provided",
+    );
+  }
+  // Compile eagerly so an invalid uriTemplate fails at declaration time.
+  const match = compileUriTemplate(config.uriTemplate);
+  const template: McpResourceTemplate = {
+    uriTemplate: config.uriTemplate,
+    name: config.name,
+    ...(config.description !== undefined
+      ? { description: config.description }
+      : {}),
+    ...(config.mimeType !== undefined ? { mimeType: config.mimeType } : {}),
+  };
+  return {
+    template,
+    match,
+    ...(config.read !== undefined ? { read: config.read } : {}),
   };
 }
 

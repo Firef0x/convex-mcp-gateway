@@ -1,6 +1,10 @@
 import { describe, expect, test } from "vitest";
 import type { ComponentApi } from "../component/_generated/component.js";
-import { defineMcpResource, McpGateway } from "./index.js";
+import {
+  defineMcpResource,
+  defineMcpResourceTemplate,
+  McpGateway,
+} from "./index.js";
 import { handleMcpRequest, type McpResourceProvider } from "./mcp-handler.js";
 
 function createComponent() {
@@ -996,5 +1000,542 @@ describe("handleMcpRequest resources", () => {
     expect(await readJson(read)).toMatchObject({
       result: { contents: [{ uri: "docs://served", text: "served" }] },
     });
+  });
+
+  test("resources/templates/list returns configured templates", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const template = defineMcpResourceTemplate({
+      uriTemplate: "weather://{city}/current",
+      name: "Current weather",
+      description: "Live weather by city",
+      mimeType: "application/json",
+      read: async (_ctx, args) => [
+        { uri: args.uri, text: JSON.stringify(args.params) },
+      ],
+    });
+
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [template],
+      },
+    );
+    // Templates alone advertise the resources capability.
+    expect((await readJson(init)).result?.capabilities).toMatchObject({
+      resources: {},
+    });
+    const sessionId = init.headers.get("mcp-session-id");
+    expect(sessionId).toBeTruthy();
+
+    const list = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 2, method: "resources/templates/list" }, sessionId!),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [template],
+      },
+    );
+    expect(await readJson(list)).toMatchObject({
+      result: {
+        resourceTemplates: [
+          {
+            uriTemplate: "weather://{city}/current",
+            name: "Current weather",
+            description: "Live weather by city",
+            mimeType: "application/json",
+          },
+        ],
+      },
+    });
+  });
+
+  test("resources/templates/list is unsupported when no templates configured", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const resource = defineMcpResource({
+      uri: "docs://concrete",
+      name: "Concrete",
+      read: async () => [{ uri: "docs://concrete", text: "x" }],
+    });
+
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      { authorize: async () => ({ allowed: true }), resources: [resource] },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+
+    const list = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 2, method: "resources/templates/list" }, sessionId!),
+      component,
+      { authorize: async () => ({ allowed: true }), resources: [resource] },
+    );
+    // Concrete resources exist but templates do not: the dedicated method
+    // is unsupported rather than returning an empty list.
+    expect(await readJson(list)).toMatchObject({
+      error: { code: -32601 },
+    });
+  });
+
+  test("resources/read resolves a URI through a matching template", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const template = defineMcpResourceTemplate({
+      uriTemplate: "weather://{city}/current",
+      name: "Current weather",
+      read: async (_ctx, args) => [
+        {
+          uri: args.uri,
+          mimeType: "application/json",
+          text: JSON.stringify({ city: args.params.city }),
+        },
+      ],
+    });
+
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [template],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+
+    const read = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest(
+        {
+          id: 2,
+          method: "resources/read",
+          params: { uri: "weather://london/current" },
+        },
+        sessionId!,
+      ),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [template],
+      },
+    );
+    expect(await readJson(read)).toMatchObject({
+      result: {
+        contents: [
+          {
+            uri: "weather://london/current",
+            mimeType: "application/json",
+            text: '{"city":"london"}',
+          },
+        ],
+      },
+    });
+
+    // A URI that matches no template (and no concrete provider) is not found.
+    const miss = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest(
+        {
+          id: 3,
+          method: "resources/read",
+          params: { uri: "weather://london/history" },
+        },
+        sessionId!,
+      ),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [template],
+      },
+    );
+    expect(await readJson(miss)).toMatchObject({
+      error: { code: -32602, message: "Resource not found: weather://london/history" },
+    });
+  });
+
+  test("concrete resources take precedence over a matching template", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const concrete = defineMcpResource({
+      uri: "weather://london/current",
+      name: "London weather",
+      read: async () => [{ uri: "weather://london/current", text: "concrete" }],
+    });
+    const template = defineMcpResourceTemplate({
+      uriTemplate: "weather://{city}/current",
+      name: "Current weather",
+      read: async () => [
+        { uri: "weather://london/current", text: "from-template" },
+      ],
+    });
+
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [concrete],
+        resourceTemplates: [template],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+
+    const read = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest(
+        {
+          id: 2,
+          method: "resources/read",
+          params: { uri: "weather://london/current" },
+        },
+        sessionId!,
+      ),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [concrete],
+        resourceTemplates: [template],
+      },
+    );
+    // The concrete provider serves first; the template never runs.
+    expect(await readJson(read)).toMatchObject({
+      result: { contents: [{ text: "concrete" }] },
+    });
+  });
+
+  test("authorizeResource filters resources/templates/list and audits it", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    const visible = defineMcpResourceTemplate({
+      uriTemplate: "weather://{city}/current",
+      name: "Weather",
+      read: async () => null,
+    });
+    const hidden = defineMcpResourceTemplate({
+      uriTemplate: "secret://{id}",
+      name: "Secret",
+      read: async () => null,
+    });
+
+    const init = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [visible, hidden],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+
+    const list = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 2, method: "resources/templates/list" }, sessionId!),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [visible, hidden],
+        authorizeResource: async (_ctx, args) => ({
+          allowed:
+            args.mode === "resource_templates_list" &&
+            args.resourceUri.startsWith("secret://")
+              ? false
+              : true,
+        }),
+        auditResources: { templatesList: true },
+      },
+    );
+    expect(await readJson(list)).toMatchObject({
+      result: {
+        resourceTemplates: [{ uriTemplate: "weather://{city}/current" }],
+      },
+    });
+    expect(state.resourceAuditEntries).toMatchObject([
+      {
+        resourceOperation: "templates_list",
+        outcome: "allowed",
+        identitySubject: "user-1",
+        args: { resourceTemplateCount: 1 },
+      },
+    ]);
+  });
+
+  test("resources/read: a throwing template surfaces -32603, not a benign miss", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    const template = defineMcpResourceTemplate({
+      uriTemplate: "weather://{city}/current",
+      name: "Weather",
+      read: async () => {
+        throw new Error("upstream weather API down");
+      },
+    });
+
+    const init = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [template],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+
+    const read = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest(
+        {
+          id: 2,
+          method: "resources/read",
+          params: { uri: "weather://london/current" },
+        },
+        sessionId!,
+      ),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [template],
+        auditResources: { read: true },
+      },
+    );
+    // A template throw is a real fault, not a "not found".
+    expect(await readJson(read)).toMatchObject({
+      error: { code: -32603, message: "upstream weather API down" },
+    });
+    expect(state.resourceAuditEntries).toMatchObject([
+      {
+        resourceUri: "weather://london/current",
+        resourceOperation: "read",
+        outcome: "error",
+        errorCode: -32603,
+      },
+    ]);
+  });
+
+  test("resources/read: a throwing template does not mask a later serving template", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const broken = defineMcpResourceTemplate({
+      uriTemplate: "weather://{city}/current",
+      name: "Broken",
+      read: async () => {
+        throw new Error("boom");
+      },
+    });
+    const healthy = defineMcpResourceTemplate({
+      uriTemplate: "weather://{city}/current",
+      name: "Healthy",
+      read: async (_ctx, args) => [{ uri: args.uri, text: args.params.city }],
+    });
+
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [broken, healthy],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+
+    const read = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest(
+        {
+          id: 2,
+          method: "resources/read",
+          params: { uri: "weather://paris/current" },
+        },
+        sessionId!,
+      ),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [broken, healthy],
+      },
+    );
+    expect(await readJson(read)).toMatchObject({
+      result: { contents: [{ uri: "weather://paris/current", text: "paris" }] },
+    });
+  });
+
+  test("resources/read: a template that matches but declines (null) falls through to not-found", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const template = defineMcpResourceTemplate({
+      uriTemplate: "weather://{city}/current",
+      name: "Weather",
+      read: async () => null,
+    });
+
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [template],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+
+    const read = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest(
+        {
+          id: 2,
+          method: "resources/read",
+          params: { uri: "weather://berlin/current" },
+        },
+        sessionId!,
+      ),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [template],
+      },
+    );
+    // A clean decline is a miss, not a fault.
+    expect(await readJson(read)).toMatchObject({
+      error: {
+        code: -32602,
+        message: "Resource not found: weather://berlin/current",
+      },
+    });
+  });
+
+  test("resources/read: a listing-only template (no read) does not resolve reads", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const template = defineMcpResourceTemplate({
+      uriTemplate: "weather://{city}/current",
+      name: "Weather",
+      // no read handler → listing-only
+    });
+
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [template],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+
+    const read = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest(
+        {
+          id: 2,
+          method: "resources/read",
+          params: { uri: "weather://rome/current" },
+        },
+        sessionId!,
+      ),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [template],
+      },
+    );
+    expect(await readJson(read)).toMatchObject({
+      error: {
+        code: -32602,
+        message: "Resource not found: weather://rome/current",
+      },
+    });
+  });
+
+  test("resources/templates/list rejects anonymous callers and audits the denial", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    // Make this caller anonymous for the whole exchange.
+    (
+      state.ctx.auth as { getUserIdentity: () => Promise<unknown> }
+    ).getUserIdentity = async () => null;
+    const template = defineMcpResourceTemplate({
+      uriTemplate: "weather://{city}/current",
+      name: "Weather",
+      read: async () => null,
+    });
+
+    const init = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [template],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+
+    const list = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 2, method: "resources/templates/list" }, sessionId!),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [template],
+        auditResources: { templatesList: true },
+      },
+    );
+    expect(await readJson(list)).toMatchObject({
+      error: { code: -32001, message: "Unauthorized: authentication required" },
+    });
+    expect(state.resourceAuditEntries).toMatchObject([
+      {
+        resourceOperation: "templates_list",
+        outcome: "denied",
+        identitySubject: null,
+        errorCode: -32001,
+      },
+    ]);
+  });
+
+  test("templates-only deployment: resources/list returns an empty list, not -32601", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const template = defineMcpResourceTemplate({
+      uriTemplate: "weather://{city}/current",
+      name: "Weather",
+      read: async () => null,
+    });
+
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [template],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+
+    const list = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 2, method: "resources/list" }, sessionId!),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [template],
+      },
+    );
+    // Templates make the resources capability "supported", so resources/list
+    // is a normal empty list rather than an unsupported-method error.
+    expect(await readJson(list)).toMatchObject({ result: { resources: [] } });
   });
 });
