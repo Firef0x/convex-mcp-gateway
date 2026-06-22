@@ -137,6 +137,24 @@ export default defineSchema({
     .index("by_lastSeenAt", ["lastSeenAt"]),
 
   /**
+   * Opt-in MCP resource subscriptions, one row per (session, resource URI).
+   * Populated by `resources/subscribe` and cleared by `resources/unsubscribe`
+   * (and cascaded on session teardown). The gateway's own HTTP transport
+   * cannot push `notifications/resources/updated`, so this table only
+   * *records intent*: a host that fronts the gateway with a push-capable
+   * transport reads it via `listResourceSubscribers` to decide whom to
+   * notify. Rows orphaned by idle-pruned sessions are cleaned by
+   * `pruneOrphanResourceSubscriptions`.
+   */
+  subscriptions: defineTable({
+    sessionId: v.string(),
+    uri: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_session_uri", ["sessionId", "uri"])
+    .index("by_uri", ["uri"]),
+
+  /**
    * Shared audit log for tool calls and opt-in resource operations.
    * Tool rows capture the tool name/kind, outcome, duration, and
    * optionally redacted args. Resource rows capture operation metadata

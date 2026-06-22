@@ -167,4 +167,177 @@ describe("sessions", () => {
       vi.useRealTimers();
     });
   });
+
+  test("subscribeResource records, is idempotent, and listResourceSubscribers reports", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      expect(
+        await ctx.runMutation(api.sessions.subscribeResource, {
+          sessionId: "s1",
+          uri: "docs://a",
+        }),
+      ).toBe("subscribed");
+      // Idempotent: same pair again does not insert a duplicate.
+      expect(
+        await ctx.runMutation(api.sessions.subscribeResource, {
+          sessionId: "s1",
+          uri: "docs://a",
+        }),
+      ).toBe("exists");
+      await ctx.runMutation(api.sessions.subscribeResource, {
+        sessionId: "s2",
+        uri: "docs://a",
+      });
+
+      const subscribers = await ctx.runQuery(
+        api.sessions.listResourceSubscribers,
+        { uri: "docs://a" },
+      );
+      expect([...subscribers].sort()).toEqual(["s1", "s2"]);
+      expect(
+        await ctx.runQuery(api.sessions.listResourceSubscribers, {
+          uri: "docs://other",
+        }),
+      ).toEqual([]);
+    });
+  });
+
+  test("unsubscribeResource removes a subscription and reports presence", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      await ctx.runMutation(api.sessions.subscribeResource, {
+        sessionId: "s1",
+        uri: "docs://a",
+      });
+      expect(
+        await ctx.runMutation(api.sessions.unsubscribeResource, {
+          sessionId: "s1",
+          uri: "docs://a",
+        }),
+      ).toBe(true);
+      // Already gone → false.
+      expect(
+        await ctx.runMutation(api.sessions.unsubscribeResource, {
+          sessionId: "s1",
+          uri: "docs://a",
+        }),
+      ).toBe(false);
+      expect(
+        await ctx.runQuery(api.sessions.listResourceSubscribers, {
+          uri: "docs://a",
+        }),
+      ).toEqual([]);
+    });
+  });
+
+  test("deleteSession cascades its resource subscriptions", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      await ctx.runMutation(api.sessions.createSession, {
+        sessionId: "s1",
+        protocolVersion: "2025-06-18",
+        identitySubject: null,
+      });
+      await ctx.runMutation(api.sessions.subscribeResource, {
+        sessionId: "s1",
+        uri: "docs://a",
+      });
+      await ctx.runMutation(api.sessions.subscribeResource, {
+        sessionId: "s1",
+        uri: "docs://b",
+      });
+
+      expect(
+        await ctx.runMutation(api.sessions.deleteSession, {
+          sessionId: "s1",
+          callerIdentitySubject: null,
+        }),
+      ).toBe("deleted");
+
+      // Both subscriptions are gone with the session.
+      expect(
+        await ctx.runQuery(api.sessions.listResourceSubscribers, {
+          uri: "docs://a",
+        }),
+      ).toEqual([]);
+      expect(
+        await ctx.runQuery(api.sessions.listResourceSubscribers, {
+          uri: "docs://b",
+        }),
+      ).toEqual([]);
+    });
+  });
+
+  test("pruneOrphanResourceSubscriptions drops rows for nonexistent sessions only", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      // 'live' has a real session; 'ghost' does not.
+      await ctx.runMutation(api.sessions.createSession, {
+        sessionId: "live",
+        protocolVersion: "2025-06-18",
+        identitySubject: null,
+      });
+      await ctx.runMutation(api.sessions.subscribeResource, {
+        sessionId: "live",
+        uri: "docs://a",
+      });
+      await ctx.runMutation(api.sessions.subscribeResource, {
+        sessionId: "ghost",
+        uri: "docs://a",
+      });
+
+      const { deleted, cursor } = await ctx.runMutation(
+        api.sessions.pruneOrphanResourceSubscriptions,
+        {},
+      );
+      expect(deleted).toBe(1);
+      // Only two rows total (< PRUNE_BATCH), so a single page drains it.
+      expect(cursor).toBeNull();
+      // Only the live session's subscription remains.
+      expect(
+        await ctx.runQuery(api.sessions.listResourceSubscribers, {
+          uri: "docs://a",
+        }),
+      ).toEqual(["live"]);
+    });
+  });
+
+  test("pruneOrphanResourceSubscriptions advances past live rows at the front", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      // A live session subscribed FIRST (so its row sits at the front of the
+      // creation-time scan), then an orphan subscription created later. A
+      // front-only scan that stalled on live rows would never reach the
+      // orphan; the cursor must advance past it.
+      await ctx.runMutation(api.sessions.createSession, {
+        sessionId: "live",
+        protocolVersion: "2025-06-18",
+        identitySubject: null,
+      });
+      await ctx.runMutation(api.sessions.subscribeResource, {
+        sessionId: "live",
+        uri: "docs://a",
+      });
+      await ctx.runMutation(api.sessions.subscribeResource, {
+        sessionId: "ghost",
+        uri: "docs://b",
+      });
+
+      const total = await ctx.runMutation(
+        api.sessions.pruneOrphanResourceSubscriptions,
+        {},
+      );
+      expect(total.deleted).toBe(1);
+      expect(
+        await ctx.runQuery(api.sessions.listResourceSubscribers, {
+          uri: "docs://b",
+        }),
+      ).toEqual([]);
+      expect(
+        await ctx.runQuery(api.sessions.listResourceSubscribers, {
+          uri: "docs://a",
+        }),
+      ).toEqual(["live"]);
+    });
+  });
 });

@@ -126,3 +126,78 @@ declaration time so an unusable template fails loudly:
 > *visibility*; `resource_read` is the gate for every read. To deny reads of
 > a template's URIs, match the URI shape in your `resource_read` branch
 > and/or enforce the check inside the template's own `read` handler.
+
+## Subscriptions & change notifications
+
+MCP defines `resources/subscribe` + `resources/unsubscribe` (the server pushes
+`notifications/resources/updated` when a watched resource changes) and
+`notifications/resources/list_changed` (the catalog changed). All three are
+**server→client pushes**.
+
+**This gateway's HTTP transport cannot push.** It runs on Convex HTTP actions:
+each request gets exactly one response, `GET /mcp/` is `405` (no standalone
+server→client SSE stream), and there is no background process holding streams
+open. So subscriptions are **off by default**:
+
+- `initialize` advertises `capabilities.resources` as `{}` — neither
+  `subscribe` nor `listChanged`.
+- `resources/subscribe` and `resources/unsubscribe` return `-32601` with a
+  message explaining the capability isn't advertised.
+
+A spec-compliant client checks the capability before subscribing, so it never
+calls these. The `-32601` is for non-compliant clients.
+
+### Opting in (host owns delivery)
+
+If you front the gateway with a transport that **can** push (your own SSE or
+WebSocket layer keyed by `Mcp-Session-Id`), opt in:
+
+```ts
+gateway.handleMcpRequest(ctx, req, {
+  authorize,
+  resources: [...],
+  resourceSubscriptions: { subscribe: true, listChanged: true },
+});
+```
+
+This makes `initialize` advertise `resources: { subscribe: true, listChanged:
+true }` and the gateway then **tracks subscription state per session**:
+`resources/subscribe` records `(session, uri)` (identity required, idempotent,
+capped per session), `resources/unsubscribe` removes it, and an explicit
+session `DELETE` cascades its subscriptions.
+
+The gateway does **not** deliver notifications — you do, using the state it
+tracks plus the payload builders:
+
+```ts
+// When the data behind a resource changes:
+const sessionIds = await gateway.listResourceSubscribers(ctx, uri);
+const note = gateway.buildResourceUpdatedNotification(uri);
+// → { jsonrpc: "2.0", method: "notifications/resources/updated", params: { uri } }
+for (const sessionId of sessionIds) yourTransport.send(sessionId, note);
+
+// When the catalog changes:
+const listChanged = gateway.buildResourceListChangedNotification();
+// → { jsonrpc: "2.0", method: "notifications/resources/list_changed" }
+yourTransport.broadcast(listChanged);
+```
+
+Notes:
+
+- **Identity-bound, not content-authz.** Subscribing requires an
+  authenticated caller, and `subscribe`/`unsubscribe` are bound to the
+  session's owner (like `DELETE`), so a leaked `Mcp-Session-Id` can't be used
+  to grief another user's subscriptions. But it is *not* content-authorized:
+  the `updated` payload carries just the URI, and the subscriber must still
+  `resources/read` (which re-applies `resource_read`) to get content.
+  Authorize delivery yourself if a "this URI changed" signal is itself
+  sensitive.
+- **Cleanup.** Idle sessions dropped by `pruneSessions` don't cascade their
+  subscriptions (an explicit `DELETE` does). Run
+  `gateway.pruneResourceSubscriptions(ctx)` alongside session pruning; it
+  pages through the table in bounded windows and returns the total deleted.
+  `listResourceSubscribers` may briefly return session IDs that have ended —
+  treat unknown sessions as no-ops.
+- **`listChanged` without `subscribe`.** You can set `listChanged: true`
+  alone to advertise catalog-change notifications without per-resource
+  subscriptions.

@@ -13,6 +13,8 @@ function createComponent() {
       createSession: Symbol("createSession"),
       getSession: Symbol("getSession"),
       touchSession: Symbol("touchSession"),
+      subscribeResource: Symbol("subscribeResource"),
+      unsubscribeResource: Symbol("unsubscribeResource"),
     },
     registry: {
       getOAuthConfig: Symbol("getOAuthConfig"),
@@ -37,6 +39,7 @@ function createCtx(component: ComponentApi) {
     metadata?: unknown;
   }> = [];
   const resourceAuditEntries: Record<string, unknown>[] = [];
+  const subscriptions = new Map<string, Set<string>>();
   const sessions = new Map<
     string,
     {
@@ -100,6 +103,19 @@ function createCtx(component: ComponentApi) {
           resourceAuditEntries.push({ ...args });
           return "audit-id";
         }
+        if (ref === component.sessions.subscribeResource) {
+          const sessionId = String(args.sessionId);
+          const uri = String(args.uri);
+          const set = subscriptions.get(sessionId) ?? new Set<string>();
+          if (set.has(uri)) return "exists";
+          set.add(uri);
+          subscriptions.set(sessionId, set);
+          return "subscribed";
+        }
+        if (ref === component.sessions.unsubscribeResource) {
+          const set = subscriptions.get(String(args.sessionId));
+          return set ? set.delete(String(args.uri)) : false;
+        }
         throw new Error("unexpected mutation");
       },
       runAction: async () => {
@@ -114,6 +130,9 @@ function createCtx(component: ComponentApi) {
     },
     get resources() {
       return resources;
+    },
+    get subscriptions() {
+      return subscriptions;
     },
     resourceAuditEntries,
   };
@@ -1537,5 +1556,225 @@ describe("handleMcpRequest resources", () => {
     // Templates make the resources capability "supported", so resources/list
     // is a normal empty list rather than an unsupported-method error.
     expect(await readJson(list)).toMatchObject({ result: { resources: [] } });
+  });
+
+  test("subscription capability is advertised only when opted in", async () => {
+    const component = createComponent();
+    const resource = defineMcpResource({
+      uri: "docs://a",
+      name: "A",
+      read: async () => [{ uri: "docs://a", text: "a" }],
+    });
+
+    // Default: resources present but no subscription flags → resources: {}.
+    const off = await handleMcpRequest(
+      createCtx(component).ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      { authorize: async () => ({ allowed: true }), resources: [resource] },
+    );
+    expect((await readJson(off)).result?.capabilities).toEqual({
+      tools: {},
+      resources: {},
+    });
+
+    // Opted in → flags surface.
+    const on = await handleMcpRequest(
+      createCtx(component).ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [resource],
+        resourceSubscriptions: { subscribe: true, listChanged: true },
+      },
+    );
+    expect((await readJson(on)).result?.capabilities).toEqual({
+      tools: {},
+      resources: { subscribe: true, listChanged: true },
+    });
+  });
+
+  test("resources/subscribe & unsubscribe return a descriptive -32601 when disabled", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const resource = defineMcpResource({
+      uri: "docs://a",
+      name: "A",
+      read: async () => [{ uri: "docs://a", text: "a" }],
+    });
+
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      { authorize: async () => ({ allowed: true }), resources: [resource] },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+
+    for (const method of ["resources/subscribe", "resources/unsubscribe"]) {
+      const res = await handleMcpRequest(
+        ctx,
+        jsonRpcRequest(
+          { id: 2, method, params: { uri: "docs://a" } },
+          sessionId!,
+        ),
+        component,
+        { authorize: async () => ({ allowed: true }), resources: [resource] },
+      );
+      const body = await readJson(res);
+      expect(body.error?.code).toBe(-32601);
+      expect(body.error?.message).toContain(method);
+      expect(body.error?.message).toContain("resources.subscribe capability");
+    }
+  });
+
+  test("resources/subscribe & unsubscribe track per-session state when enabled", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    const resource = defineMcpResource({
+      uri: "docs://a",
+      name: "A",
+      read: async () => [{ uri: "docs://a", text: "a" }],
+    });
+    const options = {
+      authorize: async () => ({ allowed: true }),
+      resources: [resource],
+      resourceSubscriptions: { subscribe: true },
+    };
+
+    const init = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      options,
+    );
+    const sessionId = init.headers.get("mcp-session-id")!;
+
+    const sub = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest(
+        { id: 2, method: "resources/subscribe", params: { uri: "docs://a" } },
+        sessionId,
+      ),
+      component,
+      options,
+    );
+    expect(await readJson(sub)).toMatchObject({ result: {} });
+    expect(state.subscriptions.get(sessionId)?.has("docs://a")).toBe(true);
+
+    // Idempotent re-subscribe is still a success.
+    const subAgain = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest(
+        { id: 3, method: "resources/subscribe", params: { uri: "docs://a" } },
+        sessionId,
+      ),
+      component,
+      options,
+    );
+    expect(await readJson(subAgain)).toMatchObject({ result: {} });
+
+    const unsub = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest(
+        { id: 4, method: "resources/unsubscribe", params: { uri: "docs://a" } },
+        sessionId,
+      ),
+      component,
+      options,
+    );
+    expect(await readJson(unsub)).toMatchObject({ result: {} });
+    expect(state.subscriptions.get(sessionId)?.has("docs://a")).toBe(false);
+  });
+
+  test("resources/subscribe rejects anonymous callers and missing uri when enabled", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    const options = {
+      authorize: async () => ({ allowed: true }),
+      resourceSubscriptions: { subscribe: true },
+    };
+
+    const init = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      options,
+    );
+    const sessionId = init.headers.get("mcp-session-id")!;
+
+    // Missing uri → INVALID_PARAMS.
+    const noUri = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 2, method: "resources/subscribe" }, sessionId),
+      component,
+      options,
+    );
+    expect((await readJson(noUri)).error?.code).toBe(-32602);
+
+    // Anonymous → UNAUTHORIZED.
+    (
+      state.ctx.auth as { getUserIdentity: () => Promise<unknown> }
+    ).getUserIdentity = async () => null;
+    const anon = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest(
+        { id: 3, method: "resources/subscribe", params: { uri: "docs://a" } },
+        sessionId,
+      ),
+      component,
+      options,
+    );
+    expect((await readJson(anon)).error?.code).toBe(-32001);
+  });
+
+  test("resources/subscribe is identity-bound to the session owner", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    const options = {
+      authorize: async () => ({ allowed: true }),
+      resourceSubscriptions: { subscribe: true },
+    };
+
+    // Session created by user-1 (the harness default identity).
+    const init = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      options,
+    );
+    const sessionId = init.headers.get("mcp-session-id")!;
+
+    // A different authenticated caller reusing the (leaked) session id must
+    // not be able to mutate the owner's subscription state.
+    (
+      state.ctx.auth as { getUserIdentity: () => Promise<unknown> }
+    ).getUserIdentity = async () => ({ subject: "user-2" });
+    const res = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest(
+        { id: 2, method: "resources/subscribe", params: { uri: "docs://a" } },
+        sessionId,
+      ),
+      component,
+      options,
+    );
+    expect((await readJson(res)).error?.code).toBe(-32003);
+    // Nothing was recorded under the victim's session.
+    expect(state.subscriptions.get(sessionId)?.has("docs://a")).not.toBe(true);
+  });
+
+  test("notification builders produce MCP-compatible payloads", () => {
+    const gateway = new McpGateway(createComponent());
+    expect(gateway.buildResourceListChangedNotification()).toEqual({
+      jsonrpc: "2.0",
+      method: "notifications/resources/list_changed",
+    });
+    expect(gateway.buildResourceUpdatedNotification("docs://a")).toEqual({
+      jsonrpc: "2.0",
+      method: "notifications/resources/updated",
+      params: { uri: "docs://a" },
+    });
   });
 });

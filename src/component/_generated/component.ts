@@ -321,6 +321,20 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         } | null,
         Name
       >;
+      listResourceSubscribers: FunctionReference<
+        "query",
+        "internal",
+        { uri: string },
+        Array<string>,
+        Name
+      >;
+      pruneOrphanResourceSubscriptions: FunctionReference<
+        "mutation",
+        "internal",
+        { cursorCreationTime?: number },
+        { cursor: number | null; deleted: number },
+        Name
+      >;
       pruneSessions: FunctionReference<
         "mutation",
         "internal",
@@ -328,10 +342,24 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         number,
         Name
       >;
+      subscribeResource: FunctionReference<
+        "mutation",
+        "internal",
+        { sessionId: string; uri: string },
+        "subscribed" | "exists" | "limit_exceeded",
+        Name
+      >;
       touchSession: FunctionReference<
         "mutation",
         "internal",
         { sessionId: string },
+        boolean,
+        Name
+      >;
+      unsubscribeResource: FunctionReference<
+        "mutation",
+        "internal",
+        { sessionId: string; uri: string },
         boolean,
         Name
       >;

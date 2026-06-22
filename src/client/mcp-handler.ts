@@ -285,6 +285,32 @@ export interface HandleMcpRequestOptions {
    */
   auditResources?: McpResourceAuditOption;
   /**
+   * Opt-in MCP resource subscription support. **Off by default**, because
+   * this gateway's HTTP transport is request-scoped and cannot push
+   * server-initiated notifications (`notifications/resources/updated` /
+   * `notifications/resources/list_changed`). With both flags off,
+   * `initialize` advertises neither capability and `resources/subscribe` /
+   * `resources/unsubscribe` return a clear `-32601`.
+   *
+   * Set these flags ONLY when the host fronts the gateway with a transport
+   * that CAN deliver notifications (its own SSE/WebSocket layer). The
+   * gateway then advertises the capability and tracks subscribe/unsubscribe
+   * state per session; the host owns delivery — it reads
+   * `gateway.listResourceSubscribers(uri)` and ships payloads built with
+   * `gateway.buildResourceUpdatedNotification` /
+   * `gateway.buildResourceListChangedNotification`.
+   *
+   * - `subscribe`: advertise `capabilities.resources.subscribe` and handle
+   *   `resources/subscribe` / `resources/unsubscribe`.
+   * - `listChanged`: advertise `capabilities.resources.listChanged` (the
+   *   host emits `notifications/resources/list_changed` itself when its
+   *   catalog changes).
+   */
+  resourceSubscriptions?: {
+    subscribe?: boolean;
+    listChanged?: boolean;
+  };
+  /**
    * Optional instructions appended to the `initialize` result. Useful for
    * telling clients how to use the resource catalog without modifying the
    * host's tool definitions.
@@ -864,6 +890,10 @@ async function handlePost(
   // is 404 (per MCP 2025-06-18 §Session Management).
   let sessionId: string;
   let issueSessionHeader = false;
+  // The identity bound to the session at create time (undefined for the
+  // initialize path and for legacy pre-binding rows). Used to identity-bind
+  // session-scoped mutations like resources/subscribe.
+  let sessionOwnerSubject: string | null | undefined;
 
   if (isInitialize) {
     sessionId = generateSessionId();
@@ -901,6 +931,7 @@ async function handlePost(
       return new Response("Unknown or terminated session", { status: 404 });
     }
     sessionId = headerSessionId;
+    sessionOwnerSubject = session.identitySubject;
     try {
       await ctx.runMutation(component.sessions.touchSession, {
         sessionId: headerSessionId,
@@ -990,6 +1021,16 @@ async function handlePost(
         protocolVersion: negotiated,
         identitySubject: auditIdentitySubject,
       });
+      // Advertise the resources capability when any resource feature is
+      // configured. The subscribe/listChanged flags are added only when the
+      // host opts in (and thus has a transport that can deliver); otherwise
+      // the capability stays `{}` — the historical, accurate default.
+      const advertiseResources =
+        registeredResources.length > 0 ||
+        (options.resources ?? []).length > 0 ||
+        (options.resourceTemplates ?? []).length > 0 ||
+        Boolean(options.resourceSubscriptions?.subscribe) ||
+        Boolean(options.resourceSubscriptions?.listChanged);
       body = jsonResultEnvelope(message.id, {
         protocolVersion: negotiated,
         serverInfo: options.serverInfo ?? {
@@ -1002,10 +1043,17 @@ async function handlePost(
         ),
         capabilities: {
           tools: {},
-          ...(registeredResources.length > 0 ||
-          (options.resources ?? []).length > 0 ||
-          (options.resourceTemplates ?? []).length > 0
-            ? { resources: {} }
+          ...(advertiseResources
+            ? {
+                resources: {
+                  ...(options.resourceSubscriptions?.subscribe
+                    ? { subscribe: true }
+                    : {}),
+                  ...(options.resourceSubscriptions?.listChanged
+                    ? { listChanged: true }
+                    : {}),
+                },
+              }
             : {}),
         },
       });
@@ -1429,6 +1477,87 @@ async function handlePost(
         }
         body = jsonErrorEnvelope(message.id, INTERNAL_ERROR, messageText);
       }
+      break;
+    }
+
+    case "resources/subscribe":
+    case "resources/unsubscribe": {
+      // Off by default: the gateway's HTTP transport can't push, so the
+      // capability is unadvertised and these methods report a clear,
+      // descriptive -32601 rather than silently accepting a subscription
+      // that could never be delivered.
+      if (!options.resourceSubscriptions?.subscribe) {
+        body = jsonErrorEnvelope(
+          message.id,
+          -32601,
+          `${message.method} is not supported: this gateway does not ` +
+            `advertise the resources.subscribe capability (its HTTP ` +
+            `transport cannot deliver server-initiated notifications). ` +
+            `Enable resourceSubscriptions.subscribe only behind a ` +
+            `push-capable transport.`,
+        );
+        break;
+      }
+      // Subscriptions are identity-scoped, like list/read. (Read-time
+      // authorization still governs content: the `updated` notification
+      // carries only a URI, and `resources/read` re-checks `resource_read`.)
+      if (!identity) {
+        body = jsonErrorEnvelope(
+          message.id,
+          UNAUTHORIZED,
+          "Unauthorized: authentication required",
+        );
+        break;
+      }
+      // Identity-bound, like DELETE: only the session's owner may mutate its
+      // subscription state. Without this, a leaked Mcp-Session-Id plus any
+      // valid token would let one user grief another's subscriptions (cap
+      // exhaustion, spurious update pushes). Legacy rows with no bound owner
+      // (`undefined`) skip the check, matching `deleteSession`.
+      if (
+        sessionOwnerSubject !== undefined &&
+        sessionOwnerSubject !== identity.subject
+      ) {
+        body = jsonErrorEnvelope(
+          message.id,
+          FORBIDDEN,
+          "Forbidden: caller identity does not match session owner",
+        );
+        break;
+      }
+      const uri = message.params?.uri;
+      if (typeof uri !== "string" || uri.length === 0) {
+        body = jsonErrorEnvelope(
+          message.id,
+          INVALID_PARAMS,
+          "Missing resource uri",
+        );
+        break;
+      }
+      if (message.method === "resources/subscribe") {
+        const result = (await ctx.runMutation(
+          component.sessions.subscribeResource,
+          { sessionId, uri },
+        )) as "subscribed" | "exists" | "limit_exceeded";
+        if (result === "limit_exceeded") {
+          // A client-induced limit, not a server fault: use FORBIDDEN so it
+          // doesn't pollute internal-error signals.
+          body = jsonErrorEnvelope(
+            message.id,
+            FORBIDDEN,
+            "Subscription limit reached for this session",
+          );
+          break;
+        }
+      } else {
+        await ctx.runMutation(component.sessions.unsubscribeResource, {
+          sessionId,
+          uri,
+        });
+      }
+      // MCP `resources/subscribe` and `resources/unsubscribe` return an
+      // empty result object on success.
+      body = jsonResultEnvelope(message.id, {});
       break;
     }
 

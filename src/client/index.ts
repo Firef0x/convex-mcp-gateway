@@ -910,6 +910,78 @@ export class McpGateway {
   }
 
   /**
+   * List the session IDs currently subscribed to `uri` via
+   * `resources/subscribe`. A host that fronts the gateway with a
+   * push-capable transport reads this to decide whom to deliver a
+   * `notifications/resources/updated` to. See the `resourceSubscriptions`
+   * option on `handleMcpRequest`. Returned rows may reference sessions that
+   * have since been pruned; treat unknown sessions as no-ops and run
+   * `pruneResourceSubscriptions` to clean them.
+   */
+  async listResourceSubscribers(
+    ctx: RunQueryCtx,
+    uri: string,
+  ): Promise<string[]> {
+    return await ctx.runQuery(
+      this.component.sessions.listResourceSubscribers,
+      { uri },
+    );
+  }
+
+  /**
+   * Delete subscription rows whose session no longer exists (sessions
+   * dropped by `pruneSessions` do not cascade their subscriptions). Drains
+   * fully by paging through the table in bounded windows (each window is its
+   * own component transaction) and returns the total number deleted. Wire it
+   * alongside `pruneSessions` in a cron when you use resource subscriptions.
+   */
+  async pruneResourceSubscriptions(ctx: RunMutationCtx): Promise<number> {
+    let total = 0;
+    let cursorCreationTime: number | undefined;
+    for (;;) {
+      const { deleted, cursor } = await ctx.runMutation(
+        this.component.sessions.pruneOrphanResourceSubscriptions,
+        cursorCreationTime !== undefined ? { cursorCreationTime } : {},
+      );
+      total += deleted;
+      if (cursor === null) break;
+      cursorCreationTime = cursor;
+    }
+    return total;
+  }
+
+  /**
+   * Build a `notifications/resources/list_changed` JSON-RPC notification for
+   * the host to deliver over its own transport when the resource catalog
+   * changes. The gateway does not deliver it (its HTTP transport cannot
+   * push); see the `resourceSubscriptions` option on `handleMcpRequest`.
+   */
+  buildResourceListChangedNotification(): {
+    jsonrpc: "2.0";
+    method: "notifications/resources/list_changed";
+  } {
+    return { jsonrpc: "2.0", method: "notifications/resources/list_changed" };
+  }
+
+  /**
+   * Build a `notifications/resources/updated` notification for `uri`, for the
+   * host to deliver to that resource's subscribers (see
+   * `listResourceSubscribers`). The payload carries only the URI; clients
+   * re-read via `resources/read`, which re-applies authorization.
+   */
+  buildResourceUpdatedNotification(uri: string): {
+    jsonrpc: "2.0";
+    method: "notifications/resources/updated";
+    params: { uri: string };
+  } {
+    return {
+      jsonrpc: "2.0",
+      method: "notifications/resources/updated",
+      params: { uri },
+    };
+  }
+
+  /**
    * Configure OAuth 2.1 protected-resource discovery so MCP clients can
    * find the authorization server that issues their Bearer tokens.
    *
