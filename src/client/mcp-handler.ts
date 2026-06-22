@@ -969,9 +969,24 @@ async function handlePost(
         break;
       }
       try {
+        // Isolate each provider: a single provider that throws must not
+        // collapse the whole catalog. Mirrors the per-item isolation
+        // tools/list uses for authorizer throws — a buggy provider hides
+        // only its own resources, the healthy providers still list.
         const providerResources = (
           await Promise.all(
-            providers.map((provider) => provider.list(ctx, { identity })),
+            providers.map(async (provider) => {
+              try {
+                return await provider.list(ctx, { identity });
+              } catch (err) {
+                console.error(
+                  "[mcp-gateway] resource provider threw during resources/list",
+                  provider.name,
+                  err,
+                );
+                return [];
+              }
+            }),
           )
         ).flat();
         const metadataByUri = new Map(
@@ -1133,8 +1148,25 @@ async function handlePost(
       }
       try {
         let found = false;
+        // Track a provider throw so a buggy provider can't mask a resource
+        // a later provider could serve. Providers decline a URI by returning
+        // null; a throw must not be *more* powerful than declining, so we
+        // isolate it, log it, and keep trying the remaining providers.
+        let providerError: string | null = null;
         for (const provider of providers) {
-          const contents = await provider.read(ctx, { uri, identity });
+          let contents: McpResourceContent[] | null;
+          try {
+            contents = await provider.read(ctx, { uri, identity });
+          } catch (err) {
+            providerError = err instanceof Error ? err.message : String(err);
+            console.error(
+              "[mcp-gateway] resource provider threw during resources/read",
+              provider.name,
+              uri,
+              err,
+            );
+            continue;
+          }
           if (contents) {
             if (shouldAuditResource(options.auditResources, "read")) {
               await safeRecordResourceAudit(ctx, component, {
@@ -1152,6 +1184,12 @@ async function handlePost(
           }
         }
         if (!found) {
+          // Distinguish "every provider cleanly declined" (a genuine
+          // not-found → INVALID_PARAMS) from "a provider threw and no
+          // provider served" (a real fault → INTERNAL_ERROR), so a
+          // provider bug isn't reported to the client as a benign miss.
+          const code = providerError ? INTERNAL_ERROR : INVALID_PARAMS;
+          const errorMessage = providerError ?? `Resource not found: ${uri}`;
           if (shouldAuditResource(options.auditResources, "read")) {
             await safeRecordResourceAudit(ctx, component, {
               resourceUri: uri,
@@ -1160,15 +1198,11 @@ async function handlePost(
               outcome: "error",
               identitySubject: auditIdentitySubject,
               durationMs: Date.now() - start,
-              errorCode: INVALID_PARAMS,
-              errorMessage: `Resource not found: ${uri}`,
+              errorCode: code,
+              errorMessage,
             });
           }
-          body = jsonErrorEnvelope(
-            message.id,
-            INVALID_PARAMS,
-            `Resource not found: ${uri}`,
-          );
+          body = jsonErrorEnvelope(message.id, code, errorMessage);
         }
       } catch (err) {
         const messageText = err instanceof Error ? err.message : String(err);

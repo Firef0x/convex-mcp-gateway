@@ -903,4 +903,98 @@ describe("handleMcpRequest resources", () => {
       error: { code: -32603, message: "read failed" },
     });
   });
+
+  test("resources/list isolates a throwing provider from healthy ones", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const broken: McpResourceProvider = {
+      name: "broken",
+      list: async () => {
+        throw new Error("provider exploded");
+      },
+      read: async () => null,
+    };
+    const healthy: McpResourceProvider = {
+      name: "healthy",
+      list: async () => [{ uri: "docs://ok", name: "OK" }],
+      read: async () => null,
+    };
+
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [broken, healthy],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+    expect(sessionId).toBeTruthy();
+
+    const list = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 2, method: "resources/list" }, sessionId!),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [broken, healthy],
+      },
+    );
+    // The broken provider's throw must not collapse the whole catalog;
+    // the healthy provider's resource is still listed.
+    expect(await readJson(list)).toMatchObject({
+      result: { resources: [{ uri: "docs://ok", name: "OK" }] },
+    });
+  });
+
+  test("resources/read: a throwing provider does not mask a later provider", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const broken: McpResourceProvider = {
+      name: "broken",
+      list: async () => [],
+      read: async () => {
+        throw new Error("provider exploded");
+      },
+    };
+    const healthy: McpResourceProvider = {
+      name: "healthy",
+      list: async () => [],
+      read: async (_ctx, args) =>
+        args.uri === "docs://served"
+          ? [{ uri: args.uri, text: "served" }]
+          : null,
+    };
+
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [broken, healthy],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id");
+    expect(sessionId).toBeTruthy();
+
+    const read = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest(
+        { id: 2, method: "resources/read", params: { uri: "docs://served" } },
+        sessionId!,
+      ),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [broken, healthy],
+      },
+    );
+    // The first provider throwing must not abort the read: the second
+    // provider still serves the resource.
+    expect(await readJson(read)).toMatchObject({
+      result: { contents: [{ uri: "docs://served", text: "served" }] },
+    });
+  });
 });
