@@ -14,6 +14,15 @@ Both run only for authenticated callers, flow through the same optional
 `authorizeResource` hook, and can be audited via `auditResources`. See
 [Authorization](./authorization.md) and [Audit log](./audit-log.md).
 
+**Supported MCP methods:** `resources/list`, `resources/read`,
+`resources/templates/list`, and — opt-in — `resources/subscribe` /
+`resources/unsubscribe`. The `notifications/resources/*` pushes are the
+host's responsibility (this gateway's HTTP transport can't push; see
+[Subscriptions](#subscriptions--change-notifications)). A complete runnable
+wiring lives in
+[`docs/example/convex`](./example/convex/mcp.ts) (resource + template +
+`authorizeResource` + audit + subscription).
+
 ## When to use which
 
 | Use a **concrete resource** when…                                    | Use a **template** when…                                          |
@@ -48,6 +57,35 @@ Concrete resources declared this way are also reconciled into the
 component registry on `initialize` (change-detected), so `resources/list`
 returns them even from a request that doesn't pass a provider. See the
 registry-sync behaviour in [Architecture](./architecture.md).
+
+### Migrating from a raw provider
+
+Before `defineMcpResource` existed, the escape hatch was to pass a raw
+provider object — `{ name, list, read }` — straight to
+`handleMcpRequest({ resources })`. That still works (a `defineMcpResource`
+registration _is_ such a provider), but prefer the primitive: it declares
+the descriptor once (so `list` and the registry stay in sync), validates the
+shape at declaration time, and only invokes `read` for its own `uri`.
+
+```ts
+// Before — raw provider escape hatch
+const handbook = {
+  name: "handbook",
+  list: async () => [{ uri: "docs://handbook", name: "Operator handbook" }],
+  read: async (ctx, { uri }) =>
+    uri === "docs://handbook" ? [{ uri, text: await loadHandbook() }] : null,
+};
+
+// After — defineMcpResource (uri/name declared once; URI match handled for you)
+const handbook = defineMcpResource({
+  uri: "docs://handbook",
+  name: "Operator handbook",
+  read: async (ctx, { uri }) => [{ uri, text: await loadHandbook() }],
+});
+```
+
+Raw providers remain supported for dynamic catalogs where the URI set isn't
+known ahead of time.
 
 ## Resource shape & validation
 

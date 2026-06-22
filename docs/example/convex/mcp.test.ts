@@ -7,11 +7,11 @@ import { api, components, internal } from "./_generated/api.js";
 
 const modules = import.meta.glob(["./**/*.ts", "./**/*.js", "!**/*.test.ts"]);
 const componentModules = import.meta.glob([
-  "../../src/component/**/*.ts",
-  "!../../src/component/**/*.test.ts",
+  "../../../src/component/**/*.ts",
+  "!../../../src/component/**/*.test.ts",
 ]);
 
-import componentSchema from "../../src/component/schema.js";
+import componentSchema from "../../../src/component/schema.js";
 
 function newTest() {
   const t = convexTest(schema, modules);
@@ -454,9 +454,9 @@ describe("authorize callback (host's http.ts)", () => {
     const session = await initialize(
       t.withIdentity({ subject: "alice" }) as ReturnType<typeof newTest>,
     );
-    const res = await (t.withIdentity({ subject: "alice" }) as ReturnType<
-      typeof newTest
-    >).fetch("/mcp/", {
+    const res = await (
+      t.withIdentity({ subject: "alice" }) as ReturnType<typeof newTest>
+    ).fetch("/mcp/", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -690,7 +690,10 @@ describe("OAuth bridge mode (DCR + AS metadata + resolveIdentity)", () => {
       }),
     });
     expect(res.status).toBe(201);
-    const body = (await res.json()) as { client_id: string; redirect_uris: string[] };
+    const body = (await res.json()) as {
+      client_id: string;
+      redirect_uris: string[];
+    };
     expect(body.client_id).toBe("upstream-client-id-fixed");
     expect(body.redirect_uris).toEqual([
       "https://claude.ai/api/mcp/auth_callback",
@@ -1107,9 +1110,7 @@ describe("JSON-RPC envelope edge cases", () => {
         accept: "application/json, text/event-stream",
         "mcp-session-id": session,
       },
-      body: JSON.stringify([
-        { jsonrpc: "2.0", id: 1, method: "tools/list" },
-      ]),
+      body: JSON.stringify([{ jsonrpc: "2.0", id: 1, method: "tools/list" }]),
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: { message: string } };
@@ -1222,10 +1223,9 @@ describe("resolveIdentity branches", () => {
 describe("RFC 9728 protected-resource metadata", () => {
   test("GET without OAuth config returns 404", async () => {
     const t = newTest();
-    const res = await t.fetch(
-      "/.well-known/oauth-protected-resource/mcp",
-      { method: "GET" },
-    );
+    const res = await t.fetch("/.well-known/oauth-protected-resource/mcp", {
+      method: "GET",
+    });
     expect(res.status).toBe(404);
   });
 
@@ -1236,10 +1236,9 @@ describe("RFC 9728 protected-resource metadata", () => {
         authServerUrl: "https://idp.example.com/",
       });
     });
-    const res = await t.fetch(
-      "/.well-known/oauth-protected-resource/mcp",
-      { method: "GET" },
-    );
+    const res = await t.fetch("/.well-known/oauth-protected-resource/mcp", {
+      method: "GET",
+    });
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       resource: string;
@@ -1259,10 +1258,9 @@ describe("RFC 9728 protected-resource metadata", () => {
         resourceUrl: "https://canonical.example.com/mcp/",
       });
     });
-    const res = await t.fetch(
-      "/.well-known/oauth-protected-resource/mcp",
-      { method: "GET" },
-    );
+    const res = await t.fetch("/.well-known/oauth-protected-resource/mcp", {
+      method: "GET",
+    });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { resource: string };
     expect(body.resource).toBe("https://canonical.example.com/mcp/");
@@ -1270,16 +1268,13 @@ describe("RFC 9728 protected-resource metadata", () => {
 
   test("OPTIONS preflight returns 204 with CORS allow-methods", async () => {
     const t = newTest();
-    const res = await t.fetch(
-      "/.well-known/oauth-protected-resource/mcp",
-      {
-        method: "OPTIONS",
-        headers: {
-          origin: "https://claude.ai",
-          "access-control-request-method": "GET",
-        },
+    const res = await t.fetch("/.well-known/oauth-protected-resource/mcp", {
+      method: "OPTIONS",
+      headers: {
+        origin: "https://claude.ai",
+        "access-control-request-method": "GET",
       },
-    );
+    });
     expect(res.status).toBe(204);
     expect(res.headers.get("access-control-allow-origin")).toBe("*");
     expect(res.headers.get("access-control-allow-methods")).toContain("GET");
@@ -1939,7 +1934,11 @@ describe("identityArg (caller injection)", () => {
     // the secret (redacted).
     await t.action(components.mcpGateway.dispatch.runTool, {
       name: "secret_identity",
-      args: { caller: { subject: "attacker" }, password: "p@ss", username: "alice" },
+      args: {
+        caller: { subject: "attacker" },
+        password: "p@ss",
+        username: "alice",
+      },
       auditIdentitySubject: "alice",
       identity: { subject: "alice", claims: { email: "x@example.com" } },
     });
@@ -2321,5 +2320,192 @@ describe("declarative tools option (auto-sync on initialize)", () => {
       "drift_tool",
       "invoices_summary",
     ]);
+  });
+});
+
+// =================================================================
+// Resources: the example mounts a concrete resource (invoices://summary),
+// an RFC 6570 template (invoice://{id}), a per-resource authorizer, opt-in
+// read audit, and the subscription capability. These exercise the full
+// resource surface through the host's /mcp/ route.
+// =================================================================
+describe("resources (host-mounted /mcp/)", () => {
+  const AUTH = { authorization: "Bearer valid-userinfo-token" };
+  const ADMIN = { authorization: "Bearer valid-admin-token" };
+
+  test("initialize advertises the resource subscription capability", async () => {
+    const t = newTest();
+    const res = await t.fetch("/mcp/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18" },
+      }),
+    });
+    const body = (await res.json()) as {
+      result: {
+        capabilities: {
+          resources?: { subscribe?: boolean; listChanged?: boolean };
+        };
+      };
+    };
+    expect(body.result.capabilities.resources).toEqual({
+      subscribe: true,
+      listChanged: true,
+    });
+  });
+
+  test("resources/list requires auth and returns the summary resource", async () => {
+    const t = newTest();
+    const session = await initialize(t);
+
+    const anon = await rpc(t, session, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "resources/list",
+    });
+    expect(
+      ((await anon.json()) as { error?: { code: number } }).error?.code,
+    ).toBe(-32001);
+
+    const res = await rpc(
+      t,
+      session,
+      { jsonrpc: "2.0", id: 3, method: "resources/list" },
+      AUTH,
+    );
+    const body = (await res.json()) as {
+      result: {
+        resources: Array<{ uri: string; name: string; title?: string }>;
+      };
+    };
+    expect(body.result.resources).toMatchObject([
+      {
+        uri: "invoices://summary",
+        name: "invoice-summary",
+        title: "Invoice summary",
+      },
+    ]);
+  });
+
+  test("resources/read returns the summary content stamped with the caller", async () => {
+    const t = newTest();
+    await t.mutation(api.invoices.seed, {});
+    const session = await initialize(t);
+    const res = await rpc(
+      t,
+      session,
+      {
+        jsonrpc: "2.0",
+        id: 4,
+        method: "resources/read",
+        params: { uri: "invoices://summary" },
+      },
+      AUTH,
+    );
+    const body = (await res.json()) as {
+      result: { contents: Array<{ uri: string; text: string }> };
+    };
+    const parsed = JSON.parse(body.result.contents[0]!.text) as {
+      total: number;
+      caller: string;
+    };
+    expect(parsed.total).toBe(1);
+    expect(parsed.caller).toBe("validator-resolved-sub");
+  });
+
+  test("resources/templates/list returns the invoice template", async () => {
+    const t = newTest();
+    const session = await initialize(t);
+    const res = await rpc(
+      t,
+      session,
+      { jsonrpc: "2.0", id: 5, method: "resources/templates/list" },
+      AUTH,
+    );
+    const body = (await res.json()) as {
+      result: {
+        resourceTemplates: Array<{ uriTemplate: string; name: string }>;
+      };
+    };
+    expect(body.result.resourceTemplates).toMatchObject([
+      { uriTemplate: "invoice://{id}", name: "invoice" },
+    ]);
+  });
+
+  test("template read of an invoice requires the finance.admin role", async () => {
+    const t = newTest();
+    const id = await t.mutation(api.invoices.seed, {});
+    const session = await initialize(t);
+    const uri = `invoice://${id}`;
+
+    // Authenticated but non-admin → Forbidden.
+    const denied = await rpc(
+      t,
+      session,
+      { jsonrpc: "2.0", id: 6, method: "resources/read", params: { uri } },
+      AUTH,
+    );
+    expect(
+      ((await denied.json()) as { error?: { code: number } }).error?.code,
+    ).toBe(-32003);
+
+    // Admin caller → content.
+    const ok = await rpc(
+      t,
+      session,
+      { jsonrpc: "2.0", id: 7, method: "resources/read", params: { uri } },
+      ADMIN,
+    );
+    const body = (await ok.json()) as {
+      result: { contents: Array<{ text: string }> };
+    };
+    const parsed = JSON.parse(body.result.contents[0]!.text) as {
+      id: string;
+      amount: number;
+    };
+    expect(parsed.id).toBe(id);
+    expect(parsed.amount).toBe(42);
+  });
+
+  test("resources/subscribe is accepted for the session owner", async () => {
+    const t = newTest();
+    // Initialize WITH the Bearer so the session is owned by the caller;
+    // resources/subscribe is identity-bound to the session owner.
+    const initRes = await t.fetch("/mcp/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        ...AUTH,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18" },
+      }),
+    });
+    const session = initRes.headers.get("mcp-session-id")!;
+    const res = await rpc(
+      t,
+      session,
+      {
+        jsonrpc: "2.0",
+        id: 8,
+        method: "resources/subscribe",
+        params: { uri: "invoices://summary" },
+      },
+      AUTH,
+    );
+    const body = (await res.json()) as { result?: object; error?: object };
+    expect(body.result).toEqual({});
+    expect(body.error).toBeUndefined();
   });
 });

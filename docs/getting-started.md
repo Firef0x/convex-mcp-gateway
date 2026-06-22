@@ -32,8 +32,9 @@ app.use(mcpGateway);
 export default app;
 ```
 
-The component owns three Convex tables (`tools`, `config`, `audit`) plus a
-`sessions` table for Streamable-HTTP. It does **not** mount any HTTP routes
+The component owns Convex tables for `tools`, `resources`, `config`, and
+`audit`, plus `sessions` (and `subscriptions`) for Streamable-HTTP. It does
+**not** mount any HTTP routes
 of its own. The `/mcp/` endpoint and the OAuth discovery route both live
 in your host's `http.ts` (steps 3 and 6 below). The reason is structural:
 Convex doesn't propagate `ctx.auth` into component code, so the only place
@@ -146,7 +147,7 @@ costs a single cheap lookup per connect, not a rewrite.
 
 > **Imperative alternative.** If you'd rather populate the registry from
 > a mutation (dynamic/plugin catalogs), call `gateway.register(ctx,
-> tools)` inside an `internalMutation` and run it after deploy instead of
+tools)` inside an `internalMutation` and run it after deploy instead of
 > passing `tools`. `register` replaces the registry atomically (tools no
 > longer in the array are removed in the same mutation, so stale
 > registrations can't leak across deploys); `gateway.registerTool` does
@@ -163,10 +164,7 @@ inside component code.
 ```ts
 // convex/http.ts
 import { httpRouter } from "convex/server";
-import {
-  McpGateway,
-  type McpAuthorizerHandler,
-} from "convex-mcp-gateway";
+import { McpGateway, type McpAuthorizerHandler } from "convex-mcp-gateway";
 import { components } from "./_generated/api.js";
 import { httpAction } from "./_generated/server.js";
 import { tools } from "./mcp.js";
@@ -366,7 +364,9 @@ TypeScript uses the annotation instead of inferring from the
 import { defineMcpQuery, type McpToolRegistration } from "convex-mcp-gateway";
 
 export const tools: McpToolRegistration[] = [
-  defineMcpQuery({ /* ... */ }),
+  defineMcpQuery({
+    /* ... */
+  }),
 ];
 ```
 
@@ -376,7 +376,11 @@ export const tools: McpToolRegistration[] = [
 
 ```ts
 // convex/http.ts
-const tools = [defineMcpQuery({ /* ... */ })];
+const tools = [
+  defineMcpQuery({
+    /* ... */
+  }),
+];
 const mcp = httpAction(async (ctx, req) =>
   gateway.handleMcpRequest(ctx, req, { authorize, tools }),
 );
@@ -386,12 +390,49 @@ Either way the per-tool checks are unaffected: `args` and `returns` are
 validated against the function's real signature at each `defineMcp*`
 call, regardless of how (or whether) you type the surrounding array.
 
+## (Optional) Serve resources
+
+Beyond tools, the gateway serves read-only MCP **resources**. Declare one
+with `defineMcpResource` and pass it to the same `handleMcpRequest` call:
+
+```ts
+// convex/mcp.ts
+import { defineMcpResource } from "convex-mcp-gateway";
+import { api } from "./_generated/api.js";
+
+export const resources = [
+  defineMcpResource({
+    uri: "invoices://summary",
+    name: "invoice-summary",
+    mimeType: "application/json",
+    read: async (ctx, { uri }) => [
+      {
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(await ctx.runQuery(api.invoices.summary, {})),
+      },
+    ],
+  }),
+];
+
+// convex/http.ts
+//   gateway.handleMcpRequest(ctx, req, { authorize, tools, resources });
+```
+
+Reads run only for authenticated callers. Add `defineMcpResourceTemplate`
+for parameterized URIs, `authorizeResource` for per-resource policy, and
+`auditResources` to log reads. A complete runnable wiring is in
+[`example/convex`](./example/convex/mcp.ts). Full guide:
+[resources.md](./resources.md).
+
 ## Where to go next
 
 - [architecture.md](./architecture.md): component model, data flow,
   identity propagation
 - [authorization.md](./authorization.md): scope/role recipes,
   `mode: "list"` vs `"call"`, audit-redaction
+- [resources.md](./resources.md): resources, templates, subscriptions,
+  shape validation
 - [oauth.md](./oauth.md): full OAuth 2.1 setup with discovery
 - [audit-log.md](./audit-log.md): reading and pruning the audit log
 - [testing.md](./testing.md): `convex-test` patterns for the gateway

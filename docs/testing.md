@@ -20,7 +20,7 @@ The component lives in your host's `node_modules` so its modules need to
 be registered alongside your own:
 
 ```ts
-// example/convex/mcp.test.ts
+// docs/example/convex/mcp.test.ts
 /// <reference types="vite/client" />
 import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
@@ -383,7 +383,7 @@ Registration.
   route. Make sure your test's host fixture wires
   `gateway.handleMcpRequest` into `httpRouter`.
 - **Calling `dispatch.runTool` without `auditIdentitySubject`.** It is
-  required (the audit row needs *some* value, even `null`). The host's
+  required (the audit row needs _some_ value, even `null`). The host's
   `handleMcpRequest` always passes one; tests must too.
 - **Stale registry between tests.** Convex-test gives each test a fresh
   in-memory database, so this isn't an issue across files. Calling

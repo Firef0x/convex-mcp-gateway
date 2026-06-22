@@ -17,11 +17,14 @@ export default [
     ],
   },
   {
-    files: ["src/**/*.{js,mjs,cjs,ts,tsx}", "example/**/*.{js,mjs,cjs,ts,tsx}"],
+    files: [
+      "src/**/*.{js,mjs,cjs,ts,tsx}",
+      "docs/example/**/*.{js,mjs,cjs,ts,tsx}",
+    ],
     languageOptions: {
       parser: tseslint.parser,
       parserOptions: {
-        project: ["./tsconfig.json", "./example/convex/tsconfig.json"],
+        project: ["./tsconfig.json", "./docs/example/convex/tsconfig.json"],
         tsconfigRootDir: import.meta.dirname,
       },
     },
@@ -29,7 +32,7 @@ export default [
   pluginJs.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ["src/**/*.{ts,tsx}", "example/convex/**/*.{ts,tsx}"],
+    files: ["src/**/*.{ts,tsx}", "docs/example/convex/**/*.{ts,tsx}"],
     languageOptions: {
       globals: globals.worker,
     },

@@ -49,7 +49,7 @@
     "build": "tsc --project ./tsconfig.build.json",
     "build:codegen": "convex codegen --component-dir ./src/component && pnpm run build",
     "build:clean": "rm -rf dist *.tsbuildinfo && pnpm run build:codegen",
-    "typecheck": "tsc --noEmit && tsc -p example/convex",
+    "typecheck": "tsc --noEmit && tsc -p docs/example/convex",
     "lint": "eslint .",
     "test": "vitest run --typecheck",
     "test:watch": "vitest --typecheck --clearScreen false",
