@@ -22,8 +22,18 @@ import {
   type McpToolRegistration,
 } from "../shared.js";
 import {
+  describeResourceProblem,
+  describeResourceTemplateProblem,
+  pickTemplateFields,
   handleMcpRequest as handleMcpRequestImpl,
   type HandleMcpRequestOptions,
+  type McpHandlerCtx,
+  type McpResource,
+  type McpResourceContent,
+  type McpResourceProvider,
+  type McpResourceTemplate,
+  type McpResourceTemplateProvider,
+  type McpResourceTemplateReadHandler,
 } from "./mcp-handler.js";
 
 export type {
@@ -40,7 +50,18 @@ export type {
 export type {
   HandleMcpRequestOptions,
   McpCorsOption,
+  McpHandlerCtx,
   McpIdentityResolver,
+  McpResourceAuditOption,
+  McpResourceAuthorizerArgs,
+  McpResourceAuthorizerHandler,
+  McpResource,
+  McpResourceAnnotations,
+  McpResourceContent,
+  McpResourceProvider,
+  McpResourceTemplate,
+  McpResourceTemplateProvider,
+  McpResourceTemplateReadHandler,
 } from "./mcp-handler.js";
 export {
   buildProtectedResourceMetadataUrl,
@@ -66,6 +87,48 @@ export type RunMutationCtx = RunQueryCtx & {
   ) => Promise<FunctionReturnType<Mutation>>;
 };
 
+export type McpResourceReadHandler = (
+  ctx: McpHandlerCtx,
+  args: {
+    uri: string;
+    identity: { subject: string; claims?: Record<string, unknown> };
+  },
+) => Promise<McpResourceContent[]>;
+
+/**
+ * Catalog metadata persisted in the component registry. Intentionally
+ * narrower than {@link McpResource}: the registry stores only stable
+ * catalog fields (see the component schema), so the richer list-response
+ * fields (`title`, `annotations`, `size`) are **runtime-only** and are not
+ * accepted here. They are still served from a resource provider's `list`
+ * output; they just aren't persisted.
+ */
+export type McpResourceDescriptor = {
+  uri: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type McpResourceRegistration = McpResourceProvider & {
+  resource: McpResourceDescriptor;
+};
+
+export type McpResourceConfig = McpResource & {
+  /**
+   * Free-form metadata stored alongside the registry descriptor (never sent
+   * to clients). The component does not inspect it.
+   */
+  metadata?: Record<string, unknown>;
+  /**
+   * Read this concrete resource. The gateway only calls this handler when
+   * `resources/read` requests `uri`, so handlers can focus on loading content
+   * and applying any resource-specific checks.
+   */
+  read: McpResourceReadHandler;
+};
+
 type ToolFunctionReference<Kind extends McpToolKind> = FunctionReference<
   Kind,
   "internal" | "public",
@@ -80,22 +143,24 @@ type AnyToolFunctionReference = ToolFunctionReference<McpToolKind>;
  * If they don't, TypeScript surfaces a `_typeMismatch` error on the config
  * object that makes the failing field obvious.
  */
-type ValidateArgs<Ref extends AnyToolFunctionReference, ArgsV> =
-  ArgsV extends PropertyValidators
-    ? ObjectType<ArgsV> extends FunctionArgs<Ref>
-      ? FunctionArgs<Ref> extends ObjectType<ArgsV>
-        ? unknown
-        : {
-            _typeMismatch: "args validator does not match the function's expected arguments";
-            expected: FunctionArgs<Ref>;
-            received: ObjectType<ArgsV>;
-          }
+type ValidateArgs<
+  Ref extends AnyToolFunctionReference,
+  ArgsV,
+> = ArgsV extends PropertyValidators
+  ? ObjectType<ArgsV> extends FunctionArgs<Ref>
+    ? FunctionArgs<Ref> extends ObjectType<ArgsV>
+      ? unknown
       : {
           _typeMismatch: "args validator does not match the function's expected arguments";
           expected: FunctionArgs<Ref>;
           received: ObjectType<ArgsV>;
         }
-    : { _typeMismatch: "args must be a Convex property validators object" };
+    : {
+        _typeMismatch: "args validator does not match the function's expected arguments";
+        expected: FunctionArgs<Ref>;
+        received: ObjectType<ArgsV>;
+      }
+  : { _typeMismatch: "args must be a Convex property validators object" };
 
 /**
  * Mirror of `ValidateArgs` for the optional `returns:` validator.
@@ -104,24 +169,26 @@ type ValidateArgs<Ref extends AnyToolFunctionReference, ArgsV> =
  * inferred type must equal the function's actual return type, drift
  * between them surfaces as a `_typeMismatch` on the config object.
  */
-type ValidateReturns<Ref extends AnyToolFunctionReference, ReturnsV> =
-  ReturnsV extends undefined
-    ? unknown
-    : ReturnsV extends GenericValidator
-      ? Infer<ReturnsV> extends FunctionReturnType<Ref>
-        ? FunctionReturnType<Ref> extends Infer<ReturnsV>
-          ? unknown
-          : {
-              _typeMismatch: "returns validator does not match the function's return type";
-              expected: FunctionReturnType<Ref>;
-              received: Infer<ReturnsV>;
-            }
+type ValidateReturns<
+  Ref extends AnyToolFunctionReference,
+  ReturnsV,
+> = ReturnsV extends undefined
+  ? unknown
+  : ReturnsV extends GenericValidator
+    ? Infer<ReturnsV> extends FunctionReturnType<Ref>
+      ? FunctionReturnType<Ref> extends Infer<ReturnsV>
+        ? unknown
         : {
             _typeMismatch: "returns validator does not match the function's return type";
             expected: FunctionReturnType<Ref>;
             received: Infer<ReturnsV>;
           }
-      : { _typeMismatch: "returns must be a Convex validator" };
+      : {
+          _typeMismatch: "returns validator does not match the function's return type";
+          expected: FunctionReturnType<Ref>;
+          received: Infer<ReturnsV>;
+        }
+    : { _typeMismatch: "returns must be a Convex validator" };
 
 /**
  * Keys of `ArgsV` whose validator accepts the injected caller identity
@@ -323,6 +390,300 @@ export function defineMcpAction<
 }
 
 /**
+ * Declare a concrete MCP resource. The returned provider can be passed to
+ * `gateway.handleMcpRequest({ resources: [...] })`.
+ *
+ * This is intentionally a lightweight primitive: it gives resources the same
+ * first-class declaration style as `defineMcpQuery` / `defineMcpMutation` /
+ * `defineMcpAction`, while registry sync, audit, authorization hooks, resource
+ * templates, and subscriptions remain separate feature layers.
+ */
+export function defineMcpResource(
+  config: McpResourceConfig,
+): McpResourceRegistration {
+  // Validate the descriptor shape (uri, name, and any title/description/
+  // mimeType/size/annotations) with the same rules the request handler
+  // enforces on provider output, so a bad declaration fails loud here.
+  const problem = describeResourceProblem(config);
+  if (problem) {
+    throw new Error(`MCP resource is invalid: ${problem}`);
+  }
+  if (typeof config.read !== "function") {
+    throw new Error("MCP resource read must be a function");
+  }
+
+  // Full shape served by the provider's `list` (carries the runtime-only
+  // title/annotations/size).
+  const publicResource: McpResource = {
+    uri: config.uri,
+    name: config.name,
+    ...(config.title !== undefined ? { title: config.title } : {}),
+    ...(config.description !== undefined
+      ? { description: config.description }
+      : {}),
+    ...(config.mimeType !== undefined ? { mimeType: config.mimeType } : {}),
+    ...(config.annotations !== undefined
+      ? { annotations: config.annotations }
+      : {}),
+    ...(config.size !== undefined ? { size: config.size } : {}),
+  };
+  // Narrow descriptor persisted in the registry: only the fields the
+  // component schema accepts. title/annotations/size are runtime-only and
+  // must NOT leak here, or declarative sync (replaceResources) would reject
+  // them as unknown fields.
+  const resource: McpResourceDescriptor = {
+    uri: config.uri,
+    name: config.name,
+    ...(config.description !== undefined
+      ? { description: config.description }
+      : {}),
+    ...(config.mimeType !== undefined ? { mimeType: config.mimeType } : {}),
+    ...(config.metadata !== undefined ? { metadata: config.metadata } : {}),
+  };
+
+  return {
+    name: config.name,
+    resource,
+    list: async () => [publicResource],
+    read: async (ctx, args) => {
+      if (args.uri !== config.uri) return null;
+      return await config.read(ctx, args);
+    },
+  };
+}
+
+export type McpResourceTemplateConfig = McpResourceTemplate & {
+  /**
+   * Optional server-side read handler for URIs that match `uriTemplate`.
+   * When present, the gateway resolves matching `resources/read` requests by
+   * calling this with the extracted `params` (concrete resources still take
+   * precedence). When omitted, the template is listing-only: clients expand
+   * it and read the concrete URI through another provider.
+   */
+  read?: McpResourceTemplateReadHandler;
+};
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Compile an RFC 6570 *level-1* URI template (simple `{var}` placeholders)
+ * into a matcher. Each `{var}` matches exactly one URI path segment (no
+ * `/`) — the correct behavior for simple string expansion, where reserved
+ * characters are percent-encoded and so never appear literally. Operators
+ * (`{+var}`, `{#var}`, `{/var}`, `{?var}`, `{&var}`, `{;var}`, `{.var}`)
+ * and comma-separated variable lists (`{a,b}`) are intentionally
+ * unsupported in this phase: they throw at definition time so an
+ * unsupported template fails loudly instead of silently never matching.
+ */
+function compileUriTemplate(
+  uriTemplate: string,
+): (uri: string) => Record<string, string> | null {
+  const varNames: string[] = [];
+  let pattern = "";
+  let i = 0;
+  while (i < uriTemplate.length) {
+    const ch = uriTemplate[i];
+    if (ch === "{") {
+      const end = uriTemplate.indexOf("}", i);
+      if (end === -1) {
+        throw new Error(
+          `MCP resource template "${uriTemplate}" has an unclosed "{" expression.`,
+        );
+      }
+      const expr = uriTemplate.slice(i + 1, end);
+      // The variable name becomes a regex named-capture group, which must be
+      // a valid identifier (letter/underscore first, then letters/digits/
+      // underscore). Allowing a leading digit here would pass this check but
+      // make `new RegExp("(?<2x>...)")` throw an opaque SyntaxError below.
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(expr)) {
+        throw new Error(
+          `MCP resource template "${uriTemplate}" uses an unsupported ` +
+            `expression "{${expr}}". Only simple level-1 placeholders ` +
+            `("{name}", where name is a letter/underscore followed by ` +
+            `letters, digits, or underscores) are supported; operators ` +
+            `(+ # . / ; ? &) and comma lists ("{a,b}") are not.`,
+        );
+      }
+      if (varNames.includes(expr)) {
+        throw new Error(
+          `MCP resource template "${uriTemplate}" repeats the variable ` +
+            `"{${expr}}"; each variable must be unique.`,
+        );
+      }
+      varNames.push(expr);
+      pattern += `(?<${expr}>[^/]+)`;
+      i = end + 1;
+    } else {
+      pattern += escapeRegExp(ch);
+      i += 1;
+    }
+  }
+  if (varNames.length === 0) {
+    throw new Error(
+      `MCP resource template "${uriTemplate}" contains no "{var}" ` +
+        `placeholder; use defineMcpResource for a concrete resource instead.`,
+    );
+  }
+  const regex = new RegExp(`^${pattern}$`);
+  return (uri: string) => {
+    const match = regex.exec(uri);
+    if (!match || !match.groups) return null;
+    return { ...match.groups };
+  };
+}
+
+/**
+ * Declare an MCP resource template (RFC 6570). The returned provider can be
+ * passed to `gateway.handleMcpRequest({ resourceTemplates: [...] })`: it is
+ * advertised via `resources/templates/list`, and — when a `read` handler is
+ * supplied — used to resolve `resources/read` requests whose URI matches
+ * `uriTemplate` (concrete resources declared via `defineMcpResource` always
+ * take precedence).
+ *
+ * Use a template when resources are parameterized (e.g.
+ * `weather://{city}/current`); use `defineMcpResource` for a fixed, concrete
+ * URI. Only simple level-1 `{var}` placeholders are supported; an
+ * unsupported template throws here at definition time.
+ */
+export function defineMcpResourceTemplate(
+  config: McpResourceTemplateConfig,
+): McpResourceTemplateProvider {
+  if (
+    typeof config.uriTemplate !== "string" ||
+    config.uriTemplate.length === 0
+  ) {
+    throw new Error(
+      "MCP resource template uriTemplate must be a non-empty string",
+    );
+  }
+  if (typeof config.name !== "string" || config.name.length === 0) {
+    throw new Error("MCP resource template name must be a non-empty string");
+  }
+  if (config.read !== undefined && typeof config.read !== "function") {
+    throw new Error(
+      "MCP resource template read must be a function when provided",
+    );
+  }
+  // Validate any title/description/mimeType/annotations with the same rules
+  // the request handler enforces, so a bad declaration fails loud here.
+  const problem = describeResourceTemplateProblem(config);
+  if (problem) {
+    throw new Error(`MCP resource template is invalid: ${problem}`);
+  }
+  // Compile eagerly so an invalid uriTemplate fails at declaration time.
+  const match = compileUriTemplate(config.uriTemplate);
+  const template = pickTemplateFields(config);
+  return {
+    template,
+    match,
+    ...(config.read !== undefined ? { read: config.read } : {}),
+  };
+}
+
+function isStaticResourceProvider(
+  provider: McpResourceProvider,
+): provider is McpResourceRegistration {
+  return (
+    typeof (provider as { resource?: unknown }).resource === "object" &&
+    (provider as { resource?: unknown }).resource !== null
+  );
+}
+
+function declaredResourcesFromProviders(
+  providers: McpResourceProvider[] | undefined,
+): McpResourceDescriptor[] {
+  return (providers ?? [])
+    .filter(isStaticResourceProvider)
+    .map((provider) => provider.resource);
+}
+
+function resourcesFingerprint(resources: McpResourceDescriptor[]): string {
+  const normalized = resources
+    .map((resource) => ({
+      uri: resource.uri,
+      name: resource.name,
+      description: resource.description ?? null,
+      mimeType: resource.mimeType ?? null,
+      metadata: resource.metadata ?? null,
+    }))
+    .sort((a, b) => (a.uri < b.uri ? -1 : a.uri > b.uri ? 1 : 0));
+  return JSON.stringify(normalized);
+}
+
+async function syncDeclaredResources(
+  ctx: RunMutationCtx,
+  component: ComponentApi,
+  resources: McpResourceDescriptor[],
+): Promise<void> {
+  const fingerprint = resourcesFingerprint(resources);
+  const current = await ctx.runQuery(
+    component.registry.getResourcesFingerprint,
+    {},
+  );
+  if (current === fingerprint) return;
+  await ctx.runMutation(component.registry.replaceResources, {
+    resources,
+    fingerprint,
+  });
+}
+
+/**
+ * Project each template provider's `.template` into the registry descriptor
+ * shape (known fields only — defends against a hand-built provider whose
+ * `.template` carries extra keys the registry's validator would reject).
+ * Every template provider carries `.template`, so unlike resources there is
+ * no "static vs runtime-only" split to filter on.
+ */
+function declaredResourceTemplatesFromProviders(
+  providers: McpResourceTemplateProvider[] | undefined,
+): McpResourceTemplate[] {
+  return (providers ?? []).map((provider) =>
+    pickTemplateFields(provider.template),
+  );
+}
+
+function resourceTemplatesFingerprint(
+  templates: McpResourceTemplate[],
+): string {
+  const normalized = templates
+    .map((template) => ({
+      uriTemplate: template.uriTemplate,
+      name: template.name,
+      title: template.title ?? null,
+      description: template.description ?? null,
+      mimeType: template.mimeType ?? null,
+      annotations: template.annotations ?? null,
+    }))
+    .sort((a, b) =>
+      a.uriTemplate < b.uriTemplate
+        ? -1
+        : a.uriTemplate > b.uriTemplate
+          ? 1
+          : 0,
+    );
+  return JSON.stringify(normalized);
+}
+
+async function syncDeclaredResourceTemplates(
+  ctx: RunMutationCtx,
+  component: ComponentApi,
+  templates: McpResourceTemplate[],
+): Promise<void> {
+  const fingerprint = resourceTemplatesFingerprint(templates);
+  const current = await ctx.runQuery(
+    component.registry.getResourceTemplatesFingerprint,
+    {},
+  );
+  if (current === fingerprint) return;
+  await ctx.runMutation(component.registry.replaceResourceTemplates, {
+    templates,
+    fingerprint,
+  });
+}
+
+/**
  * Resolve a declarative tool list into the registry's row shape,
  * creating a `functionHandle` per tool. Shared by `register` and the
  * declarative `tools` sync.
@@ -500,6 +861,53 @@ export class McpGateway {
   }
 
   /**
+   * Upsert a single resource by URI. This stores catalog metadata only;
+   * resource contents are still served by the resource provider passed to
+   * `handleMcpRequest({ resources })`.
+   */
+  async registerResource(
+    ctx: RunMutationCtx,
+    resource: McpResourceDescriptor,
+  ): Promise<void> {
+    const problem = describeResourceProblem(resource);
+    if (problem) {
+      throw new Error(`MCP resource is invalid: ${problem}`);
+    }
+    await ctx.runMutation(this.component.registry.registerResource, resource);
+  }
+
+  /**
+   * Atomically replace the entire resource registry with the given catalog.
+   * Any resource currently in the registry whose URI is not in `resources`
+   * is removed; matching URIs are upserted. This mirrors `register` for
+   * tools, but persists metadata only, not read handlers or contents.
+   */
+  async registerResources(
+    ctx: RunMutationCtx,
+    resources: McpResourceDescriptor[],
+  ): Promise<void> {
+    for (const resource of resources) {
+      const problem = describeResourceProblem(resource);
+      if (problem) {
+        throw new Error(`MCP resource is invalid: ${problem}`);
+      }
+    }
+    await ctx.runMutation(this.component.registry.replaceResources, {
+      resources,
+    });
+  }
+
+  /**
+   * Remove a single resource by URI. Returns `true` if a row was deleted,
+   * `false` if no resource with that URI was registered.
+   */
+  async unregisterResource(ctx: RunMutationCtx, uri: string): Promise<boolean> {
+    return await ctx.runMutation(this.component.registry.unregisterResource, {
+      uri,
+    });
+  }
+
+  /**
    * List every tool currently in the registry, raw rows from the
    * component table. Useful for debugging or building admin UIs.
    * For the spec-compliant, authorize-filtered catalog that MCP
@@ -511,14 +919,93 @@ export class McpGateway {
   }
 
   /**
-   * Inspect the audit log written by the component on every `tools/call`.
-   * Returns newest entries first. Use `toolName` and/or `outcome` to filter;
-   * `limit` defaults to 100 and is capped server-side at 1000.
+   * List every resource currently in the registry, raw rows from the
+   * component table. For the spec-compliant catalog that MCP clients see,
+   * use `resources/list` via `handleMcpRequest`.
+   */
+  async listResources(ctx: RunQueryCtx) {
+    return await ctx.runQuery(this.component.registry.listResources, {});
+  }
+
+  /**
+   * Upsert a single resource template by `uriTemplate`. Stores catalog
+   * metadata only; matching reads are still served by a template provider
+   * passed to `handleMcpRequest({ resourceTemplates })`.
+   */
+  async registerResourceTemplate(
+    ctx: RunMutationCtx,
+    template: McpResourceTemplate,
+  ): Promise<void> {
+    const problem = describeResourceTemplateProblem(template);
+    if (problem) {
+      throw new Error(`MCP resource template is invalid: ${problem}`);
+    }
+    await ctx.runMutation(
+      this.component.registry.registerResourceTemplate,
+      template,
+    );
+  }
+
+  /**
+   * Atomically replace the entire resource-template registry with the given
+   * catalog. Templates whose `uriTemplate` is not in `templates` are removed;
+   * matching ones are upserted. Mirrors `registerResources`.
+   */
+  async registerResourceTemplates(
+    ctx: RunMutationCtx,
+    templates: McpResourceTemplate[],
+  ): Promise<void> {
+    for (const template of templates) {
+      const problem = describeResourceTemplateProblem(template);
+      if (problem) {
+        throw new Error(`MCP resource template is invalid: ${problem}`);
+      }
+    }
+    await ctx.runMutation(this.component.registry.replaceResourceTemplates, {
+      templates,
+    });
+  }
+
+  /**
+   * Remove a single resource template by `uriTemplate`. Returns `true` if a
+   * row was deleted, `false` if none was registered.
+   */
+  async unregisterResourceTemplate(
+    ctx: RunMutationCtx,
+    uriTemplate: string,
+  ): Promise<boolean> {
+    return await ctx.runMutation(
+      this.component.registry.unregisterResourceTemplate,
+      { uriTemplate },
+    );
+  }
+
+  /**
+   * List every resource template currently in the registry, raw rows from
+   * the component table. For the spec-compliant catalog that MCP clients
+   * see, use `resources/templates/list` via `handleMcpRequest`.
+   */
+  async listResourceTemplates(ctx: RunQueryCtx) {
+    return await ctx.runQuery(
+      this.component.registry.listResourceTemplates,
+      {},
+    );
+  }
+
+  /**
+   * Inspect the audit log written by the component on every `tools/call`
+   * and (when enabled) resource operation. Returns newest entries first.
+   * Filter by `entryType` (`"tool"` | `"resource"`), `toolName`,
+   * `resourceUri`, and/or `outcome`; `limit` defaults to 100 and is capped
+   * server-side at 1000. (The server applies one index per call; combining
+   * `resourceUri` and `toolName` is not meaningful since a row has only one.)
    */
   async listAuditEntries(
     ctx: RunQueryCtx,
     args: {
+      entryType?: "tool" | "resource";
       toolName?: string;
+      resourceUri?: string;
       outcome?: "allowed" | "denied" | "error";
       limit?: number;
     } = {},
@@ -535,10 +1022,7 @@ export class McpGateway {
    * insufficient. The component does not garbage-collect sessions
    * on its own.
    */
-  async pruneSessions(
-    ctx: RunMutationCtx,
-    idleMs: number,
-  ): Promise<number> {
+  async pruneSessions(ctx: RunMutationCtx, idleMs: number): Promise<number> {
     return await ctx.runMutation(this.component.sessions.pruneSessions, {
       olderThanMs: idleMs,
     });
@@ -586,6 +1070,96 @@ export class McpGateway {
    */
   async clearTools(ctx: RunMutationCtx): Promise<void> {
     await ctx.runMutation(this.component.registry.clearAllTools, {});
+  }
+
+  /**
+   * Wipe the entire resource registry. Does not touch tools, config,
+   * audit, or sessions.
+   */
+  async clearResources(ctx: RunMutationCtx): Promise<void> {
+    await ctx.runMutation(this.component.registry.clearAllResources, {});
+  }
+
+  /**
+   * Wipe the entire resource-template registry. Does not touch resources,
+   * tools, config, audit, or sessions.
+   */
+  async clearResourceTemplates(ctx: RunMutationCtx): Promise<void> {
+    await ctx.runMutation(
+      this.component.registry.clearAllResourceTemplates,
+      {},
+    );
+  }
+
+  /**
+   * List the session IDs currently subscribed to `uri` via
+   * `resources/subscribe`. A host that fronts the gateway with a
+   * push-capable transport reads this to decide whom to deliver a
+   * `notifications/resources/updated` to. See the `resourceSubscriptions`
+   * option on `handleMcpRequest`. Returned rows may reference sessions that
+   * have since been pruned; treat unknown sessions as no-ops and run
+   * `pruneResourceSubscriptions` to clean them.
+   */
+  async listResourceSubscribers(
+    ctx: RunQueryCtx,
+    uri: string,
+  ): Promise<string[]> {
+    return await ctx.runQuery(this.component.sessions.listResourceSubscribers, {
+      uri,
+    });
+  }
+
+  /**
+   * Delete subscription rows whose session no longer exists (sessions
+   * dropped by `pruneSessions` do not cascade their subscriptions). Drains
+   * fully by paging through the table in bounded windows (each window is its
+   * own component transaction) and returns the total number deleted. Wire it
+   * alongside `pruneSessions` in a cron when you use resource subscriptions.
+   */
+  async pruneResourceSubscriptions(ctx: RunMutationCtx): Promise<number> {
+    let total = 0;
+    let cursorCreationTime: number | undefined;
+    for (;;) {
+      const { deleted, cursor } = await ctx.runMutation(
+        this.component.sessions.pruneOrphanResourceSubscriptions,
+        cursorCreationTime !== undefined ? { cursorCreationTime } : {},
+      );
+      total += deleted;
+      if (cursor === null) break;
+      cursorCreationTime = cursor;
+    }
+    return total;
+  }
+
+  /**
+   * Build a `notifications/resources/list_changed` JSON-RPC notification for
+   * the host to deliver over its own transport when the resource catalog
+   * changes. The gateway does not deliver it (its HTTP transport cannot
+   * push); see the `resourceSubscriptions` option on `handleMcpRequest`.
+   */
+  buildResourceListChangedNotification(): {
+    jsonrpc: "2.0";
+    method: "notifications/resources/list_changed";
+  } {
+    return { jsonrpc: "2.0", method: "notifications/resources/list_changed" };
+  }
+
+  /**
+   * Build a `notifications/resources/updated` notification for `uri`, for the
+   * host to deliver to that resource's subscribers (see
+   * `listResourceSubscribers`). The payload carries only the URI; clients
+   * re-read via `resources/read`, which re-applies authorization.
+   */
+  buildResourceUpdatedNotification(uri: string): {
+    jsonrpc: "2.0";
+    method: "notifications/resources/updated";
+    params: { uri: string };
+  } {
+    return {
+      jsonrpc: "2.0",
+      method: "notifications/resources/updated",
+      params: { uri },
+    };
   }
 
   /**
@@ -659,15 +1233,38 @@ export class McpGateway {
     request: Request,
     options: HandleMcpRequestOptions,
   ): Promise<Response> {
-    const { tools, ...rest } = options;
+    const { tools, resources, resourceTemplates, ...rest } = options;
     const syncTools = tools
       ? async () => {
           await syncDeclaredTools(ctx, this.component, tools);
         }
       : undefined;
+    const declaredResources = declaredResourcesFromProviders(resources);
+    const syncResources =
+      resources !== undefined
+        ? async () => {
+            await syncDeclaredResources(ctx, this.component, declaredResources);
+          }
+        : undefined;
+    const declaredTemplates =
+      declaredResourceTemplatesFromProviders(resourceTemplates);
+    const syncResourceTemplates =
+      resourceTemplates !== undefined
+        ? async () => {
+            await syncDeclaredResourceTemplates(
+              ctx,
+              this.component,
+              declaredTemplates,
+            );
+          }
+        : undefined;
     return await handleMcpRequestImpl(ctx, request, this.component, {
       ...rest,
+      resources,
+      resourceTemplates,
       syncTools,
+      syncResources,
+      syncResourceTemplates,
     });
   }
 
@@ -853,8 +1450,7 @@ export class McpGateway {
       return new Response(
         JSON.stringify({
           error: "upstream_metadata_unreachable",
-          error_description:
-            err instanceof Error ? err.message : String(err),
+          error_description: err instanceof Error ? err.message : String(err),
         }),
         {
           status: 502,
@@ -953,7 +1549,12 @@ export class McpGateway {
     try {
       body = (await request.json()) as typeof body;
     } catch {
-      return jsonError(400, "invalid_client_metadata", "Invalid JSON body", corsHeaders);
+      return jsonError(
+        400,
+        "invalid_client_metadata",
+        "Invalid JSON body",
+        corsHeaders,
+      );
     }
     const redirectUris = Array.isArray(body.redirect_uris)
       ? (body.redirect_uris as unknown[])
@@ -974,12 +1575,10 @@ export class McpGateway {
       // Truncate each echoed URI to bound response size against an
       // attacker probing the (public, unauthenticated) DCR endpoint
       // with megabyte-scale payloads.
-      const sample = invalid
-        .slice(0, 5)
-        .map((u) => {
-          const s = typeof u === "string" ? u : JSON.stringify(u);
-          return s.length > 200 ? `${s.slice(0, 200)}...` : s;
-        });
+      const sample = invalid.slice(0, 5).map((u) => {
+        const s = typeof u === "string" ? u : JSON.stringify(u);
+        return s.length > 200 ? `${s.slice(0, 200)}...` : s;
+      });
       const description =
         invalid.length === 1
           ? `redirect_uri not allowed: ${sample[0]}`

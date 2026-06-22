@@ -25,6 +25,11 @@ Built as a [Convex Component](https://www.convex.dev/components).
 - **MCP 2025-06-18 Streamable HTTP**: sessions, `Accept` negotiation,
   `MCP-Protocol-Version` validation, identity-bound `DELETE`, single-
   frame SSE
+- **MCP resources**: `defineMcpResource` / `defineMcpResourceTemplate`
+  serve `resources/list`, `resources/read`, and `resources/templates/list`
+  (RFC 6570). Central `authorizeResource` hook, opt-in resource audit,
+  runtime shape validation, and opt-in `resources/subscribe` capability.
+  See [Resources & templates](./docs/resources.md)
 - **One authorize callback**: gates `tools/call` and filters `tools/list`
   with `mode: "list" | "call"`; uses your existing `ctx.auth.getUserIdentity()`
 - **OAuth 2.1 protected-resource discovery**: RFC 9728 metadata,
@@ -117,10 +122,7 @@ export const tools = [
 ```ts
 // convex/http.ts, mount the gateway with your authorize callback
 import { httpRouter } from "convex/server";
-import {
-  McpGateway,
-  type McpAuthorizerHandler,
-} from "convex-mcp-gateway";
+import { McpGateway, type McpAuthorizerHandler } from "convex-mcp-gateway";
 import { components } from "./_generated/api.js";
 import { httpAction } from "./_generated/server.js";
 import { tools } from "./mcp.js";
@@ -185,6 +187,56 @@ client like **claude.ai**, add `requireAuth: true` to the
 only reacts to a 401. See
 [OAuth: all-private servers](./docs/oauth.md#all-private-servers-and-browser-clients-requireauth).
 
+## Resources
+
+Alongside tools, the gateway serves MCP **resources** (read-only content).
+Declare a concrete resource with `defineMcpResource` and pass it to the
+same `handleMcpRequest` call as your tools:
+
+```ts
+// convex/mcp.ts
+import { defineMcpResource } from "convex-mcp-gateway";
+import { api } from "./_generated/api.js";
+
+export const resources = [
+  defineMcpResource({
+    uri: "invoices://summary",
+    name: "invoice-summary",
+    title: "Invoice summary",
+    mimeType: "application/json",
+    // Read handlers receive the resolved caller identity; anonymous
+    // resource requests are rejected before this runs.
+    read: async (ctx, { uri, identity }) => {
+      const summary = await ctx.runQuery(api.invoices.summary, {});
+      return [
+        {
+          uri,
+          mimeType: "application/json",
+          text: JSON.stringify({ ...summary, caller: identity.subject }),
+        },
+      ];
+    },
+  }),
+];
+```
+
+```ts
+// convex/http.ts — add `resources` to the same mount as `tools`
+const mcp = httpAction(async (ctx, req) =>
+  gateway.handleMcpRequest(ctx, req, { authorize, tools, resources }),
+);
+```
+
+Supported methods: `resources/list`, `resources/read`,
+`resources/templates/list` (RFC 6570 templates via
+`defineMcpResourceTemplate`), and opt-in `resources/subscribe` /
+`resources/unsubscribe`. A central `authorizeResource` hook gates
+list/read, resource operations are auditable, and reads run only for
+authenticated callers. A complete, runnable example (concrete resource +
+template + per-resource auth + audit + subscription) is wired into
+[`example/convex`](./example/convex/mcp.ts); see
+[Resources & templates](./docs/resources.md) for the full guide.
+
 ## Documentation
 
 - **[Getting Started](./docs/getting-started.md)**: install, register,
@@ -193,6 +245,8 @@ only reacts to a 401. See
   flow, sequence diagrams
 - **[Authorization](./docs/authorization.md)**: authorizer contract,
   `mode: "list"` vs `"call"`, scope/role recipes
+- **[Resources & templates](./docs/resources.md)**: concrete resources
+  vs RFC 6570 templates, `resources/templates/list`, read resolution
 - **[OAuth 2.1 setup](./docs/oauth.md)**: RFC 9728 discovery, host-side
   mount, multi-tenant, `requireAuth` for all-private servers
 - **[OAuth bridge mode](./docs/oauth-bridge.md)**: opt-in DCR + AS
@@ -252,7 +306,8 @@ security-critical surfaces in one component). Bring your own OAuth 2.1
 - Capability tokens for agent-spawning workflows (small JWT helper,
   not a full AS: `gateway.signCapabilityToken({ tools, runId, ttl })`
   plus authorizer-side validation)
-- `mcpResource` and `mcpPrompt` MCP primitives
+- `mcpPrompt` MCP primitive (the `mcpResource` primitive has shipped, see
+  [Resources & templates](./docs/resources.md))
 - Pre-baked multi-tenant patterns (per-tenant URL, RFC 8707 audience
   binding)
 - RFC 8693 token exchange for cross-domain identity

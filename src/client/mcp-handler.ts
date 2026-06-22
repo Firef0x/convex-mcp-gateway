@@ -78,6 +78,142 @@ export type McpIdentityResolver = (
 ) => Promise<{ subject: string; claims?: Record<string, unknown> } | null>;
 
 /**
+ * MCP resource/content annotations. All fields optional:
+ * - `audience`: who the resource is for (`"user"` and/or `"assistant"`).
+ * - `priority`: importance from `0` (least) to `1` (most).
+ * - `lastModified`: timestamp of the last change, conventionally ISO 8601.
+ *   Validated only as a string; the date format is not enforced.
+ */
+export type McpResourceAnnotations = {
+  audience?: ("user" | "assistant")[];
+  priority?: number;
+  lastModified?: string;
+};
+
+export type McpResource = {
+  uri: string;
+  name: string;
+  /** Human-friendly display name; falls back to `name` in clients. */
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  annotations?: McpResourceAnnotations;
+  /** Raw size in bytes, if known. */
+  size?: number;
+};
+
+export type McpResourceContent = {
+  uri: string;
+  mimeType?: string;
+  text?: string;
+  blob?: string;
+};
+
+export type McpResourceProvider = {
+  name: string;
+  list: (
+    ctx: McpHandlerCtx,
+    args: { identity: { subject: string; claims?: Record<string, unknown> } },
+  ) => Promise<McpResource[]>;
+  read: (
+    ctx: McpHandlerCtx,
+    args: {
+      uri: string;
+      identity: { subject: string; claims?: Record<string, unknown> };
+    },
+  ) => Promise<McpResourceContent[] | null>;
+};
+
+/**
+ * An RFC 6570 resource template advertised via `resources/templates/list`.
+ * `uriTemplate` is a level-1 template (simple `{var}` placeholders, each
+ * matching a single URI path segment); clients expand it to a concrete URI
+ * and read it through `resources/read`.
+ */
+export type McpResourceTemplate = {
+  uriTemplate: string;
+  name: string;
+  /** Human-friendly display name; falls back to `name` in clients. */
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  annotations?: McpResourceAnnotations;
+};
+
+/**
+ * Server-side read handler for a resource template: invoked when a
+ * `resources/read` URI matches the template, with the extracted template
+ * variables in `params`. Returns `null` to decline the URI (a later
+ * template or a not-found is then used).
+ */
+export type McpResourceTemplateReadHandler = (
+  ctx: McpHandlerCtx,
+  args: {
+    uri: string;
+    params: Record<string, string>;
+    identity: { subject: string; claims?: Record<string, unknown> };
+  },
+) => Promise<McpResourceContent[] | null>;
+
+/**
+ * Runtime form of a resource template, as produced by
+ * `defineMcpResourceTemplate`. `match` returns the extracted template
+ * variables when a concrete URI matches `template.uriTemplate`, or `null`
+ * when it doesn't. `read` is optional: present means the gateway resolves
+ * expanded-URI reads server-side; absent means the template is
+ * listing-only (the client reads the expansion via another provider).
+ */
+export type McpResourceTemplateProvider = {
+  template: McpResourceTemplate;
+  match: (uri: string) => Record<string, string> | null;
+  read?: McpResourceTemplateReadHandler;
+};
+
+export interface McpResourceAuthorizerArgs {
+  /**
+   * `"resource_list"` when filtering `resources/list`,
+   * `"resource_read"` before a `resources/read` handler runs,
+   * `"resource_templates_list"` when filtering `resources/templates/list`
+   * (here `resourceUri` carries the template's `uriTemplate`).
+   *
+   * Note on templates: `resources/read` of a template-expanded URI is
+   * authorized under `"resource_read"` with the **concrete expanded URI**
+   * (e.g. `weather://london/current`), not the `uriTemplate`, and with
+   * `resourceMetadata: null`. So a template hidden at list time
+   * (`"resource_templates_list"` → denied) is NOT automatically unreadable:
+   * `"resource_read"` is the read gate for both concrete and template URIs.
+   * Enforce read access in the `resource_read` branch (match the URI shape)
+   * and/or inside the template's own `read` handler.
+   */
+  mode: "resource_list" | "resource_read" | "resource_templates_list";
+  resourceUri: string;
+  /**
+   * Free-form metadata attached to a registered resource. Runtime-only
+   * provider resources that are not present in the registry pass `null`.
+   */
+  resourceMetadata: unknown;
+  /**
+   * The caller's identity resolved once at the gateway boundary. Resource
+   * methods currently require an authenticated caller, so this is non-null
+   * when the callback runs.
+   */
+  identity: { subject: string; claims?: Record<string, unknown> };
+}
+
+export type McpResourceAuthorizerHandler = (
+  ctx: McpHandlerCtx,
+  args: McpResourceAuthorizerArgs,
+) => Promise<McpAuthorizerDecision> | McpAuthorizerDecision;
+
+export type McpResourceAuditOption =
+  | boolean
+  | {
+      list?: boolean;
+      read?: boolean;
+      templatesList?: boolean;
+    };
+
+/**
  * Options for `gateway.handleMcpRequest`. The host supplies an
  * `authorize` callback that decides allowed vs denied per
  * `tools/call` and per tool in a filtered `tools/list`. The callback
@@ -139,6 +275,68 @@ export interface HandleMcpRequestOptions {
    * Convex codegen circular-type error (see that type's docs).
    */
   tools?: McpToolRegistration[];
+  /**
+   * Optional MCP resources exposed by this gateway. Resources are listed
+   * in `initialize.capabilities.resources`, served via `resources/list`,
+   * and read via `resources/read`. Resource providers receive the resolved
+   * caller identity; anonymous resource requests are rejected.
+   */
+  resources?: McpResourceProvider[];
+  /**
+   * Optional MCP resource templates (RFC 6570) exposed by this gateway.
+   * Advertised via `resources/templates/list` and, for templates declared
+   * with a `read` handler, resolved server-side when `resources/read`
+   * requests a URI that matches the template (concrete resources take
+   * precedence). Build these with `defineMcpResourceTemplate`.
+   */
+  resourceTemplates?: McpResourceTemplateProvider[];
+  /**
+   * Optional central authorization hook for MCP resources. If omitted,
+   * authenticated callers can list/read all resources exposed by providers.
+   * If set, `resources/list` filters resources through `resource_list`, and
+   * `resources/read` checks `resource_read` before invoking the provider.
+   */
+  authorizeResource?: McpResourceAuthorizerHandler;
+  /**
+   * Opt-in audit for MCP resource operations. Defaults to `false`.
+   * `true` records `resources/list`, `resources/read`, and
+   * `resources/templates/list`; the object form (`{ list, read,
+   * templatesList }`) enables each operation independently. Resource
+   * contents are never stored.
+   */
+  auditResources?: McpResourceAuditOption;
+  /**
+   * Opt-in MCP resource subscription support. **Off by default**, because
+   * this gateway's HTTP transport is request-scoped and cannot push
+   * server-initiated notifications (`notifications/resources/updated` /
+   * `notifications/resources/list_changed`). With both flags off,
+   * `initialize` advertises neither capability and `resources/subscribe` /
+   * `resources/unsubscribe` return a clear `-32601`.
+   *
+   * Set these flags ONLY when the host fronts the gateway with a transport
+   * that CAN deliver notifications (its own SSE/WebSocket layer). The
+   * gateway then advertises the capability and tracks subscribe/unsubscribe
+   * state per session; the host owns delivery — it reads
+   * `gateway.listResourceSubscribers(uri)` and ships payloads built with
+   * `gateway.buildResourceUpdatedNotification` /
+   * `gateway.buildResourceListChangedNotification`.
+   *
+   * - `subscribe`: advertise `capabilities.resources.subscribe` and handle
+   *   `resources/subscribe` / `resources/unsubscribe`.
+   * - `listChanged`: advertise `capabilities.resources.listChanged` (the
+   *   host emits `notifications/resources/list_changed` itself when its
+   *   catalog changes).
+   */
+  resourceSubscriptions?: {
+    subscribe?: boolean;
+    listChanged?: boolean;
+  };
+  /**
+   * Optional instructions appended to the `initialize` result. Useful for
+   * telling clients how to use the resource catalog without modifying the
+   * host's tool definitions.
+   */
+  initializeInstructions?: string;
 }
 
 /**
@@ -149,14 +347,18 @@ export interface HandleMcpRequestOptions {
  */
 type InternalHandleMcpRequestOptions = HandleMcpRequestOptions & {
   syncTools?: () => Promise<void>;
+  syncResources?: () => Promise<void>;
+  syncResourceTemplates?: () => Promise<void>;
 };
 
-type HandlerCtx = {
+export type McpHandlerCtx = {
   runQuery: (ref: any, args: any) => Promise<any>;
   runMutation: (ref: any, args: any) => Promise<any>;
   runAction: (ref: any, args: any) => Promise<any>;
   auth: { getUserIdentity: () => Promise<any> };
 };
+
+type HandlerCtx = McpHandlerCtx;
 
 type JsonRpcMessage = {
   jsonrpc?: "2.0";
@@ -176,6 +378,33 @@ type RegisteredTool = {
   metadata?: unknown;
 };
 
+// A row from the resource registry. Narrower than `McpResource`: the
+// registry persists only these catalog fields (the richer title/annotations/
+// size are runtime-only and never stored), so the row type reflects that.
+type RegisteredResource = {
+  uri: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+  metadata?: unknown;
+};
+
+type ResourceCandidate = {
+  resource: McpResource;
+  metadata: unknown;
+};
+
+// A row from the resource-template registry. Unlike concrete resources,
+// templates persist their full descriptor (incl. title/annotations).
+type RegisteredResourceTemplate = {
+  uriTemplate: string;
+  name: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  annotations?: McpResourceAnnotations;
+};
+
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26"] as const;
 const DEFAULT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
 const SERVER_NAME = "convex-mcp-gateway";
@@ -183,6 +412,7 @@ const SERVER_VERSION = "0.0.0";
 
 const UNAUTHORIZED = -32001;
 const FORBIDDEN = -32003;
+const INVALID_PARAMS = -32602;
 const INTERNAL_ERROR = -32603;
 
 function resolveCorsOrigin(
@@ -308,10 +538,7 @@ function sseEvent(id: number, payload: string): string {
   return `id: ${id}\nevent: message\ndata: ${payload}\n\n`;
 }
 
-function jsonResultEnvelope(
-  id: JsonRpcMessage["id"],
-  value: unknown,
-): string {
+function jsonResultEnvelope(id: JsonRpcMessage["id"], value: unknown): string {
   return JSON.stringify({ jsonrpc: "2.0", id: id ?? null, result: value });
 }
 
@@ -382,6 +609,286 @@ async function safeAuthorize(
       decision: { allowed: false, reason: `Authorizer threw: ${message}` },
       threw: true,
     };
+  }
+}
+
+async function safeAuthorizeResource(
+  authorizeResource: McpResourceAuthorizerHandler | undefined,
+  ctx: HandlerCtx,
+  args: McpResourceAuthorizerArgs,
+): Promise<{ decision: McpAuthorizerDecision; threw: boolean }> {
+  if (!authorizeResource) {
+    return { decision: { allowed: true }, threw: false };
+  }
+  try {
+    const result = await authorizeResource(ctx, args);
+    return { decision: parseAuthorizerDecision(result), threw: false };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      decision: {
+        allowed: false,
+        reason: `Resource authorizer threw: ${message}`,
+      },
+      threw: true,
+    };
+  }
+}
+
+function mergeInitializeInstructions(
+  existing: unknown,
+  instructions: string | undefined,
+): string | unknown {
+  if (!instructions) return existing;
+  if (typeof existing === "string" && existing.trim()) {
+    return `${existing.trim()}\n\n${instructions}`;
+  }
+  return instructions;
+}
+
+function dedupeResourceCandidates(
+  candidates: ResourceCandidate[],
+): ResourceCandidate[] {
+  const byUri = new Map<string, ResourceCandidate>();
+  for (const candidate of candidates) {
+    const existing = byUri.get(candidate.resource.uri);
+    byUri.set(candidate.resource.uri, {
+      resource: candidate.resource,
+      metadata: candidate.metadata ?? existing?.metadata ?? null,
+    });
+  }
+  return Array.from(byUri.values());
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Validate MCP resource/content annotations. Returns a human-readable
+ * problem string, or `null` when valid (including when `undefined`).
+ * Exported so the `defineMcp*` helpers can fail loud at declaration time
+ * with the same rules the request handler enforces on provider output.
+ */
+export function describeAnnotationsProblem(
+  annotations: unknown,
+): string | null {
+  if (annotations === undefined) return null;
+  if (!isPlainObject(annotations)) return "annotations must be an object";
+  if (annotations.audience !== undefined) {
+    if (
+      !Array.isArray(annotations.audience) ||
+      !annotations.audience.every((a) => a === "user" || a === "assistant")
+    ) {
+      return 'annotations.audience must be an array of "user" | "assistant"';
+    }
+  }
+  if (annotations.priority !== undefined) {
+    if (
+      typeof annotations.priority !== "number" ||
+      annotations.priority < 0 ||
+      annotations.priority > 1
+    ) {
+      return "annotations.priority must be a number between 0 and 1";
+    }
+  }
+  if (
+    annotations.lastModified !== undefined &&
+    typeof annotations.lastModified !== "string"
+  ) {
+    return "annotations.lastModified must be a string";
+  }
+  return null;
+}
+
+/**
+ * Validate an MCP resource descriptor (a `resources/list` entry). Returns a
+ * problem string or `null`. `uri` and `name` are required non-empty strings;
+ * `title`/`description`/`mimeType` are optional strings; `size` is an
+ * optional non-negative number; `annotations` is validated as above.
+ */
+export function describeResourceProblem(resource: unknown): string | null {
+  if (!isPlainObject(resource)) return "resource must be an object";
+  if (typeof resource.uri !== "string" || resource.uri.length === 0) {
+    return "resource.uri must be a non-empty string";
+  }
+  if (typeof resource.name !== "string" || resource.name.length === 0) {
+    return "resource.name must be a non-empty string";
+  }
+  for (const field of ["title", "description", "mimeType"] as const) {
+    if (resource[field] !== undefined && typeof resource[field] !== "string") {
+      return `resource.${field} must be a string`;
+    }
+  }
+  if (
+    resource.size !== undefined &&
+    (typeof resource.size !== "number" ||
+      !Number.isFinite(resource.size) ||
+      resource.size < 0)
+  ) {
+    return "resource.size must be a non-negative number";
+  }
+  return describeAnnotationsProblem(resource.annotations);
+}
+
+/**
+ * Validate an MCP resource template descriptor (a `resources/templates/list`
+ * entry). Like `describeResourceProblem` but keyed on `uriTemplate` and
+ * without `size`.
+ */
+export function describeResourceTemplateProblem(
+  template: unknown,
+): string | null {
+  if (!isPlainObject(template)) return "resource template must be an object";
+  if (
+    typeof template.uriTemplate !== "string" ||
+    template.uriTemplate.length === 0
+  ) {
+    return "template.uriTemplate must be a non-empty string";
+  }
+  if (typeof template.name !== "string" || template.name.length === 0) {
+    return "template.name must be a non-empty string";
+  }
+  for (const field of ["title", "description", "mimeType"] as const) {
+    if (template[field] !== undefined && typeof template[field] !== "string") {
+      return `template.${field} must be a string`;
+    }
+  }
+  return describeAnnotationsProblem(template.annotations);
+}
+
+/**
+ * Validate the array a resource read handler returns. Must be an array; each
+ * item needs a non-empty string `uri`, optional string `mimeType`, and at
+ * least one of `text`/`blob` (each a string when present). Returns a problem
+ * string or `null`.
+ */
+export function describeResourceContentsProblem(
+  contents: unknown,
+): string | null {
+  if (!Array.isArray(contents)) {
+    return "resource read result must be an array of content items";
+  }
+  for (const item of contents) {
+    if (!isPlainObject(item)) return "each content item must be an object";
+    if (typeof item.uri !== "string" || item.uri.length === 0) {
+      return "content.uri must be a non-empty string";
+    }
+    if (item.mimeType !== undefined && typeof item.mimeType !== "string") {
+      return "content.mimeType must be a string";
+    }
+    if (item.text !== undefined && typeof item.text !== "string") {
+      return "content.text must be a string";
+    }
+    if (item.blob !== undefined && typeof item.blob !== "string") {
+      return "content.blob must be a string";
+    }
+    if (item.text === undefined && item.blob === undefined) {
+      return "content item must include text or blob";
+    }
+  }
+  return null;
+}
+
+function publicResource(resource: RegisteredResource): McpResource {
+  return {
+    uri: resource.uri,
+    name: resource.name,
+    ...(resource.description !== undefined
+      ? { description: resource.description }
+      : {}),
+    ...(resource.mimeType !== undefined ? { mimeType: resource.mimeType } : {}),
+  };
+}
+
+/**
+ * Project an arbitrary resource-shaped object down to exactly the known
+ * `McpResource` fields. Applied to every `resources/list` entry before it
+ * ships, so a provider's stray/internal keys never leak to the client (the
+ * template path does the same via `pickTemplateFields`).
+ */
+function pickResourceFields(resource: McpResource): McpResource {
+  return {
+    uri: resource.uri,
+    name: resource.name,
+    ...(resource.title !== undefined ? { title: resource.title } : {}),
+    ...(resource.description !== undefined
+      ? { description: resource.description }
+      : {}),
+    ...(resource.mimeType !== undefined ? { mimeType: resource.mimeType } : {}),
+    ...(resource.annotations !== undefined
+      ? { annotations: resource.annotations }
+      : {}),
+    ...(resource.size !== undefined ? { size: resource.size } : {}),
+  };
+}
+
+/**
+ * Project an arbitrary template-shaped object down to exactly the known
+ * `McpResourceTemplate` fields. Shared by the request handler (response
+ * shaping), `defineMcpResourceTemplate`, and the registry-sync projection so
+ * the three never drift, and so a hand-built provider's extra keys never
+ * reach the response or the registry's strict validator.
+ */
+export function pickTemplateFields(
+  template: McpResourceTemplate,
+): McpResourceTemplate {
+  return {
+    uriTemplate: template.uriTemplate,
+    name: template.name,
+    ...(template.title !== undefined ? { title: template.title } : {}),
+    ...(template.description !== undefined
+      ? { description: template.description }
+      : {}),
+    ...(template.mimeType !== undefined ? { mimeType: template.mimeType } : {}),
+    ...(template.annotations !== undefined
+      ? { annotations: template.annotations }
+      : {}),
+  };
+}
+
+function registeredResourceCandidate(
+  resource: RegisteredResource,
+): ResourceCandidate {
+  return {
+    resource: publicResource(resource),
+    metadata: resource.metadata ?? null,
+  };
+}
+
+function shouldAuditResource(
+  auditResources: McpResourceAuditOption | undefined,
+  operation: "list" | "read" | "templatesList",
+): boolean {
+  if (auditResources === true) return true;
+  if (!auditResources) return false;
+  return auditResources[operation] === true;
+}
+
+async function safeRecordResourceAudit(
+  ctx: HandlerCtx,
+  component: ComponentApi,
+  entry: {
+    resourceUri?: string;
+    resourceOperation: "list" | "read" | "templates_list";
+    args: unknown;
+    outcome: "allowed" | "denied" | "error";
+    identitySubject: string | null;
+    durationMs: number;
+    errorCode?: number;
+    errorMessage?: string;
+  },
+): Promise<void> {
+  try {
+    await ctx.runMutation(component.audit.recordResourceEntry, entry);
+  } catch (err) {
+    console.error(
+      "[mcp-gateway] failed to record resource audit entry",
+      entry.resourceOperation,
+      entry.resourceUri ?? "(none)",
+      entry.outcome,
+      err,
+    );
   }
 }
 
@@ -526,10 +1033,10 @@ async function handlePost(
     // Per MCP §"Sending Messages": server SHOULD return an HTTP error
     // status when it cannot accept the input. JSON-RPC body retained
     // for clients that read it.
-    return new Response(
-      jsonErrorEnvelope(null, -32700, "Parse error"),
-      { status: 400, headers: { "content-type": "application/json" } },
-    );
+    return new Response(jsonErrorEnvelope(null, -32700, "Parse error"), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
   }
 
   // MCP forbids batched requests over Streamable HTTP. Clearer error
@@ -586,6 +1093,10 @@ async function handlePost(
   // is 404 (per MCP 2025-06-18 §Session Management).
   let sessionId: string;
   let issueSessionHeader = false;
+  // The identity bound to the session at create time (undefined for the
+  // initialize path and for legacy pre-binding rows). Used to identity-bind
+  // session-scoped mutations like resources/subscribe.
+  let sessionOwnerSubject: string | null | undefined;
 
   if (isInitialize) {
     sessionId = generateSessionId();
@@ -623,6 +1134,7 @@ async function handlePost(
       return new Response("Unknown or terminated session", { status: 404 });
     }
     sessionId = headerSessionId;
+    sessionOwnerSubject = session.identitySubject;
     try {
       await ctx.runMutation(component.sessions.touchSession, {
         sessionId: headerSessionId,
@@ -654,7 +1166,11 @@ async function handlePost(
     );
   }
 
-  let body: string;
+  let body: string = jsonErrorEnvelope(
+    message.id,
+    INTERNAL_ERROR,
+    "Handler did not produce a response",
+  );
   let raw: Response | null = null;
 
   switch (message.method) {
@@ -680,6 +1196,40 @@ async function handlePost(
           throw err;
         }
       }
+      if (options.syncResources) {
+        try {
+          await options.syncResources();
+        } catch (err) {
+          console.error(
+            "[mcp-gateway] declarative resource sync failed during initialize; " +
+              "the connection will fail. Check the static resources passed to " +
+              "handleMcpRequest (e.g. duplicate resource URIs).",
+            err,
+          );
+          throw err;
+        }
+      }
+      if (options.syncResourceTemplates) {
+        try {
+          await options.syncResourceTemplates();
+        } catch (err) {
+          console.error(
+            "[mcp-gateway] declarative resource-template sync failed during " +
+              "initialize; the connection will fail. Check the resourceTemplates " +
+              "passed to handleMcpRequest (e.g. duplicate uriTemplates).",
+            err,
+          );
+          throw err;
+        }
+      }
+      const registeredResources = (await ctx.runQuery(
+        component.registry.listResources,
+        {},
+      )) as RegisteredResource[];
+      const registeredTemplates = (await ctx.runQuery(
+        component.registry.listResourceTemplates,
+        {},
+      )) as RegisteredResourceTemplate[];
       const requested = message.params?.protocolVersion;
       const negotiated =
         typeof requested === "string" &&
@@ -691,14 +1241,595 @@ async function handlePost(
         protocolVersion: negotiated,
         identitySubject: auditIdentitySubject,
       });
+      // Advertise the resources capability when any resource feature is
+      // configured. The subscribe/listChanged flags are added only when the
+      // host opts in (and thus has a transport that can deliver); otherwise
+      // the capability stays `{}` — the historical, accurate default.
+      const advertiseResources =
+        registeredResources.length > 0 ||
+        registeredTemplates.length > 0 ||
+        (options.resources ?? []).length > 0 ||
+        (options.resourceTemplates ?? []).length > 0 ||
+        Boolean(options.resourceSubscriptions?.subscribe) ||
+        Boolean(options.resourceSubscriptions?.listChanged);
       body = jsonResultEnvelope(message.id, {
         protocolVersion: negotiated,
         serverInfo: options.serverInfo ?? {
           name: SERVER_NAME,
           version: SERVER_VERSION,
         },
-        capabilities: { tools: {} },
+        instructions: mergeInitializeInstructions(
+          undefined,
+          options.initializeInstructions,
+        ),
+        capabilities: {
+          tools: {},
+          ...(advertiseResources
+            ? {
+                resources: {
+                  ...(options.resourceSubscriptions?.subscribe
+                    ? { subscribe: true }
+                    : {}),
+                  ...(options.resourceSubscriptions?.listChanged
+                    ? { listChanged: true }
+                    : {}),
+                },
+              }
+            : {}),
+        },
       });
+      break;
+    }
+
+    case "resources/list": {
+      const start = Date.now();
+      const providers = options.resources ?? [];
+      const templates = options.resourceTemplates ?? [];
+      const registeredResources = (await ctx.runQuery(
+        component.registry.listResources,
+        {},
+      )) as RegisteredResource[];
+      if (
+        providers.length === 0 &&
+        registeredResources.length === 0 &&
+        templates.length === 0
+      ) {
+        body = jsonErrorEnvelope(
+          message.id,
+          -32601,
+          `Unsupported method: ${message.method}`,
+        );
+        break;
+      }
+      if (!identity) {
+        if (shouldAuditResource(options.auditResources, "list")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceOperation: "list",
+            args: null,
+            outcome: "denied",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+            errorCode: UNAUTHORIZED,
+            errorMessage: "Unauthorized: authentication required",
+          });
+        }
+        body = jsonErrorEnvelope(
+          message.id,
+          UNAUTHORIZED,
+          "Unauthorized: authentication required",
+        );
+        break;
+      }
+      try {
+        // Isolate each provider: a single provider that throws must not
+        // collapse the whole catalog. Mirrors the per-item isolation
+        // tools/list uses for authorizer throws — a buggy provider hides
+        // only its own resources, the healthy providers still list.
+        const providerResources = (
+          await Promise.all(
+            providers.map(async (provider) => {
+              try {
+                return await provider.list(ctx, { identity });
+              } catch (err) {
+                console.error(
+                  "[mcp-gateway] resource provider threw during resources/list",
+                  provider.name,
+                  err,
+                );
+                return [];
+              }
+            }),
+          )
+        ).flat();
+        // Validate provider output before it reaches the client. A
+        // structurally invalid descriptor is a provider bug, so fail the
+        // whole list loudly with a deterministic -32603 (caught below)
+        // rather than ship malformed JSON-RPC.
+        for (const resource of providerResources) {
+          const problem = describeResourceProblem(resource);
+          if (problem) {
+            throw new Error(
+              `resources/list provider returned an invalid resource: ${problem}`,
+            );
+          }
+        }
+        const metadataByUri = new Map(
+          registeredResources.map((resource) => [
+            resource.uri,
+            resource.metadata ?? null,
+          ]),
+        );
+        const candidates = dedupeResourceCandidates([
+          ...registeredResources.map(registeredResourceCandidate),
+          ...providerResources.map((resource) => ({
+            resource,
+            metadata: metadataByUri.get(resource.uri) ?? null,
+          })),
+        ]);
+        const resources = [];
+        for (const candidate of candidates) {
+          const { decision, threw } = await safeAuthorizeResource(
+            options.authorizeResource,
+            ctx,
+            {
+              mode: "resource_list",
+              resourceUri: candidate.resource.uri,
+              resourceMetadata: candidate.metadata,
+              identity,
+            },
+          );
+          if (threw) {
+            console.error(
+              "[mcp-gateway] resource authorizer threw during resources/list for resource",
+              candidate.resource.uri,
+              decision.reason,
+            );
+          }
+          if (decision.allowed) {
+            resources.push(pickResourceFields(candidate.resource));
+          }
+        }
+        if (shouldAuditResource(options.auditResources, "list")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceOperation: "list",
+            args: { resourceCount: resources.length },
+            outcome: "allowed",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+          });
+        }
+        body = jsonResultEnvelope(message.id, { resources });
+      } catch (err) {
+        const messageText = err instanceof Error ? err.message : String(err);
+        if (shouldAuditResource(options.auditResources, "list")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceOperation: "list",
+            args: null,
+            outcome: "error",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+            errorCode: INTERNAL_ERROR,
+            errorMessage: messageText,
+          });
+        }
+        body = jsonErrorEnvelope(message.id, INTERNAL_ERROR, messageText);
+      }
+      break;
+    }
+
+    case "resources/templates/list": {
+      const start = Date.now();
+      const providers = options.resourceTemplates ?? [];
+      const registeredTemplates = (await ctx.runQuery(
+        component.registry.listResourceTemplates,
+        {},
+      )) as RegisteredResourceTemplate[];
+      // Distinct capability surface: unsupported only when NO templates are
+      // configured at all (no runtime providers and none registered). A
+      // registry-only template catalog is fully supported.
+      if (providers.length === 0 && registeredTemplates.length === 0) {
+        body = jsonErrorEnvelope(
+          message.id,
+          -32601,
+          `Unsupported method: ${message.method}`,
+        );
+        break;
+      }
+      if (!identity) {
+        if (shouldAuditResource(options.auditResources, "templatesList")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceOperation: "templates_list",
+            args: null,
+            outcome: "denied",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+            errorCode: UNAUTHORIZED,
+            errorMessage: "Unauthorized: authentication required",
+          });
+        }
+        body = jsonErrorEnvelope(
+          message.id,
+          UNAUTHORIZED,
+          "Unauthorized: authentication required",
+        );
+        break;
+      }
+      try {
+        // Merge registered templates with runtime providers, deduped by
+        // uriTemplate; a runtime provider wins (it's live and carries the
+        // read handler), mirroring how resources/list prefers providers.
+        const byUriTemplate = new Map<string, McpResourceTemplate>();
+        for (const row of registeredTemplates) {
+          byUriTemplate.set(row.uriTemplate, row);
+        }
+        for (const provider of providers) {
+          byUriTemplate.set(provider.template.uriTemplate, provider.template);
+        }
+        const resourceTemplates = [];
+        for (const template of byUriTemplate.values()) {
+          const problem = describeResourceTemplateProblem(template);
+          if (problem) {
+            throw new Error(
+              `resources/templates/list provider returned an invalid template: ${problem}`,
+            );
+          }
+          const { decision, threw } = await safeAuthorizeResource(
+            options.authorizeResource,
+            ctx,
+            {
+              mode: "resource_templates_list",
+              resourceUri: template.uriTemplate,
+              resourceMetadata: null,
+              identity,
+            },
+          );
+          if (threw) {
+            console.error(
+              "[mcp-gateway] resource authorizer threw during resources/templates/list for template",
+              template.uriTemplate,
+              decision.reason,
+            );
+          }
+          if (decision.allowed) {
+            resourceTemplates.push(pickTemplateFields(template));
+          }
+        }
+        if (shouldAuditResource(options.auditResources, "templatesList")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceOperation: "templates_list",
+            args: { resourceTemplateCount: resourceTemplates.length },
+            outcome: "allowed",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+          });
+        }
+        body = jsonResultEnvelope(message.id, { resourceTemplates });
+      } catch (err) {
+        const messageText = err instanceof Error ? err.message : String(err);
+        if (shouldAuditResource(options.auditResources, "templatesList")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceOperation: "templates_list",
+            args: null,
+            outcome: "error",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+            errorCode: INTERNAL_ERROR,
+            errorMessage: messageText,
+          });
+        }
+        body = jsonErrorEnvelope(message.id, INTERNAL_ERROR, messageText);
+      }
+      break;
+    }
+
+    case "resources/read": {
+      const start = Date.now();
+      const providers = options.resources ?? [];
+      const templates = options.resourceTemplates ?? [];
+      const registeredResources = (await ctx.runQuery(
+        component.registry.listResources,
+        {},
+      )) as RegisteredResource[];
+      if (
+        providers.length === 0 &&
+        registeredResources.length === 0 &&
+        templates.length === 0
+      ) {
+        body = jsonErrorEnvelope(
+          message.id,
+          -32601,
+          `Unsupported method: ${message.method}`,
+        );
+        break;
+      }
+      if (!identity) {
+        const maybeUri = message.params?.uri;
+        if (shouldAuditResource(options.auditResources, "read")) {
+          await safeRecordResourceAudit(ctx, component, {
+            ...(typeof maybeUri === "string" && maybeUri.length > 0
+              ? { resourceUri: maybeUri }
+              : {}),
+            resourceOperation: "read",
+            args: null,
+            outcome: "denied",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+            errorCode: UNAUTHORIZED,
+            errorMessage: "Unauthorized: authentication required",
+          });
+        }
+        body = jsonErrorEnvelope(
+          message.id,
+          UNAUTHORIZED,
+          "Unauthorized: authentication required",
+        );
+        break;
+      }
+      const uri = message.params?.uri;
+      if (typeof uri !== "string" || uri.length === 0) {
+        if (shouldAuditResource(options.auditResources, "read")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceOperation: "read",
+            args: null,
+            outcome: "error",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+            errorCode: INVALID_PARAMS,
+            errorMessage: "Missing resource uri",
+          });
+        }
+        body = jsonErrorEnvelope(
+          message.id,
+          INVALID_PARAMS,
+          "Missing resource uri",
+        );
+        break;
+      }
+      const metadata =
+        registeredResources.find((resource) => resource.uri === uri)
+          ?.metadata ?? null;
+      const resourceAuthz = await safeAuthorizeResource(
+        options.authorizeResource,
+        ctx,
+        {
+          mode: "resource_read",
+          resourceUri: uri,
+          resourceMetadata: metadata,
+          identity,
+        },
+      );
+      if (!resourceAuthz.decision.allowed) {
+        const reason = resourceAuthz.decision.reason ?? "Forbidden";
+        const code = resourceAuthz.threw
+          ? INTERNAL_ERROR
+          : /^unauth/i.test(reason)
+            ? UNAUTHORIZED
+            : FORBIDDEN;
+        if (shouldAuditResource(options.auditResources, "read")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceUri: uri,
+            resourceOperation: "read",
+            args: null,
+            outcome: resourceAuthz.threw ? "error" : "denied",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+            errorCode: code,
+            errorMessage: reason,
+          });
+        }
+        body = jsonErrorEnvelope(message.id, code, reason);
+        break;
+      }
+      try {
+        let found = false;
+        // Track a provider throw so a buggy provider can't mask a resource
+        // a later provider could serve. Providers decline a URI by returning
+        // null; a throw must not be *more* powerful than declining, so we
+        // isolate it, log it, and keep trying the remaining providers (then
+        // the templates).
+        let providerError: string | null = null;
+        const serveContents = async (contents: McpResourceContent[]) => {
+          // Validate handler output before returning it. Invalid contents
+          // are a provider bug; throw so the outer catch turns it into a
+          // deterministic -32603 instead of shipping malformed JSON-RPC.
+          // (Runs outside the per-provider try, so it is a hard error, not a
+          // provider-decline that falls through to the next provider.)
+          const problem = describeResourceContentsProblem(contents);
+          if (problem) {
+            throw new Error(
+              `resources/read provider returned invalid contents: ${problem}`,
+            );
+          }
+          if (shouldAuditResource(options.auditResources, "read")) {
+            await safeRecordResourceAudit(ctx, component, {
+              resourceUri: uri,
+              resourceOperation: "read",
+              args: null,
+              outcome: "allowed",
+              identitySubject: auditIdentitySubject,
+              durationMs: Date.now() - start,
+            });
+          }
+          body = jsonResultEnvelope(message.id, { contents });
+          found = true;
+        };
+
+        // Concrete providers first: a concrete resource always wins over a
+        // template that might also match the same URI, so dispatch stays
+        // unambiguous.
+        for (const provider of providers) {
+          let contents: McpResourceContent[] | null;
+          try {
+            contents = await provider.read(ctx, { uri, identity });
+          } catch (err) {
+            providerError = err instanceof Error ? err.message : String(err);
+            console.error(
+              "[mcp-gateway] resource provider threw during resources/read",
+              provider.name,
+              uri,
+              err,
+            );
+            continue;
+          }
+          // A provider declines a URI by returning null OR an empty array;
+          // declining via `[]` keeps it from shipping empty contents and
+          // shadowing a later provider/template. Anything else (including a
+          // malformed non-array) still goes to serveContents, which validates
+          // it and surfaces -32603 on a bad shape.
+          if (contents && !(Array.isArray(contents) && contents.length === 0)) {
+            await serveContents(contents);
+            break;
+          }
+        }
+
+        // Template-backed resolution, only when no concrete provider served.
+        // A template with no `read` handler is listing-only and skipped here.
+        if (!found) {
+          for (const provider of templates) {
+            if (!provider.read) continue;
+            const params = provider.match(uri);
+            if (!params) continue;
+            let contents: McpResourceContent[] | null;
+            try {
+              contents = await provider.read(ctx, { uri, params, identity });
+            } catch (err) {
+              providerError = err instanceof Error ? err.message : String(err);
+              console.error(
+                "[mcp-gateway] resource template threw during resources/read",
+                provider.template.uriTemplate,
+                uri,
+                err,
+              );
+              continue;
+            }
+            if (
+              contents &&
+              !(Array.isArray(contents) && contents.length === 0)
+            ) {
+              await serveContents(contents);
+              break;
+            }
+          }
+        }
+
+        if (!found) {
+          // Distinguish "everything cleanly declined" (a genuine not-found →
+          // INVALID_PARAMS) from "a provider/template threw and nothing
+          // served" (a real fault → INTERNAL_ERROR), so a bug isn't reported
+          // to the client as a benign miss.
+          const code = providerError ? INTERNAL_ERROR : INVALID_PARAMS;
+          const errorMessage = providerError ?? `Resource not found: ${uri}`;
+          if (shouldAuditResource(options.auditResources, "read")) {
+            await safeRecordResourceAudit(ctx, component, {
+              resourceUri: uri,
+              resourceOperation: "read",
+              args: null,
+              outcome: "error",
+              identitySubject: auditIdentitySubject,
+              durationMs: Date.now() - start,
+              errorCode: code,
+              errorMessage,
+            });
+          }
+          body = jsonErrorEnvelope(message.id, code, errorMessage);
+        }
+      } catch (err) {
+        const messageText = err instanceof Error ? err.message : String(err);
+        if (shouldAuditResource(options.auditResources, "read")) {
+          await safeRecordResourceAudit(ctx, component, {
+            resourceUri: uri,
+            resourceOperation: "read",
+            args: null,
+            outcome: "error",
+            identitySubject: auditIdentitySubject,
+            durationMs: Date.now() - start,
+            errorCode: INTERNAL_ERROR,
+            errorMessage: messageText,
+          });
+        }
+        body = jsonErrorEnvelope(message.id, INTERNAL_ERROR, messageText);
+      }
+      break;
+    }
+
+    case "resources/subscribe":
+    case "resources/unsubscribe": {
+      // Off by default: the gateway's HTTP transport can't push, so the
+      // capability is unadvertised and these methods report a clear,
+      // descriptive -32601 rather than silently accepting a subscription
+      // that could never be delivered.
+      if (!options.resourceSubscriptions?.subscribe) {
+        body = jsonErrorEnvelope(
+          message.id,
+          -32601,
+          `${message.method} is not supported: this gateway does not ` +
+            `advertise the resources.subscribe capability (its HTTP ` +
+            `transport cannot deliver server-initiated notifications). ` +
+            `Enable resourceSubscriptions.subscribe only behind a ` +
+            `push-capable transport.`,
+        );
+        break;
+      }
+      // Subscriptions are identity-scoped, like list/read. (Read-time
+      // authorization still governs content: the `updated` notification
+      // carries only a URI, and `resources/read` re-checks `resource_read`.)
+      if (!identity) {
+        body = jsonErrorEnvelope(
+          message.id,
+          UNAUTHORIZED,
+          "Unauthorized: authentication required",
+        );
+        break;
+      }
+      // Identity-bound, like DELETE: only the session's owner may mutate its
+      // subscription state. Without this, a leaked Mcp-Session-Id plus any
+      // valid token would let one user grief another's subscriptions (cap
+      // exhaustion, spurious update pushes). Legacy rows with no bound owner
+      // (`undefined`) skip the check, matching `deleteSession`.
+      if (
+        sessionOwnerSubject !== undefined &&
+        sessionOwnerSubject !== identity.subject
+      ) {
+        body = jsonErrorEnvelope(
+          message.id,
+          FORBIDDEN,
+          "Forbidden: caller identity does not match session owner",
+        );
+        break;
+      }
+      const uri = message.params?.uri;
+      if (typeof uri !== "string" || uri.length === 0) {
+        body = jsonErrorEnvelope(
+          message.id,
+          INVALID_PARAMS,
+          "Missing resource uri",
+        );
+        break;
+      }
+      if (message.method === "resources/subscribe") {
+        const result = (await ctx.runMutation(
+          component.sessions.subscribeResource,
+          { sessionId, uri },
+        )) as "subscribed" | "exists" | "limit_exceeded";
+        if (result === "limit_exceeded") {
+          // A client-induced limit, not a server fault: use FORBIDDEN so it
+          // doesn't pollute internal-error signals.
+          body = jsonErrorEnvelope(
+            message.id,
+            FORBIDDEN,
+            "Subscription limit reached for this session",
+          );
+          break;
+        }
+      } else {
+        await ctx.runMutation(component.sessions.unsubscribeResource, {
+          sessionId,
+          uri,
+        });
+      }
+      // MCP `resources/subscribe` and `resources/unsubscribe` return an
+      // empty result object on success.
+      body = jsonResultEnvelope(message.id, {});
       break;
     }
 
@@ -712,14 +1843,18 @@ async function handlePost(
       )) as RegisteredTool[];
       const visible = [];
       for (const tool of allTools) {
-        const { decision, threw } = await safeAuthorize(options.authorize, ctx, {
-          toolName: tool.name,
-          toolKind: tool.kind,
-          args: {},
-          mode: "list",
-          toolMetadata: tool.metadata ?? null,
-          identity,
-        });
+        const { decision, threw } = await safeAuthorize(
+          options.authorize,
+          ctx,
+          {
+            toolName: tool.name,
+            toolKind: tool.kind,
+            args: {},
+            mode: "list",
+            toolMetadata: tool.metadata ?? null,
+            identity,
+          },
+        );
         if (threw) {
           // A buggy authorize callback drops only the offending tool,
           // not the whole list. Surface to the deployment log so the
@@ -755,10 +1890,7 @@ async function handlePost(
         body = jsonErrorEnvelope(message.id, -32602, "Missing tool name");
         break;
       }
-      const args = (message.params?.arguments ?? {}) as Record<
-        string,
-        unknown
-      >;
+      const args = (message.params?.arguments ?? {}) as Record<string, unknown>;
 
       const tool = (await ctx.runQuery(component.registry.getTool, {
         name,
@@ -766,11 +1898,7 @@ async function handlePost(
       if (!tool) {
         // Anti-DoS: unknown-tool calls are not audited because anonymous
         // callers can spam arbitrary names with arbitrary args.
-        body = jsonErrorEnvelope(
-          message.id,
-          -32602,
-          `Unknown tool: ${name}`,
-        );
+        body = jsonErrorEnvelope(message.id, -32602, `Unknown tool: ${name}`);
         break;
       }
 
@@ -843,25 +1971,19 @@ async function handlePost(
           );
           if (oauthConfig) {
             const requestUrl = new URL(request.url);
-            const mcpPath =
-              requestUrl.pathname.replace(/\/+$/, "") || "/";
+            const mcpPath = requestUrl.pathname.replace(/\/+$/, "") || "/";
             const metadataUrl = buildProtectedResourceMetadataUrl(
               requestUrl.origin,
               mcpPath,
             );
-            raw = new Response(
-              jsonErrorEnvelope(message.id, code, reason),
-              {
-                status: 401,
-                headers: {
-                  "content-type": "application/json",
-                  "www-authenticate": `Bearer resource_metadata="${metadataUrl}"`,
-                  ...(issueSessionHeader
-                    ? { "mcp-session-id": sessionId }
-                    : {}),
-                },
+            raw = new Response(jsonErrorEnvelope(message.id, code, reason), {
+              status: 401,
+              headers: {
+                "content-type": "application/json",
+                "www-authenticate": `Bearer resource_metadata="${metadataUrl}"`,
+                ...(issueSessionHeader ? { "mcp-session-id": sessionId } : {}),
               },
-            );
+            });
             body = "";
             break;
           }

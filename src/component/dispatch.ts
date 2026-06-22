@@ -94,7 +94,10 @@ export const runTool = action({
     const auditArgs = redactArgsForAudit(tool, callerArgs);
     const callArgs =
       tool.identityArg !== undefined
-        ? { ...(callerArgs as Record<string, unknown>), [tool.identityArg]: request.identity }
+        ? {
+            ...(callerArgs as Record<string, unknown>),
+            [tool.identityArg]: request.identity,
+          }
         : request.args;
     let data: unknown;
     // Errors come in two flavours:
@@ -114,7 +117,10 @@ export const runTool = action({
       >;
       switch (tool.kind) {
         case "query":
-          data = await ctx.runQuery(handle as FunctionHandle<"query">, callArgs);
+          data = await ctx.runQuery(
+            handle as FunctionHandle<"query">,
+            callArgs,
+          );
           break;
         case "mutation":
           data = await ctx.runMutation(
@@ -146,9 +152,7 @@ export const runTool = action({
       const isConvexError =
         err instanceof ConvexError ||
         (err instanceof Error && err.name === "ConvexError");
-      const wireMessage = isConvexError
-        ? fullMessage
-        : "Tool execution failed";
+      const wireMessage = isConvexError ? fullMessage : "Tool execution failed";
       wireError = { code: -32000, message: wireMessage };
       auditError = { code: -32000, message: fullMessage };
     }
@@ -211,6 +215,7 @@ export const recordAuthDenial = mutation({
     const toolKind = tool?.kind ?? "query";
     const auditArgs = tool ? redactArgsForAudit(tool, request.args) : null;
     await ctx.db.insert("audit", {
+      entryType: "tool",
       toolName: request.name,
       toolKind,
       args: auditArgs,

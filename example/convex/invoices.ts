@@ -43,6 +43,31 @@ export const markPaid = mutation({
 });
 
 /**
+ * Look up one invoice by id. Used by the `invoice://{id}` resource template
+ * in convex/mcp.ts: the template's read handler passes the matched `{id}`
+ * here as a plain string, so we `normalizeId` it (returning `null` for a
+ * malformed or unknown id) rather than trusting it as a typed `Id`.
+ */
+export const get = query({
+  args: { id: v.string() },
+  returns: v.union(
+    v.object({
+      id: v.id("invoices"),
+      status: v.union(v.literal("open"), v.literal("paid")),
+      amount: v.number(),
+    }),
+    v.null(),
+  ),
+  handler: async (ctx, { id }) => {
+    const docId = ctx.db.normalizeId("invoices", id);
+    if (!docId) return null;
+    const invoice = await ctx.db.get("invoices", docId);
+    if (!invoice) return null;
+    return { id: invoice._id, status: invoice.status, amount: invoice.amount };
+  },
+});
+
+/**
  * Identity-injected tool. Unlike `list` (which sees `ctx.auth` as null
  * across the component boundary), this declares a `caller` argument that
  * the gateway fills with the resolved caller identity, wired via

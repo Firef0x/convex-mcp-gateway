@@ -13,6 +13,17 @@ export const auditOutcomeValidator = v.union(
   v.literal("error"),
 );
 
+export const auditEntryTypeValidator = v.union(
+  v.literal("tool"),
+  v.literal("resource"),
+);
+
+export const resourceAuditOperationValidator = v.union(
+  v.literal("list"),
+  v.literal("read"),
+  v.literal("templates_list"),
+);
+
 export default defineSchema({
   tools: defineTable({
     name: v.string(),
@@ -37,6 +48,31 @@ export default defineSchema({
     identityArg: v.optional(v.string()),
     metadata: v.optional(v.any()),
   }).index("by_name", ["name"]),
+
+  resources: defineTable({
+    uri: v.string(),
+    name: v.string(),
+    description: v.optional(v.string()),
+    mimeType: v.optional(v.string()),
+    metadata: v.optional(v.any()),
+  }).index("by_uri", ["uri"]),
+
+  /**
+   * Persisted MCP resource templates (RFC 6570), the template counterpart
+   * of `resources`. Stores catalog metadata only — never the `read`
+   * handler or matcher. `annotations` is stored as `v.any()` (its shape is
+   * validated host-side before write); `title`/`annotations` are persisted
+   * here (unlike concrete resources, where they are runtime-only) so a
+   * registry-only template still lists its full descriptor.
+   */
+  resourceTemplates: defineTable({
+    uriTemplate: v.string(),
+    name: v.string(),
+    title: v.optional(v.string()),
+    description: v.optional(v.string()),
+    mimeType: v.optional(v.string()),
+    annotations: v.optional(v.any()),
+  }).index("by_uriTemplate", ["uriTemplate"]),
 
   /**
    * Singleton row holding the OAuth 2.1 protected-resource metadata.
@@ -81,6 +117,18 @@ export default defineSchema({
      * declaratively".
      */
     toolsFingerprint: v.optional(v.string()),
+    /**
+     * Fingerprint of the declarative resource catalog last synced via
+     * `handleMcpRequest`. Resource contents/read handlers are not stored
+     * here; the registry stores stable catalog metadata only.
+     */
+    resourcesFingerprint: v.optional(v.string()),
+    /**
+     * Fingerprint of the declarative resource-template catalog last synced
+     * via the `resourceTemplates` option of `handleMcpRequest`. Mirrors
+     * `resourcesFingerprint`; absent means "never synced declaratively".
+     */
+    templatesFingerprint: v.optional(v.string()),
   }),
 
   /**
@@ -112,17 +160,42 @@ export default defineSchema({
     .index("by_lastSeenAt", ["lastSeenAt"]),
 
   /**
-   * One row per `tools/call` dispatch. Captures who called what, the
-   * outcome, and how long the underlying function ran. `identitySubject`
-   * is supplied by the host (resolved from `ctx.auth.getUserIdentity()`)
-   * and forwarded into `dispatch.runTool`; the component never reads
-   * identity directly. Arg storage respects `metadata.auditArgs`: full
-   * record by default, `null` when set to `false`, top-level keys
-   * replaced with `"[redacted]"` when set to `{ redact: [...] }`.
+   * Opt-in MCP resource subscriptions, one row per (session, resource URI).
+   * Populated by `resources/subscribe` and cleared by `resources/unsubscribe`
+   * (and cascaded on session teardown). The gateway's own HTTP transport
+   * cannot push `notifications/resources/updated`, so this table only
+   * *records intent*: a host that fronts the gateway with a push-capable
+   * transport reads it via `listResourceSubscribers` to decide whom to
+   * notify. Rows orphaned by idle-pruned sessions are cleaned by
+   * `pruneOrphanResourceSubscriptions`.
+   */
+  subscriptions: defineTable({
+    sessionId: v.string(),
+    uri: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_session_uri", ["sessionId", "uri"])
+    .index("by_uri", ["uri"]),
+
+  /**
+   * Shared audit log for tool calls and opt-in resource operations.
+   * Tool rows capture the tool name/kind, outcome, duration, and
+   * optionally redacted args. Resource rows capture operation metadata
+   * (resource URI, list/read, outcome, duration) but never resource
+   * contents. `identitySubject` is supplied by the host after resolving
+   * auth at the HTTP boundary; component code never reads identity
+   * directly.
    */
   audit: defineTable({
-    toolName: v.string(),
-    toolKind: toolKindValidator,
+    /**
+     * Optional for forward compatibility with existing tool audit rows.
+     * New writes set this to either "tool" or "resource".
+     */
+    entryType: v.optional(auditEntryTypeValidator),
+    toolName: v.optional(v.string()),
+    toolKind: v.optional(toolKindValidator),
+    resourceUri: v.optional(v.string()),
+    resourceOperation: v.optional(resourceAuditOperationValidator),
     args: v.any(),
     outcome: auditOutcomeValidator,
     identitySubject: v.union(v.string(), v.null()),
@@ -131,5 +204,7 @@ export default defineSchema({
     errorMessage: v.optional(v.string()),
   })
     .index("by_toolName", ["toolName"])
+    .index("by_resourceUri", ["resourceUri"])
+    .index("by_entryType", ["entryType"])
     .index("by_outcome", ["outcome"]),
 });
