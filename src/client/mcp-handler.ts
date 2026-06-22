@@ -348,6 +348,7 @@ export interface HandleMcpRequestOptions {
 type InternalHandleMcpRequestOptions = HandleMcpRequestOptions & {
   syncTools?: () => Promise<void>;
   syncResources?: () => Promise<void>;
+  syncResourceTemplates?: () => Promise<void>;
 };
 
 export type McpHandlerCtx = {
@@ -391,6 +392,17 @@ type RegisteredResource = {
 type ResourceCandidate = {
   resource: McpResource;
   metadata: unknown;
+};
+
+// A row from the resource-template registry. Unlike concrete resources,
+// templates persist their full descriptor (incl. title/annotations).
+type RegisteredResourceTemplate = {
+  uriTemplate: string;
+  name: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  annotations?: McpResourceAnnotations;
 };
 
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26"] as const;
@@ -789,7 +801,14 @@ function publicResource(resource: RegisteredResource): McpResource {
   };
 }
 
-function publicResourceTemplate(
+/**
+ * Project an arbitrary template-shaped object down to exactly the known
+ * `McpResourceTemplate` fields. Shared by the request handler (response
+ * shaping), `defineMcpResourceTemplate`, and the registry-sync projection so
+ * the three never drift, and so a hand-built provider's extra keys never
+ * reach the response or the registry's strict validator.
+ */
+export function pickTemplateFields(
   template: McpResourceTemplate,
 ): McpResourceTemplate {
   return {
@@ -1168,10 +1187,27 @@ async function handlePost(
           throw err;
         }
       }
+      if (options.syncResourceTemplates) {
+        try {
+          await options.syncResourceTemplates();
+        } catch (err) {
+          console.error(
+            "[mcp-gateway] declarative resource-template sync failed during " +
+              "initialize; the connection will fail. Check the resourceTemplates " +
+              "passed to handleMcpRequest (e.g. duplicate uriTemplates).",
+            err,
+          );
+          throw err;
+        }
+      }
       const registeredResources = (await ctx.runQuery(
         component.registry.listResources,
         {},
       )) as RegisteredResource[];
+      const registeredTemplates = (await ctx.runQuery(
+        component.registry.listResourceTemplates,
+        {},
+      )) as RegisteredResourceTemplate[];
       const requested = message.params?.protocolVersion;
       const negotiated =
         typeof requested === "string" &&
@@ -1189,6 +1225,7 @@ async function handlePost(
       // the capability stays `{}` — the historical, accurate default.
       const advertiseResources =
         registeredResources.length > 0 ||
+        registeredTemplates.length > 0 ||
         (options.resources ?? []).length > 0 ||
         (options.resourceTemplates ?? []).length > 0 ||
         Boolean(options.resourceSubscriptions?.subscribe) ||
@@ -1360,11 +1397,15 @@ async function handlePost(
 
     case "resources/templates/list": {
       const start = Date.now();
-      const templates = options.resourceTemplates ?? [];
-      // Templates are a distinct capability surface: when none are
-      // configured the method is unsupported, even if concrete resources
-      // exist. (Concrete resources still serve resources/list + read.)
-      if (templates.length === 0) {
+      const providers = options.resourceTemplates ?? [];
+      const registeredTemplates = (await ctx.runQuery(
+        component.registry.listResourceTemplates,
+        {},
+      )) as RegisteredResourceTemplate[];
+      // Distinct capability surface: unsupported only when NO templates are
+      // configured at all (no runtime providers and none registered). A
+      // registry-only template catalog is fully supported.
+      if (providers.length === 0 && registeredTemplates.length === 0) {
         body = jsonErrorEnvelope(
           message.id,
           -32601,
@@ -1392,9 +1433,19 @@ async function handlePost(
         break;
       }
       try {
+        // Merge registered templates with runtime providers, deduped by
+        // uriTemplate; a runtime provider wins (it's live and carries the
+        // read handler), mirroring how resources/list prefers providers.
+        const byUriTemplate = new Map<string, McpResourceTemplate>();
+        for (const row of registeredTemplates) {
+          byUriTemplate.set(row.uriTemplate, row);
+        }
+        for (const provider of providers) {
+          byUriTemplate.set(provider.template.uriTemplate, provider.template);
+        }
         const resourceTemplates = [];
-        for (const provider of templates) {
-          const problem = describeResourceTemplateProblem(provider.template);
+        for (const template of byUriTemplate.values()) {
+          const problem = describeResourceTemplateProblem(template);
           if (problem) {
             throw new Error(
               `resources/templates/list provider returned an invalid template: ${problem}`,
@@ -1405,7 +1456,7 @@ async function handlePost(
             ctx,
             {
               mode: "resource_templates_list",
-              resourceUri: provider.template.uriTemplate,
+              resourceUri: template.uriTemplate,
               resourceMetadata: null,
               identity,
             },
@@ -1413,12 +1464,12 @@ async function handlePost(
           if (threw) {
             console.error(
               "[mcp-gateway] resource authorizer threw during resources/templates/list for template",
-              provider.template.uriTemplate,
+              template.uriTemplate,
               decision.reason,
             );
           }
           if (decision.allowed) {
-            resourceTemplates.push(publicResourceTemplate(provider.template));
+            resourceTemplates.push(pickTemplateFields(template));
           }
         }
         if (shouldAuditResource(options.auditResources, "templatesList")) {

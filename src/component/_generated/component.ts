@@ -265,6 +265,74 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         null,
         Name
       >;
+      registerResourceTemplate: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          annotations?: any;
+          description?: string;
+          mimeType?: string;
+          name: string;
+          title?: string;
+          uriTemplate: string;
+        },
+        string,
+        Name
+      >;
+      listResourceTemplates: FunctionReference<
+        "query",
+        "internal",
+        {},
+        Array<{
+          _creationTime: number;
+          _id: string;
+          annotations?: any;
+          description?: string;
+          mimeType?: string;
+          name: string;
+          title?: string;
+          uriTemplate: string;
+        }>,
+        Name
+      >;
+      replaceResourceTemplates: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          fingerprint?: string;
+          templates: Array<{
+            annotations?: any;
+            description?: string;
+            mimeType?: string;
+            name: string;
+            title?: string;
+            uriTemplate: string;
+          }>;
+        },
+        null,
+        Name
+      >;
+      unregisterResourceTemplate: FunctionReference<
+        "mutation",
+        "internal",
+        { uriTemplate: string },
+        boolean,
+        Name
+      >;
+      clearAllResourceTemplates: FunctionReference<
+        "mutation",
+        "internal",
+        {},
+        null,
+        Name
+      >;
+      getResourceTemplatesFingerprint: FunctionReference<
+        "query",
+        "internal",
+        {},
+        string | null,
+        Name
+      >;
       setOAuthConfig: FunctionReference<
         "mutation",
         "internal",

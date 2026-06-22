@@ -32,9 +32,9 @@ app.use(mcpGateway);
 export default app;
 ```
 
-The component owns Convex tables for `tools`, `resources`, `config`, and
-`audit`, plus `sessions` (and `subscriptions`) for Streamable-HTTP. It does
-**not** mount any HTTP routes
+The component owns Convex tables for `tools`, `resources`,
+`resourceTemplates`, `config`, and `audit`, plus `sessions` (and
+`subscriptions`) for Streamable-HTTP. It does **not** mount any HTTP routes
 of its own. The `/mcp/` endpoint and the OAuth discovery route both live
 in your host's `http.ts` (steps 3 and 6 below). The reason is structural:
 Convex doesn't propagate `ctx.auth` into component code, so the only place

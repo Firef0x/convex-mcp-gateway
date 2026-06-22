@@ -24,6 +24,7 @@ import {
 import {
   describeResourceProblem,
   describeResourceTemplateProblem,
+  pickTemplateFields,
   handleMcpRequest as handleMcpRequestImpl,
   type HandleMcpRequestOptions,
   type McpHandlerCtx,
@@ -568,18 +569,7 @@ export function defineMcpResourceTemplate(
   }
   // Compile eagerly so an invalid uriTemplate fails at declaration time.
   const match = compileUriTemplate(config.uriTemplate);
-  const template: McpResourceTemplate = {
-    uriTemplate: config.uriTemplate,
-    name: config.name,
-    ...(config.title !== undefined ? { title: config.title } : {}),
-    ...(config.description !== undefined
-      ? { description: config.description }
-      : {}),
-    ...(config.mimeType !== undefined ? { mimeType: config.mimeType } : {}),
-    ...(config.annotations !== undefined
-      ? { annotations: config.annotations }
-      : {}),
-  };
+  const template = pickTemplateFields(config);
   return {
     template,
     match,
@@ -630,6 +620,60 @@ async function syncDeclaredResources(
   if (current === fingerprint) return;
   await ctx.runMutation(component.registry.replaceResources, {
     resources,
+    fingerprint,
+  });
+}
+
+/**
+ * Project each template provider's `.template` into the registry descriptor
+ * shape (known fields only — defends against a hand-built provider whose
+ * `.template` carries extra keys the registry's validator would reject).
+ * Every template provider carries `.template`, so unlike resources there is
+ * no "static vs runtime-only" split to filter on.
+ */
+function declaredResourceTemplatesFromProviders(
+  providers: McpResourceTemplateProvider[] | undefined,
+): McpResourceTemplate[] {
+  return (providers ?? []).map((provider) =>
+    pickTemplateFields(provider.template),
+  );
+}
+
+function resourceTemplatesFingerprint(
+  templates: McpResourceTemplate[],
+): string {
+  const normalized = templates
+    .map((template) => ({
+      uriTemplate: template.uriTemplate,
+      name: template.name,
+      title: template.title ?? null,
+      description: template.description ?? null,
+      mimeType: template.mimeType ?? null,
+      annotations: template.annotations ?? null,
+    }))
+    .sort((a, b) =>
+      a.uriTemplate < b.uriTemplate
+        ? -1
+        : a.uriTemplate > b.uriTemplate
+          ? 1
+          : 0,
+    );
+  return JSON.stringify(normalized);
+}
+
+async function syncDeclaredResourceTemplates(
+  ctx: RunMutationCtx,
+  component: ComponentApi,
+  templates: McpResourceTemplate[],
+): Promise<void> {
+  const fingerprint = resourceTemplatesFingerprint(templates);
+  const current = await ctx.runQuery(
+    component.registry.getResourceTemplatesFingerprint,
+    {},
+  );
+  if (current === fingerprint) return;
+  await ctx.runMutation(component.registry.replaceResourceTemplates, {
+    templates,
     fingerprint,
   });
 }
@@ -879,6 +923,71 @@ export class McpGateway {
   }
 
   /**
+   * Upsert a single resource template by `uriTemplate`. Stores catalog
+   * metadata only; matching reads are still served by a template provider
+   * passed to `handleMcpRequest({ resourceTemplates })`.
+   */
+  async registerResourceTemplate(
+    ctx: RunMutationCtx,
+    template: McpResourceTemplate,
+  ): Promise<void> {
+    const problem = describeResourceTemplateProblem(template);
+    if (problem) {
+      throw new Error(`MCP resource template is invalid: ${problem}`);
+    }
+    await ctx.runMutation(
+      this.component.registry.registerResourceTemplate,
+      template,
+    );
+  }
+
+  /**
+   * Atomically replace the entire resource-template registry with the given
+   * catalog. Templates whose `uriTemplate` is not in `templates` are removed;
+   * matching ones are upserted. Mirrors `registerResources`.
+   */
+  async registerResourceTemplates(
+    ctx: RunMutationCtx,
+    templates: McpResourceTemplate[],
+  ): Promise<void> {
+    for (const template of templates) {
+      const problem = describeResourceTemplateProblem(template);
+      if (problem) {
+        throw new Error(`MCP resource template is invalid: ${problem}`);
+      }
+    }
+    await ctx.runMutation(this.component.registry.replaceResourceTemplates, {
+      templates,
+    });
+  }
+
+  /**
+   * Remove a single resource template by `uriTemplate`. Returns `true` if a
+   * row was deleted, `false` if none was registered.
+   */
+  async unregisterResourceTemplate(
+    ctx: RunMutationCtx,
+    uriTemplate: string,
+  ): Promise<boolean> {
+    return await ctx.runMutation(
+      this.component.registry.unregisterResourceTemplate,
+      { uriTemplate },
+    );
+  }
+
+  /**
+   * List every resource template currently in the registry, raw rows from
+   * the component table. For the spec-compliant catalog that MCP clients
+   * see, use `resources/templates/list` via `handleMcpRequest`.
+   */
+  async listResourceTemplates(ctx: RunQueryCtx) {
+    return await ctx.runQuery(
+      this.component.registry.listResourceTemplates,
+      {},
+    );
+  }
+
+  /**
    * Inspect the audit log written by the component on every `tools/call`.
    * Returns newest entries first. Use `toolName` and/or `outcome` to filter;
    * `limit` defaults to 100 and is capped server-side at 1000.
@@ -959,6 +1068,17 @@ export class McpGateway {
    */
   async clearResources(ctx: RunMutationCtx): Promise<void> {
     await ctx.runMutation(this.component.registry.clearAllResources, {});
+  }
+
+  /**
+   * Wipe the entire resource-template registry. Does not touch resources,
+   * tools, config, audit, or sessions.
+   */
+  async clearResourceTemplates(ctx: RunMutationCtx): Promise<void> {
+    await ctx.runMutation(
+      this.component.registry.clearAllResourceTemplates,
+      {},
+    );
   }
 
   /**
@@ -1103,7 +1223,7 @@ export class McpGateway {
     request: Request,
     options: HandleMcpRequestOptions,
   ): Promise<Response> {
-    const { tools, resources, ...rest } = options;
+    const { tools, resources, resourceTemplates, ...rest } = options;
     const syncTools = tools
       ? async () => {
           await syncDeclaredTools(ctx, this.component, tools);
@@ -1116,11 +1236,25 @@ export class McpGateway {
             await syncDeclaredResources(ctx, this.component, declaredResources);
           }
         : undefined;
+    const declaredTemplates =
+      declaredResourceTemplatesFromProviders(resourceTemplates);
+    const syncResourceTemplates =
+      resourceTemplates !== undefined
+        ? async () => {
+            await syncDeclaredResourceTemplates(
+              ctx,
+              this.component,
+              declaredTemplates,
+            );
+          }
+        : undefined;
     return await handleMcpRequestImpl(ctx, request, this.component, {
       ...rest,
       resources,
+      resourceTemplates,
       syncTools,
       syncResources,
+      syncResourceTemplates,
     });
   }
 

@@ -460,4 +460,165 @@ describe("registry", () => {
       ).rejects.toThrow(/http or https/);
     });
   });
+
+  test("registerResourceTemplate inserts and is idempotent on uriTemplate", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      await ctx.runMutation(api.registry.registerResourceTemplate, {
+        uriTemplate: "db://{table}/{id}",
+        name: "first",
+      });
+      let templates = await ctx.runQuery(
+        api.registry.listResourceTemplates,
+        {},
+      );
+      expect(templates).toHaveLength(1);
+      expect(templates[0]!.name).toBe("first");
+
+      await ctx.runMutation(api.registry.registerResourceTemplate, {
+        uriTemplate: "db://{table}/{id}",
+        name: "second",
+        title: "Row",
+        annotations: { priority: 0.5 },
+      });
+      templates = await ctx.runQuery(api.registry.listResourceTemplates, {});
+      expect(templates).toHaveLength(1);
+      expect(templates[0]!.name).toBe("second");
+      expect(templates[0]!.title).toBe("Row");
+      expect(templates[0]!.annotations).toEqual({ priority: 0.5 });
+    });
+  });
+
+  test("replaceResourceTemplates rejects duplicate uriTemplates", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      await expect(
+        ctx.runMutation(api.registry.replaceResourceTemplates, {
+          templates: [
+            { uriTemplate: "x://{a}", name: "first" },
+            { uriTemplate: "x://{a}", name: "second" },
+          ],
+        }),
+      ).rejects.toThrow(/duplicate uriTemplates/);
+    });
+  });
+
+  test("replaceResourceTemplates deletes non-incoming, upserts the rest, persists title/annotations", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      for (const uriTemplate of ["a://{x}", "b://{x}", "c://{x}"]) {
+        await ctx.runMutation(api.registry.registerResourceTemplate, {
+          uriTemplate,
+          name: uriTemplate,
+        });
+      }
+      expect(
+        await ctx.runQuery(api.registry.listResourceTemplates, {}),
+      ).toHaveLength(3);
+
+      await ctx.runMutation(api.registry.replaceResourceTemplates, {
+        templates: [
+          { uriTemplate: "b://{x}", name: "Fresh B", mimeType: "text/plain" },
+          {
+            uriTemplate: "d://{x}",
+            name: "Fresh D",
+            title: "D",
+            annotations: { audience: ["assistant"] },
+          },
+        ],
+        fingerprint: "tpl-v1",
+      });
+
+      const after = await ctx.runQuery(api.registry.listResourceTemplates, {});
+      expect(after.map((t) => t.uriTemplate).sort()).toEqual([
+        "b://{x}",
+        "d://{x}",
+      ]);
+      const d = after.find((t) => t.uriTemplate === "d://{x}")!;
+      expect(d.title).toBe("D");
+      expect(d.annotations).toEqual({ audience: ["assistant"] });
+      expect(
+        await ctx.runQuery(api.registry.getResourceTemplatesFingerprint, {}),
+      ).toBe("tpl-v1");
+    });
+  });
+
+  test("unregisterResourceTemplate removes the row and reports whether it existed", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      await ctx.runMutation(api.registry.registerResourceTemplate, {
+        uriTemplate: "tmp://{x}",
+        name: "Temporary",
+      });
+      expect(
+        await ctx.runMutation(api.registry.unregisterResourceTemplate, {
+          uriTemplate: "tmp://{x}",
+        }),
+      ).toBe(true);
+      expect(
+        await ctx.runMutation(api.registry.unregisterResourceTemplate, {
+          uriTemplate: "tmp://{x}",
+        }),
+      ).toBe(false);
+      expect(
+        await ctx.runQuery(api.registry.listResourceTemplates, {}),
+      ).toHaveLength(0);
+    });
+  });
+
+  test("clearAllResourceTemplates removes all templates and clears the fingerprint", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      await ctx.runMutation(api.registry.replaceResourceTemplates, {
+        templates: [
+          { uriTemplate: "one://{x}", name: "One" },
+          { uriTemplate: "two://{x}", name: "Two" },
+        ],
+        fingerprint: "tpl-v2",
+      });
+      expect(
+        await ctx.runQuery(api.registry.getResourceTemplatesFingerprint, {}),
+      ).toBe("tpl-v2");
+
+      await ctx.runMutation(api.registry.clearAllResourceTemplates, {});
+
+      expect(
+        await ctx.runQuery(api.registry.listResourceTemplates, {}),
+      ).toHaveLength(0);
+      expect(
+        await ctx.runQuery(api.registry.getResourceTemplatesFingerprint, {}),
+      ).toBeNull();
+    });
+  });
+
+  test("the three declarative fingerprints are independent in config", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      await ctx.runMutation(api.registry.replaceResourceTemplates, {
+        templates: [{ uriTemplate: "x://{a}", name: "X" }],
+        fingerprint: "tpl-fp",
+      });
+      await ctx.runMutation(api.registry.replaceResources, {
+        resources: [{ uri: "docs://x", name: "X" }],
+        fingerprint: "res-fp",
+      });
+
+      // Writing the resources fingerprint must not clobber the templates one.
+      expect(
+        await ctx.runQuery(api.registry.getResourceTemplatesFingerprint, {}),
+      ).toBe("tpl-fp");
+      expect(await ctx.runQuery(api.registry.getResourcesFingerprint, {})).toBe(
+        "res-fp",
+      );
+
+      // And clearing templates leaves the resources fingerprint intact.
+      await ctx.runMutation(api.registry.clearAllResourceTemplates, {});
+      expect(
+        await ctx.runQuery(api.registry.getResourceTemplatesFingerprint, {}),
+      ).toBeNull();
+      expect(await ctx.runQuery(api.registry.getResourcesFingerprint, {})).toBe(
+        "res-fp",
+      );
+    });
+  });
 });

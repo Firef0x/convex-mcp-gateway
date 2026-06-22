@@ -30,6 +30,11 @@ function createComponent() {
       listResources: Symbol("listResources"),
       getResourcesFingerprint: Symbol("getResourcesFingerprint"),
       replaceResources: Symbol("replaceResources"),
+      listResourceTemplates: Symbol("listResourceTemplates"),
+      getResourceTemplatesFingerprint: Symbol(
+        "getResourceTemplatesFingerprint",
+      ),
+      replaceResourceTemplates: Symbol("replaceResourceTemplates"),
     },
     audit: {
       recordResourceEntry: Symbol("recordResourceEntry"),
@@ -48,6 +53,15 @@ function createCtx(component: ComponentApi) {
   }> = [];
   const resourceAuditEntries: Record<string, unknown>[] = [];
   const subscriptions = new Map<string, Set<string>>();
+  let templatesFingerprint: string | null = null;
+  let resourceTemplates: Array<{
+    uriTemplate: string;
+    name: string;
+    title?: string;
+    description?: string;
+    mimeType?: string;
+    annotations?: unknown;
+  }> = [];
   const sessions = new Map<
     string,
     {
@@ -75,6 +89,12 @@ function createCtx(component: ComponentApi) {
         }
         if (ref === component.registry.getResourcesFingerprint) {
           return resourcesFingerprint;
+        }
+        if (ref === component.registry.listResourceTemplates) {
+          return resourceTemplates;
+        }
+        if (ref === component.registry.getResourceTemplatesFingerprint) {
+          return templatesFingerprint;
         }
         throw new Error("unexpected query");
       },
@@ -122,6 +142,34 @@ function createCtx(component: ComponentApi) {
             typeof args.fingerprint === "string" ? args.fingerprint : null;
           return null;
         }
+        if (ref === component.registry.replaceResourceTemplates) {
+          const incoming = args.templates as Array<Record<string, unknown>>;
+          // Mirror the component's strict v.object validator: reject any
+          // field outside the persisted template shape.
+          const allowed = new Set([
+            "uriTemplate",
+            "name",
+            "title",
+            "description",
+            "mimeType",
+            "annotations",
+          ]);
+          for (const template of incoming) {
+            for (const key of Object.keys(template)) {
+              if (!allowed.has(key)) {
+                throw new Error(
+                  `replaceResourceTemplates received unexpected field "${key}"`,
+                );
+              }
+            }
+          }
+          resourceTemplates = incoming.map((template) => ({
+            ...template,
+          })) as typeof resourceTemplates;
+          templatesFingerprint =
+            typeof args.fingerprint === "string" ? args.fingerprint : null;
+          return null;
+        }
         if (ref === component.audit.recordResourceEntry) {
           resourceAuditEntries.push({ ...args });
           return "audit-id";
@@ -156,6 +204,9 @@ function createCtx(component: ComponentApi) {
     },
     get subscriptions() {
       return subscriptions;
+    },
+    get resourceTemplates() {
+      return resourceTemplates;
     },
     resourceAuditEntries,
   };
@@ -2059,6 +2110,140 @@ describe("handleMcpRequest resources", () => {
         ],
       },
     });
+  });
+
+  test("resources/templates/list serves registry-only templates (no runtime provider)", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    // Seed the registry directly (as a declarative sync or registerResource-
+    // Templates would), with NO runtime resourceTemplates option.
+    await state.ctx.runMutation(component.registry.replaceResourceTemplates, {
+      templates: [
+        {
+          uriTemplate: "invoice://{id}",
+          name: "Invoice",
+          title: "Invoice by id",
+          annotations: { priority: 0.7 },
+        },
+      ],
+      fingerprint: "fp",
+    });
+
+    const init = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      { authorize: async () => ({ allowed: true }) },
+    );
+    // The resources capability is advertised on the strength of the
+    // registered template alone.
+    expect((await readJson(init)).result?.capabilities).toMatchObject({
+      resources: {},
+    });
+    const sessionId = init.headers.get("mcp-session-id")!;
+
+    const list = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 2, method: "resources/templates/list" }, sessionId),
+      component,
+      { authorize: async () => ({ allowed: true }) },
+    );
+    expect(await readJson(list)).toMatchObject({
+      result: {
+        resourceTemplates: [
+          {
+            uriTemplate: "invoice://{id}",
+            name: "Invoice",
+            title: "Invoice by id",
+            annotations: { priority: 0.7 },
+          },
+        ],
+      },
+    });
+  });
+
+  test("resources/templates/list merges registered + runtime, runtime wins on a shared uriTemplate", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    await state.ctx.runMutation(component.registry.replaceResourceTemplates, {
+      templates: [
+        { uriTemplate: "shared://{x}", name: "Registered" },
+        { uriTemplate: "registry-only://{x}", name: "Registry only" },
+      ],
+      fingerprint: "fp",
+    });
+    const runtime = defineMcpResourceTemplate({
+      uriTemplate: "shared://{x}",
+      name: "Runtime",
+      title: "Runtime wins",
+      read: async () => null,
+    });
+
+    const init = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [runtime],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id")!;
+    const list = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 2, method: "resources/templates/list" }, sessionId),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [runtime],
+      },
+    );
+    const body = await readJson(list);
+    const templates = (
+      body.result as {
+        resourceTemplates: Array<{ uriTemplate: string; name: string }>;
+      }
+    ).resourceTemplates;
+    // Both URIs present, deduped; the runtime provider wins shared://{x}.
+    expect(templates.map((t) => t.uriTemplate).sort()).toEqual([
+      "registry-only://{x}",
+      "shared://{x}",
+    ]);
+    expect(templates.find((t) => t.uriTemplate === "shared://{x}")!.name).toBe(
+      "Runtime",
+    );
+  });
+
+  test("McpGateway declaratively syncs templates and clears them when empty", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    const gateway = new McpGateway(component);
+
+    await gateway.handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [
+          defineMcpResourceTemplate({
+            uriTemplate: "synced://{x}",
+            name: "Synced",
+            read: async () => null,
+          }),
+        ],
+      },
+    );
+    expect(state.resourceTemplates).toMatchObject([
+      { uriTemplate: "synced://{x}", name: "Synced" },
+    ]);
+
+    // Re-initialize with an empty template list → the registry is cleared.
+    await gateway.handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 2, method: "initialize" }),
+      { authorize: async () => ({ allowed: true }), resourceTemplates: [] },
+    );
+    expect(state.resourceTemplates).toEqual([]);
   });
 });
 

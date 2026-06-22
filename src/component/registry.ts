@@ -36,6 +36,28 @@ const resourceInputFields = {
 
 const resourceInputValidator = v.object(resourceInputFields);
 
+const resourceTemplateReturnValidator = v.object({
+  _id: v.id("resourceTemplates"),
+  _creationTime: v.number(),
+  uriTemplate: v.string(),
+  name: v.string(),
+  title: v.optional(v.string()),
+  description: v.optional(v.string()),
+  mimeType: v.optional(v.string()),
+  annotations: v.optional(v.any()),
+});
+
+const resourceTemplateInputFields = {
+  uriTemplate: v.string(),
+  name: v.string(),
+  title: v.optional(v.string()),
+  description: v.optional(v.string()),
+  mimeType: v.optional(v.string()),
+  annotations: v.optional(v.any()),
+};
+
+const resourceTemplateInputValidator = v.object(resourceTemplateInputFields);
+
 export const registerTool = mutation({
   args: {
     name: v.string(),
@@ -161,19 +183,10 @@ export const clearAllTools = mutation({
     for (const tool of tools) {
       await ctx.db.delete("tools", tool._id);
     }
-    // Also drop the declarative fingerprint: otherwise a later
-    // `initialize` would see a matching fingerprint and skip the sync,
-    // leaving the registry permanently empty after a clear.
-    const cfg = await ctx.db.query("config").unique();
-    if (cfg && cfg.toolsFingerprint !== undefined) {
-      await ctx.db.replace("config", cfg._id, {
-        authServerUrl: cfg.authServerUrl,
-        resourceUrl: cfg.resourceUrl,
-        authorizerHandle: cfg.authorizerHandle,
-        toolsFingerprint: undefined,
-        resourcesFingerprint: cfg.resourcesFingerprint,
-      });
-    }
+    // Also drop the declarative fingerprint: otherwise a later `initialize`
+    // would see a matching fingerprint and skip the sync, leaving the
+    // registry permanently empty after a clear.
+    await putConfigFingerprint(ctx, "toolsFingerprint", undefined);
     return null;
   },
 });
@@ -186,16 +199,7 @@ export const clearAllResources = mutation({
     for (const resource of resources) {
       await ctx.db.delete("resources", resource._id);
     }
-    const cfg = await ctx.db.query("config").unique();
-    if (cfg && cfg.resourcesFingerprint !== undefined) {
-      await ctx.db.replace("config", cfg._id, {
-        authServerUrl: cfg.authServerUrl,
-        resourceUrl: cfg.resourceUrl,
-        authorizerHandle: cfg.authorizerHandle,
-        toolsFingerprint: cfg.toolsFingerprint,
-        resourcesFingerprint: undefined,
-      });
-    }
+    await putConfigFingerprint(ctx, "resourcesFingerprint", undefined);
     return null;
   },
 });
@@ -238,21 +242,120 @@ export const replaceResources = mutation({
       }
     }
 
-    const cfg = await ctx.db.query("config").unique();
-    if (cfg) {
-      await ctx.db.replace("config", cfg._id, {
-        authServerUrl: cfg.authServerUrl,
-        resourceUrl: cfg.resourceUrl,
-        authorizerHandle: cfg.authorizerHandle,
-        toolsFingerprint: cfg.toolsFingerprint,
-        resourcesFingerprint: args.fingerprint,
-      });
-    } else {
-      await ctx.db.insert("config", {
-        resourcesFingerprint: args.fingerprint,
-      });
-    }
+    await putConfigFingerprint(ctx, "resourcesFingerprint", args.fingerprint);
     return null;
+  },
+});
+
+// -------------------------------------------------------------------
+// Resource templates (RFC 6570). The template counterpart of the
+// `resources` registry above: persists catalog metadata only (never the
+// read handler/matcher) and is reconciled from the declarative
+// `resourceTemplates` option via `templatesFingerprint`.
+// -------------------------------------------------------------------
+
+export const registerResourceTemplate = mutation({
+  args: resourceTemplateInputFields,
+  returns: v.id("resourceTemplates"),
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("resourceTemplates")
+      .withIndex("by_uriTemplate", (q) => q.eq("uriTemplate", args.uriTemplate))
+      .unique();
+    if (existing) {
+      await ctx.db.replace("resourceTemplates", existing._id, args);
+      return existing._id;
+    }
+    return await ctx.db.insert("resourceTemplates", args);
+  },
+});
+
+export const unregisterResourceTemplate = mutation({
+  args: { uriTemplate: v.string() },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("resourceTemplates")
+      .withIndex("by_uriTemplate", (q) => q.eq("uriTemplate", args.uriTemplate))
+      .unique();
+    if (!existing) return false;
+    await ctx.db.delete("resourceTemplates", existing._id);
+    return true;
+  },
+});
+
+export const listResourceTemplates = query({
+  args: {},
+  returns: v.array(resourceTemplateReturnValidator),
+  handler: async (ctx) => {
+    return await ctx.db.query("resourceTemplates").collect();
+  },
+});
+
+export const clearAllResourceTemplates = mutation({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    const templates = await ctx.db.query("resourceTemplates").collect();
+    for (const template of templates) {
+      await ctx.db.delete("resourceTemplates", template._id);
+    }
+    await putConfigFingerprint(ctx, "templatesFingerprint", undefined);
+    return null;
+  },
+});
+
+export const replaceResourceTemplates = mutation({
+  args: {
+    templates: v.array(resourceTemplateInputValidator),
+    fingerprint: v.optional(v.string()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const incomingTemplates = new Set(args.templates.map((t) => t.uriTemplate));
+    if (incomingTemplates.size !== args.templates.length) {
+      const seen = new Set<string>();
+      const dupes: string[] = [];
+      for (const t of args.templates) {
+        if (seen.has(t.uriTemplate)) dupes.push(t.uriTemplate);
+        seen.add(t.uriTemplate);
+      }
+      throw new ConvexError(
+        `replaceResourceTemplates received duplicate uriTemplates: ${dupes.join(", ")}`,
+      );
+    }
+
+    const existing = await ctx.db.query("resourceTemplates").collect();
+    for (const template of existing) {
+      if (!incomingTemplates.has(template.uriTemplate)) {
+        await ctx.db.delete("resourceTemplates", template._id);
+      }
+    }
+    for (const template of args.templates) {
+      const existingRow = await ctx.db
+        .query("resourceTemplates")
+        .withIndex("by_uriTemplate", (q) =>
+          q.eq("uriTemplate", template.uriTemplate),
+        )
+        .unique();
+      if (existingRow) {
+        await ctx.db.replace("resourceTemplates", existingRow._id, template);
+      } else {
+        await ctx.db.insert("resourceTemplates", template);
+      }
+    }
+
+    await putConfigFingerprint(ctx, "templatesFingerprint", args.fingerprint);
+    return null;
+  },
+});
+
+export const getResourceTemplatesFingerprint = query({
+  args: {},
+  returns: v.union(v.string(), v.null()),
+  handler: async (ctx) => {
+    const row = await ctx.db.query("config").unique();
+    return row?.templatesFingerprint ?? null;
   },
 });
 
@@ -322,22 +425,10 @@ export const replaceTools = mutation({
         await ctx.db.insert("tools", incoming);
       }
     }
-    // Persist (or clear) the declarative fingerprint without disturbing
-    // the OAuth fields on the singleton config row. `args.fingerprint`
-    // being undefined clears it, that's the imperative-register path
-    // invalidating any prior declarative sync.
-    const cfg = await ctx.db.query("config").unique();
-    if (cfg) {
-      await ctx.db.replace("config", cfg._id, {
-        authServerUrl: cfg.authServerUrl,
-        resourceUrl: cfg.resourceUrl,
-        authorizerHandle: cfg.authorizerHandle,
-        toolsFingerprint: args.fingerprint,
-        resourcesFingerprint: cfg.resourcesFingerprint,
-      });
-    } else {
-      await ctx.db.insert("config", { toolsFingerprint: args.fingerprint });
-    }
+    // Persist (or clear) the declarative fingerprint without disturbing the
+    // OAuth fields. `args.fingerprint` being undefined clears it — the
+    // imperative-register path invalidating any prior declarative sync.
+    await putConfigFingerprint(ctx, "toolsFingerprint", args.fingerprint);
     return null;
   },
 });
@@ -395,16 +486,48 @@ async function patchConfigRow(
   const next = {
     authServerUrl: apply(patch.authServerUrl, existing?.authServerUrl),
     resourceUrl: apply(patch.resourceUrl, existing?.resourceUrl),
-    // Preserve the declarative tool fingerprint across OAuth-config
-    // writes so changing OAuth settings doesn't force a registry re-sync.
+    // Preserve the declarative fingerprints across OAuth-config writes so
+    // changing OAuth settings doesn't force a registry re-sync.
     toolsFingerprint: existing?.toolsFingerprint,
     resourcesFingerprint: existing?.resourcesFingerprint,
+    templatesFingerprint: existing?.templatesFingerprint,
   };
   if (existing) {
     await ctx.db.replace("config", existing._id, next);
   } else {
     await ctx.db.insert("config", next);
   }
+}
+
+/**
+ * Set exactly one declarative fingerprint (`undefined` clears it) on the
+ * singleton config row, preserving the OAuth fields and the other two
+ * fingerprints. The single source of truth for the `replace*`/`clearAll*`
+ * config writes, so adding a future fingerprint touches only this helper.
+ * No-ops when the value is already current (so clearing an unset fingerprint
+ * never writes), matching the prior hand-written call sites.
+ */
+async function putConfigFingerprint(
+  ctx: MutationCtx,
+  field: "toolsFingerprint" | "resourcesFingerprint" | "templatesFingerprint",
+  value: string | undefined,
+): Promise<void> {
+  const cfg = await ctx.db.query("config").unique();
+  if (!cfg) {
+    if (value === undefined) return;
+    await ctx.db.insert("config", { [field]: value });
+    return;
+  }
+  if (cfg[field] === value) return;
+  await ctx.db.replace("config", cfg._id, {
+    authServerUrl: cfg.authServerUrl,
+    resourceUrl: cfg.resourceUrl,
+    authorizerHandle: cfg.authorizerHandle,
+    toolsFingerprint: cfg.toolsFingerprint,
+    resourcesFingerprint: cfg.resourcesFingerprint,
+    templatesFingerprint: cfg.templatesFingerprint,
+    [field]: value,
+  });
 }
 
 /**

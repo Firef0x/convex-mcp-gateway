@@ -178,9 +178,20 @@ declaration time so an unusable template fails loudly:
 - a template with no placeholder (use `defineMcpResource` instead)
 - repeated variable names, unclosed `{`
 
-> Persisting templates in the registry (with declarative fingerprint sync,
-> mirroring concrete resources) is tracked as a separate follow-up; in this
-> phase templates are resolved from the runtime `resourceTemplates` option.
+### Registry persistence
+
+Templates are persisted in the component registry and reconciled on
+`initialize`, mirroring concrete resources: the declarative
+`resourceTemplates` option is change-detected via a fingerprint and synced,
+and `resources/templates/list` merges the registered templates with the
+runtime providers (a runtime provider wins on a shared `uriTemplate`). Unlike
+concrete resources, templates persist their **full** descriptor — `title`
+and `annotations` included — so a registry-only template still lists its
+complete shape. You can also manage the catalog imperatively with
+`gateway.registerResourceTemplate(s)` / `unregisterResourceTemplate` /
+`clearResourceTemplates`. Only catalog metadata is stored; the `read`
+handler and matcher are never persisted, so a registry-only template lists
+but resolves no reads until a matching runtime provider is supplied.
 
 ## Auth & audit
 

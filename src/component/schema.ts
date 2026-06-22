@@ -58,6 +58,23 @@ export default defineSchema({
   }).index("by_uri", ["uri"]),
 
   /**
+   * Persisted MCP resource templates (RFC 6570), the template counterpart
+   * of `resources`. Stores catalog metadata only — never the `read`
+   * handler or matcher. `annotations` is stored as `v.any()` (its shape is
+   * validated host-side before write); `title`/`annotations` are persisted
+   * here (unlike concrete resources, where they are runtime-only) so a
+   * registry-only template still lists its full descriptor.
+   */
+  resourceTemplates: defineTable({
+    uriTemplate: v.string(),
+    name: v.string(),
+    title: v.optional(v.string()),
+    description: v.optional(v.string()),
+    mimeType: v.optional(v.string()),
+    annotations: v.optional(v.any()),
+  }).index("by_uriTemplate", ["uriTemplate"]),
+
+  /**
    * Singleton row holding the OAuth 2.1 protected-resource metadata.
    * Empty until the host calls `gateway.setOAuthConfig`.
    *
@@ -106,6 +123,12 @@ export default defineSchema({
      * here; the registry stores stable catalog metadata only.
      */
     resourcesFingerprint: v.optional(v.string()),
+    /**
+     * Fingerprint of the declarative resource-template catalog last synced
+     * via the `resourceTemplates` option of `handleMcpRequest`. Mirrors
+     * `resourcesFingerprint`; absent means "never synced declaratively".
+     */
+    templatesFingerprint: v.optional(v.string()),
   }),
 
   /**
