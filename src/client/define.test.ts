@@ -254,6 +254,52 @@ describe("defineMcpResource", () => {
       }),
     ).toThrow(/read must be a function/);
   });
+
+  test("carries extended metadata (title, annotations, size)", async () => {
+    const resource = defineMcpResource({
+      uri: "docs://x",
+      name: "X",
+      title: "Doc X",
+      annotations: {
+        audience: ["user"],
+        priority: 0.5,
+        lastModified: "2026-01-01T00:00:00Z",
+      },
+      size: 1024,
+      read: async (_ctx, args) => [{ uri: args.uri, text: "x" }],
+    });
+
+    await expect(
+      resource.list({} as any, { identity: { subject: "u" } }),
+    ).resolves.toEqual([
+      {
+        uri: "docs://x",
+        name: "X",
+        title: "Doc X",
+        annotations: {
+          audience: ["user"],
+          priority: 0.5,
+          lastModified: "2026-01-01T00:00:00Z",
+        },
+        size: 1024,
+      },
+    ]);
+  });
+
+  test("rejects invalid extended metadata", () => {
+    const call = defineMcpResource as unknown as (config: unknown) => unknown;
+    const base = { uri: "docs://x", name: "X", read: async () => [] };
+    expect(() => call({ ...base, size: -1 })).toThrow(
+      /size must be a non-negative number/,
+    );
+    expect(() => call({ ...base, title: 5 })).toThrow(/title must be a string/);
+    expect(() => call({ ...base, annotations: { priority: 2 } })).toThrow(
+      /priority must be a number between 0 and 1/,
+    );
+    expect(() =>
+      call({ ...base, annotations: { audience: ["nope"] } }),
+    ).toThrow(/audience/);
+  });
 });
 
 describe("defineMcpResourceTemplate", () => {
@@ -340,16 +386,42 @@ describe("defineMcpResourceTemplate", () => {
       /unsupported/i,
     );
     // Unclosed expression.
-    expect(() => call({ uriTemplate: "db://{table", name: "Unclosed" })).toThrow(
-      /unclosed/i,
-    );
-    // Duplicate variable.
     expect(() =>
-      call({ uriTemplate: "db://{id}/{id}", name: "Dup" }),
-    ).toThrow(/repeats the variable/);
+      call({ uriTemplate: "db://{table", name: "Unclosed" }),
+    ).toThrow(/unclosed/i);
+    // Duplicate variable.
+    expect(() => call({ uriTemplate: "db://{id}/{id}", name: "Dup" })).toThrow(
+      /repeats the variable/,
+    );
     // read present but not a function.
     expect(() =>
       call({ uriTemplate: "db://{id}", name: "BadRead", read: "nope" }),
     ).toThrow(/read must be a function/);
+  });
+
+  test("carries extended template metadata and rejects invalid annotations", () => {
+    const tmpl = defineMcpResourceTemplate({
+      uriTemplate: "db://{id}",
+      name: "Row",
+      title: "Row template",
+      annotations: { priority: 1, audience: ["assistant"] },
+    });
+    expect(tmpl.template).toEqual({
+      uriTemplate: "db://{id}",
+      name: "Row",
+      title: "Row template",
+      annotations: { priority: 1, audience: ["assistant"] },
+    });
+
+    const call = defineMcpResourceTemplate as unknown as (
+      config: unknown,
+    ) => unknown;
+    expect(() =>
+      call({
+        uriTemplate: "db://{id}",
+        name: "X",
+        annotations: { priority: -1 },
+      }),
+    ).toThrow(/priority must be a number between 0 and 1/);
   });
 });

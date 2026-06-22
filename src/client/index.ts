@@ -22,6 +22,8 @@ import {
   type McpToolRegistration,
 } from "../shared.js";
 import {
+  describeResourceProblem,
+  describeResourceTemplateProblem,
   handleMcpRequest as handleMcpRequestImpl,
   type HandleMcpRequestOptions,
   type McpHandlerCtx,
@@ -53,6 +55,7 @@ export type {
   McpResourceAuthorizerArgs,
   McpResourceAuthorizerHandler,
   McpResource,
+  McpResourceAnnotations,
   McpResourceContent,
   McpResourceProvider,
   McpResourceTemplate,
@@ -91,7 +94,19 @@ export type McpResourceReadHandler = (
   },
 ) => Promise<McpResourceContent[]>;
 
-export type McpResourceDescriptor = McpResource & {
+/**
+ * Catalog metadata persisted in the component registry. Intentionally
+ * narrower than {@link McpResource}: the registry stores only stable
+ * catalog fields (see the component schema), so the richer list-response
+ * fields (`title`, `annotations`, `size`) are **runtime-only** and are not
+ * accepted here. They are still served from a resource provider's `list`
+ * output; they just aren't persisted.
+ */
+export type McpResourceDescriptor = {
+  uri: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
   metadata?: Record<string, unknown>;
 };
 
@@ -99,7 +114,12 @@ export type McpResourceRegistration = McpResourceProvider & {
   resource: McpResourceDescriptor;
 };
 
-export type McpResourceConfig = McpResourceDescriptor & {
+export type McpResourceConfig = McpResource & {
+  /**
+   * Free-form metadata stored alongside the registry descriptor (never sent
+   * to clients). The component does not inspect it.
+   */
+  metadata?: Record<string, unknown>;
   /**
    * Read this concrete resource. The gateway only calls this handler when
    * `resources/read` requests `uri`, so handlers can focus on loading content
@@ -380,16 +400,36 @@ export function defineMcpAction<
 export function defineMcpResource(
   config: McpResourceConfig,
 ): McpResourceRegistration {
-  if (typeof config.uri !== "string" || config.uri.length === 0) {
-    throw new Error("MCP resource uri must be a non-empty string");
-  }
-  if (typeof config.name !== "string" || config.name.length === 0) {
-    throw new Error("MCP resource name must be a non-empty string");
+  // Validate the descriptor shape (uri, name, and any title/description/
+  // mimeType/size/annotations) with the same rules the request handler
+  // enforces on provider output, so a bad declaration fails loud here.
+  const problem = describeResourceProblem(config);
+  if (problem) {
+    throw new Error(`MCP resource is invalid: ${problem}`);
   }
   if (typeof config.read !== "function") {
     throw new Error("MCP resource read must be a function");
   }
 
+  // Full shape served by the provider's `list` (carries the runtime-only
+  // title/annotations/size).
+  const publicResource: McpResource = {
+    uri: config.uri,
+    name: config.name,
+    ...(config.title !== undefined ? { title: config.title } : {}),
+    ...(config.description !== undefined
+      ? { description: config.description }
+      : {}),
+    ...(config.mimeType !== undefined ? { mimeType: config.mimeType } : {}),
+    ...(config.annotations !== undefined
+      ? { annotations: config.annotations }
+      : {}),
+    ...(config.size !== undefined ? { size: config.size } : {}),
+  };
+  // Narrow descriptor persisted in the registry: only the fields the
+  // component schema accepts. title/annotations/size are runtime-only and
+  // must NOT leak here, or declarative sync (replaceResources) would reject
+  // them as unknown fields.
   const resource: McpResourceDescriptor = {
     uri: config.uri,
     name: config.name,
@@ -398,14 +438,6 @@ export function defineMcpResource(
       : {}),
     ...(config.mimeType !== undefined ? { mimeType: config.mimeType } : {}),
     ...(config.metadata !== undefined ? { metadata: config.metadata } : {}),
-  };
-  const publicResource: McpResource = {
-    uri: resource.uri,
-    name: resource.name,
-    ...(resource.description !== undefined
-      ? { description: resource.description }
-      : {}),
-    ...(resource.mimeType !== undefined ? { mimeType: resource.mimeType } : {}),
   };
 
   return {
@@ -528,15 +560,25 @@ export function defineMcpResourceTemplate(
       "MCP resource template read must be a function when provided",
     );
   }
+  // Validate any title/description/mimeType/annotations with the same rules
+  // the request handler enforces, so a bad declaration fails loud here.
+  const problem = describeResourceTemplateProblem(config);
+  if (problem) {
+    throw new Error(`MCP resource template is invalid: ${problem}`);
+  }
   // Compile eagerly so an invalid uriTemplate fails at declaration time.
   const match = compileUriTemplate(config.uriTemplate);
   const template: McpResourceTemplate = {
     uriTemplate: config.uriTemplate,
     name: config.name,
+    ...(config.title !== undefined ? { title: config.title } : {}),
     ...(config.description !== undefined
       ? { description: config.description }
       : {}),
     ...(config.mimeType !== undefined ? { mimeType: config.mimeType } : {}),
+    ...(config.annotations !== undefined
+      ? { annotations: config.annotations }
+      : {}),
   };
   return {
     template,
@@ -778,6 +820,10 @@ export class McpGateway {
     ctx: RunMutationCtx,
     resource: McpResourceDescriptor,
   ): Promise<void> {
+    const problem = describeResourceProblem(resource);
+    if (problem) {
+      throw new Error(`MCP resource is invalid: ${problem}`);
+    }
     await ctx.runMutation(this.component.registry.registerResource, resource);
   }
 
@@ -791,6 +837,12 @@ export class McpGateway {
     ctx: RunMutationCtx,
     resources: McpResourceDescriptor[],
   ): Promise<void> {
+    for (const resource of resources) {
+      const problem = describeResourceProblem(resource);
+      if (problem) {
+        throw new Error(`MCP resource is invalid: ${problem}`);
+      }
+    }
     await ctx.runMutation(this.component.registry.replaceResources, {
       resources,
     });
@@ -922,10 +974,9 @@ export class McpGateway {
     ctx: RunQueryCtx,
     uri: string,
   ): Promise<string[]> {
-    return await ctx.runQuery(
-      this.component.sessions.listResourceSubscribers,
-      { uri },
-    );
+    return await ctx.runQuery(this.component.sessions.listResourceSubscribers, {
+      uri,
+    });
   }
 
   /**

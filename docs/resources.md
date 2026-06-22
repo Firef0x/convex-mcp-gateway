@@ -16,11 +16,11 @@ Both run only for authenticated callers, flow through the same optional
 
 ## When to use which
 
-| Use a **concrete resource** when… | Use a **template** when… |
-|---|---|
-| The URI is fixed and known ahead of time | The URI is parameterized (an id, a city, a path) |
-| You want it persisted in the registry and listed in `resources/list` | You want clients to discover the *shape* and expand it themselves |
-| There's one (or a small fixed set of) document | There's an unbounded family of resources behind one pattern |
+| Use a **concrete resource** when…                                    | Use a **template** when…                                          |
+| -------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| The URI is fixed and known ahead of time                             | The URI is parameterized (an id, a city, a path)                  |
+| You want it persisted in the registry and listed in `resources/list` | You want clients to discover the _shape_ and expand it themselves |
+| There's one (or a small fixed set of) document                       | There's an unbounded family of resources behind one pattern       |
 
 A template is not listed in `resources/list`; it appears only in
 `resources/templates/list`. The client expands the template to a concrete
@@ -49,6 +49,42 @@ component registry on `initialize` (change-detected), so `resources/list`
 returns them even from a request that doesn't pass a provider. See the
 registry-sync behaviour in [Architecture](./architecture.md).
 
+## Resource shape & validation
+
+A resource descriptor (a `resources/list` entry, and the object
+`defineMcpResource` accepts) supports:
+
+| Field         | Type      | Notes                                                                                                                                                                   |
+| ------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `uri`         | `string`  | required, non-empty                                                                                                                                                     |
+| `name`        | `string`  | required, non-empty                                                                                                                                                     |
+| `title`       | `string?` | human-friendly display name; clients fall back to `name`                                                                                                                |
+| `description` | `string?` |                                                                                                                                                                         |
+| `mimeType`    | `string?` |                                                                                                                                                                         |
+| `size`        | `number?` | raw size in bytes, non-negative                                                                                                                                         |
+| `annotations` | `object?` | `{ audience?: ("user"\|"assistant")[]; priority?: number /* 0..1 */; lastModified?: string /* conventionally ISO 8601; validated as a string, format not enforced */ }` |
+
+A resource template adds `annotations` (no `size`). A read returns an array
+of contents, each `{ uri, mimeType?, text?, blob? }` with **at least one of
+`text`/`blob`**.
+
+`title`, `annotations`, and `size` are **runtime-only**: they are served
+from a resource provider's `list` output, but are not persisted in the
+registry. So a resource listed purely from the registry (declared but not
+passed as a provider on the request) carries only `uri`/`name`/
+`description`/`mimeType`.
+
+These shapes are validated at two points so structurally malformed
+descriptors never reach the client:
+
+- **Declaration time** — `defineMcpResource` / `defineMcpResourceTemplate`
+  throw on an invalid descriptor (bad `annotations`, negative `size`, etc.).
+- **Request time** — output from a resource _provider_ (`list`/`read`) and a
+  template provider is validated before it is returned; an invalid descriptor
+  or content array fails the whole operation with a deterministic
+  `-32603` JSON-RPC error naming the bad field, rather than shipping
+  malformed JSON-RPC. Minimal `{ uri, name }` descriptors remain valid.
+
 ## Resource templates
 
 ```ts
@@ -62,7 +98,11 @@ const weather = defineMcpResourceTemplate({
   // Optional: resolve matching reads server-side. Omit `read` for a
   // listing-only template (the client reads the expansion elsewhere).
   read: async (ctx, { uri, params, identity }) => [
-    { uri, mimeType: "application/json", text: await fetchWeather(params.city) },
+    {
+      uri,
+      mimeType: "application/json",
+      text: await fetchWeather(params.city),
+    },
   ],
 });
 
@@ -83,7 +123,7 @@ When `resources/read` receives a URI:
    order; the first template whose `read` returns content serves it. A
    template without a `read` handler is listing-only and is skipped here.
 3. If nothing serves the URI, the read returns `Resource not found`
-   (`-32602`). A provider/template that *throws* (rather than declining
+   (`-32602`). A provider/template that _throws_ (rather than declining
    with `null`) is isolated and logged; it surfaces as an internal error
    (`-32603`) only if nothing else serves the URI.
 
@@ -118,12 +158,12 @@ declaration time so an unusable template fails loudly:
   `resourceOperation: "read"`, exactly like concrete reads.
 
 > **List-deny is not read-deny.** `resources/read` of a template-expanded
-> URI is authorized under `mode: "resource_read"` with the *concrete*
+> URI is authorized under `mode: "resource_read"` with the _concrete_
 > expanded URI (e.g. `weather://london/current`) and `resourceMetadata:
-> null` — not under `resource_templates_list` with the `uriTemplate`. So
+null` — not under `resource_templates_list` with the `uriTemplate`. So
 > hiding a template from `resources/templates/list` does **not** by itself
 > block reads of its expansions. `resource_templates_list` controls catalog
-> *visibility*; `resource_read` is the gate for every read. To deny reads of
+> _visibility_; `resource_read` is the gate for every read. To deny reads of
 > a template's URIs, match the URI shape in your `resource_read` branch
 > and/or enforce the check inside the template's own `read` handler.
 
@@ -187,7 +227,7 @@ Notes:
 - **Identity-bound, not content-authz.** Subscribing requires an
   authenticated caller, and `subscribe`/`unsubscribe` are bound to the
   session's owner (like `DELETE`), so a leaked `Mcp-Session-Id` can't be used
-  to grief another user's subscriptions. But it is *not* content-authorized:
+  to grief another user's subscriptions. But it is _not_ content-authorized:
   the `updated` payload carries just the URI, and the subscriber must still
   `resources/read` (which re-applies `resource_read`) to get content.
   Authorize delivery yourself if a "this URI changed" signal is itself

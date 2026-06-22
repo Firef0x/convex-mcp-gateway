@@ -5,7 +5,15 @@ import {
   defineMcpResourceTemplate,
   McpGateway,
 } from "./index.js";
-import { handleMcpRequest, type McpResourceProvider } from "./mcp-handler.js";
+import {
+  describeAnnotationsProblem,
+  describeResourceContentsProblem,
+  describeResourceProblem,
+  describeResourceTemplateProblem,
+  handleMcpRequest,
+  type McpResourceProvider,
+  type McpResourceTemplateProvider,
+} from "./mcp-handler.js";
 
 function createComponent() {
   return {
@@ -86,15 +94,30 @@ function createCtx(component: ComponentApi) {
           return sessions.has(String(args.sessionId));
         }
         if (ref === component.registry.replaceResources) {
-          resources = (
-            args.resources as Array<{
-              uri: string;
-              name: string;
-              description?: string;
-              mimeType?: string;
-              metadata?: unknown;
-            }>
-          ).map((resource) => ({ ...resource }));
+          const incoming = args.resources as Array<Record<string, unknown>>;
+          // Mirror the component's strict v.object validator: the registry
+          // accepts only these catalog fields. This guards against runtime-
+          // only fields (title/annotations/size) leaking into the descriptor
+          // that is persisted, which the real Convex validator would reject.
+          const allowed = new Set([
+            "uri",
+            "name",
+            "description",
+            "mimeType",
+            "metadata",
+          ]);
+          for (const resource of incoming) {
+            for (const key of Object.keys(resource)) {
+              if (!allowed.has(key)) {
+                throw new Error(
+                  `replaceResources received unexpected field "${key}"`,
+                );
+              }
+            }
+          }
+          resources = incoming.map((resource) => ({
+            ...resource,
+          })) as typeof resources;
           resourcesFingerprint =
             typeof args.fingerprint === "string" ? args.fingerprint : null;
           return null;
@@ -1175,7 +1198,10 @@ describe("handleMcpRequest resources", () => {
       },
     );
     expect(await readJson(miss)).toMatchObject({
-      error: { code: -32602, message: "Resource not found: weather://london/history" },
+      error: {
+        code: -32602,
+        message: "Resource not found: weather://london/history",
+      },
     });
   });
 
@@ -1776,5 +1802,376 @@ describe("handleMcpRequest resources", () => {
       method: "notifications/resources/updated",
       params: { uri: "docs://a" },
     });
+  });
+
+  test("resources/list forwards extended provider metadata", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const provider: McpResourceProvider = {
+      name: "p",
+      list: async () => [
+        {
+          uri: "docs://a",
+          name: "A",
+          title: "Doc A",
+          size: 42,
+          annotations: { audience: ["user"], priority: 0.3 },
+        },
+      ],
+      read: async () => null,
+    };
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      { authorize: async () => ({ allowed: true }), resources: [provider] },
+    );
+    const sessionId = init.headers.get("mcp-session-id")!;
+    const list = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 2, method: "resources/list" }, sessionId),
+      component,
+      { authorize: async () => ({ allowed: true }), resources: [provider] },
+    );
+    expect(await readJson(list)).toMatchObject({
+      result: {
+        resources: [
+          {
+            uri: "docs://a",
+            name: "A",
+            title: "Doc A",
+            size: 42,
+            annotations: { audience: ["user"], priority: 0.3 },
+          },
+        ],
+      },
+    });
+  });
+
+  test("resources/list returns -32603 on an invalid provider descriptor", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    // A provider that returns a descriptor with no uri (bypassing the typed
+    // helper) must not ship malformed JSON-RPC.
+    const provider = {
+      name: "p",
+      list: async () => [{ name: "no uri" }],
+      read: async () => null,
+    } as unknown as McpResourceProvider;
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      { authorize: async () => ({ allowed: true }), resources: [provider] },
+    );
+    const sessionId = init.headers.get("mcp-session-id")!;
+    const list = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 2, method: "resources/list" }, sessionId),
+      component,
+      { authorize: async () => ({ allowed: true }), resources: [provider] },
+    );
+    const body = await readJson(list);
+    expect(body.error?.code).toBe(-32603);
+    expect(body.error?.message).toMatch(/resource\.uri must be a non-empty/);
+  });
+
+  test("resources/read returns -32603 on invalid content", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    // Content item with neither text nor blob.
+    const emptyItem: McpResourceProvider = {
+      name: "p",
+      list: async () => [],
+      read: async (_ctx, args) => [{ uri: args.uri }],
+    };
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      { authorize: async () => ({ allowed: true }), resources: [emptyItem] },
+    );
+    const sessionId = init.headers.get("mcp-session-id")!;
+    const read = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest(
+        { id: 2, method: "resources/read", params: { uri: "docs://a" } },
+        sessionId,
+      ),
+      component,
+      { authorize: async () => ({ allowed: true }), resources: [emptyItem] },
+    );
+    const body = await readJson(read);
+    expect(body.error?.code).toBe(-32603);
+    expect(body.error?.message).toMatch(/must include text or blob/);
+
+    // Read result that isn't an array at all.
+    const notArray = {
+      name: "p",
+      list: async () => [],
+      read: async () => ({ uri: "docs://a", text: "x" }),
+    } as unknown as McpResourceProvider;
+    const init2 = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 3, method: "initialize" }),
+      component,
+      { authorize: async () => ({ allowed: true }), resources: [notArray] },
+    );
+    const sessionId2 = init2.headers.get("mcp-session-id")!;
+    const read2 = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest(
+        { id: 4, method: "resources/read", params: { uri: "docs://a" } },
+        sessionId2,
+      ),
+      component,
+      { authorize: async () => ({ allowed: true }), resources: [notArray] },
+    );
+    const body2 = await readJson(read2);
+    expect(body2.error?.code).toBe(-32603);
+    expect(body2.error?.message).toMatch(/must be an array/);
+  });
+
+  test("resources/templates/list returns -32603 on an invalid template", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    // A hand-built template provider (bypassing defineMcpResourceTemplate)
+    // with an empty uriTemplate.
+    const provider = {
+      template: { uriTemplate: "", name: "Bad" },
+      match: () => null,
+    } as unknown as McpResourceTemplateProvider;
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [provider],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id")!;
+    const list = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 2, method: "resources/templates/list" }, sessionId),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [provider],
+      },
+    );
+    const body = await readJson(list);
+    expect(body.error?.code).toBe(-32603);
+    expect(body.error?.message).toMatch(/template\.uriTemplate/);
+  });
+
+  test("declaratively syncs an extended resource without leaking runtime fields to the registry", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    const gateway = new McpGateway(component);
+    const handbook = defineMcpResource({
+      uri: "docs://handbook",
+      name: "Handbook",
+      title: "Operator handbook",
+      annotations: { audience: ["assistant"], priority: 0.9 },
+      size: 2048,
+      read: async () => [{ uri: "docs://handbook", text: "..." }],
+    });
+
+    // initialize runs the declarative sync → replaceResources. The strict
+    // mock throws if title/annotations/size leak into the persisted
+    // descriptor, so a successful initialize proves the registry descriptor
+    // is narrow.
+    const init = await gateway.handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      { authorize: async () => ({ allowed: true }), resources: [handbook] },
+    );
+    expect(init.headers.get("mcp-session-id")).toBeTruthy();
+    expect(state.resources).toEqual([
+      {
+        uri: "docs://handbook",
+        name: "Handbook",
+      },
+    ]);
+
+    // The provider still surfaces the extended fields in resources/list
+    // (the provider candidate wins dedup over the registry row).
+    const sessionId = init.headers.get("mcp-session-id")!;
+    const list = await gateway.handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 2, method: "resources/list" }, sessionId),
+      { authorize: async () => ({ allowed: true }), resources: [handbook] },
+    );
+    expect(await readJson(list)).toMatchObject({
+      result: {
+        resources: [
+          {
+            uri: "docs://handbook",
+            name: "Handbook",
+            title: "Operator handbook",
+            annotations: { audience: ["assistant"], priority: 0.9 },
+            size: 2048,
+          },
+        ],
+      },
+    });
+  });
+
+  test("resources/templates/list forwards valid annotations and title", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const template = defineMcpResourceTemplate({
+      uriTemplate: "weather://{city}/current",
+      name: "Weather",
+      title: "Current weather",
+      annotations: { audience: ["user"], priority: 0.4 },
+      read: async () => null,
+    });
+    const init = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [template],
+      },
+    );
+    const sessionId = init.headers.get("mcp-session-id")!;
+    const list = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({ id: 2, method: "resources/templates/list" }, sessionId),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        resourceTemplates: [template],
+      },
+    );
+    expect(await readJson(list)).toMatchObject({
+      result: {
+        resourceTemplates: [
+          {
+            uriTemplate: "weather://{city}/current",
+            name: "Weather",
+            title: "Current weather",
+            annotations: { audience: ["user"], priority: 0.4 },
+          },
+        ],
+      },
+    });
+  });
+});
+
+describe("resource shape validators", () => {
+  test("describeResourceProblem: valid minimal and extended descriptors", () => {
+    expect(describeResourceProblem({ uri: "x://a", name: "A" })).toBeNull();
+    expect(
+      describeResourceProblem({
+        uri: "x://a",
+        name: "A",
+        title: "T",
+        description: "d",
+        mimeType: "text/plain",
+        size: 0,
+        annotations: { audience: ["user"], priority: 0, lastModified: "now" },
+      }),
+    ).toBeNull();
+  });
+
+  test("describeResourceProblem: rejects bad descriptors", () => {
+    expect(describeResourceProblem(null)).toMatch(/must be an object/);
+    expect(describeResourceProblem([])).toMatch(/must be an object/);
+    expect(describeResourceProblem({ name: "A" })).toMatch(/uri/);
+    expect(describeResourceProblem({ uri: "x://a" })).toMatch(/name/);
+    expect(describeResourceProblem({ uri: "", name: "A" })).toMatch(/uri/);
+    expect(
+      describeResourceProblem({ uri: "x://a", name: "A", description: 1 }),
+    ).toMatch(/description must be a string/);
+    expect(
+      describeResourceProblem({ uri: "x://a", name: "A", mimeType: 1 }),
+    ).toMatch(/mimeType must be a string/);
+    expect(
+      describeResourceProblem({ uri: "x://a", name: "A", size: -1 }),
+    ).toMatch(/size/);
+    expect(
+      describeResourceProblem({ uri: "x://a", name: "A", size: NaN }),
+    ).toMatch(/size/);
+    expect(
+      describeResourceProblem({ uri: "x://a", name: "A", size: Infinity }),
+    ).toMatch(/size/);
+  });
+
+  test("describeAnnotationsProblem: valid and invalid", () => {
+    expect(describeAnnotationsProblem(undefined)).toBeNull();
+    expect(describeAnnotationsProblem({})).toBeNull();
+    expect(describeAnnotationsProblem({ priority: 0 })).toBeNull();
+    expect(describeAnnotationsProblem({ priority: 1 })).toBeNull();
+    expect(describeAnnotationsProblem("x")).toMatch(/must be an object/);
+    expect(describeAnnotationsProblem([])).toMatch(/must be an object/);
+    expect(describeAnnotationsProblem({ priority: -0.1 })).toMatch(/priority/);
+    expect(describeAnnotationsProblem({ priority: 1.1 })).toMatch(/priority/);
+    expect(describeAnnotationsProblem({ audience: ["nope"] })).toMatch(
+      /audience/,
+    );
+    expect(describeAnnotationsProblem({ audience: "user" })).toMatch(
+      /audience/,
+    );
+    expect(describeAnnotationsProblem({ lastModified: 1 })).toMatch(
+      /lastModified must be a string/,
+    );
+  });
+
+  test("describeResourceTemplateProblem: valid and invalid", () => {
+    expect(
+      describeResourceTemplateProblem({ uriTemplate: "x://{a}", name: "A" }),
+    ).toBeNull();
+    expect(describeResourceTemplateProblem({ name: "A" })).toMatch(
+      /uriTemplate/,
+    );
+    expect(
+      describeResourceTemplateProblem({ uriTemplate: "x://{a}", name: "" }),
+    ).toMatch(/name/);
+    expect(
+      describeResourceTemplateProblem({
+        uriTemplate: "x://{a}",
+        name: "A",
+        description: 5,
+      }),
+    ).toMatch(/description must be a string/);
+  });
+
+  test("describeResourceContentsProblem: valid and invalid", () => {
+    expect(describeResourceContentsProblem([])).toBeNull();
+    expect(
+      describeResourceContentsProblem([{ uri: "x://a", text: "t" }]),
+    ).toBeNull();
+    expect(
+      describeResourceContentsProblem([{ uri: "x://a", blob: "b" }]),
+    ).toBeNull();
+    expect(
+      describeResourceContentsProblem([
+        { uri: "x://a", mimeType: "text/plain", text: "t", blob: "b" },
+      ]),
+    ).toBeNull();
+    expect(describeResourceContentsProblem({})).toMatch(/must be an array/);
+    expect(describeResourceContentsProblem(["x"])).toMatch(/must be an object/);
+    expect(describeResourceContentsProblem([null])).toMatch(
+      /must be an object/,
+    );
+    expect(describeResourceContentsProblem([{ text: "t" }])).toMatch(
+      /content\.uri/,
+    );
+    expect(
+      describeResourceContentsProblem([{ uri: "x://a", mimeType: 1 }]),
+    ).toMatch(/mimeType must be a string/);
+    expect(
+      describeResourceContentsProblem([{ uri: "x://a", text: 1 }]),
+    ).toMatch(/text must be a string/);
+    expect(
+      describeResourceContentsProblem([{ uri: "x://a", blob: 1 }]),
+    ).toMatch(/blob must be a string/);
+    expect(describeResourceContentsProblem([{ uri: "x://a" }])).toMatch(
+      /must include text or blob/,
+    );
   });
 });

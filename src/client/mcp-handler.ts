@@ -77,11 +77,29 @@ export type McpIdentityResolver = (
   token: string,
 ) => Promise<{ subject: string; claims?: Record<string, unknown> } | null>;
 
+/**
+ * MCP resource/content annotations. All fields optional:
+ * - `audience`: who the resource is for (`"user"` and/or `"assistant"`).
+ * - `priority`: importance from `0` (least) to `1` (most).
+ * - `lastModified`: timestamp of the last change, conventionally ISO 8601.
+ *   Validated only as a string; the date format is not enforced.
+ */
+export type McpResourceAnnotations = {
+  audience?: ("user" | "assistant")[];
+  priority?: number;
+  lastModified?: string;
+};
+
 export type McpResource = {
   uri: string;
   name: string;
+  /** Human-friendly display name; falls back to `name` in clients. */
+  title?: string;
   description?: string;
   mimeType?: string;
+  annotations?: McpResourceAnnotations;
+  /** Raw size in bytes, if known. */
+  size?: number;
 };
 
 export type McpResourceContent = {
@@ -115,8 +133,11 @@ export type McpResourceProvider = {
 export type McpResourceTemplate = {
   uriTemplate: string;
   name: string;
+  /** Human-friendly display name; falls back to `name` in clients. */
+  title?: string;
   description?: string;
   mimeType?: string;
+  annotations?: McpResourceAnnotations;
 };
 
 /**
@@ -356,7 +377,14 @@ type RegisteredTool = {
   metadata?: unknown;
 };
 
-type RegisteredResource = McpResource & {
+// A row from the resource registry. Narrower than `McpResource`: the
+// registry persists only these catalog fields (the richer title/annotations/
+// size are runtime-only and never stored), so the row type reflects that.
+type RegisteredResource = {
+  uri: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
   metadata?: unknown;
 };
 
@@ -620,6 +648,136 @@ function dedupeResourceCandidates(
   return Array.from(byUri.values());
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Validate MCP resource/content annotations. Returns a human-readable
+ * problem string, or `null` when valid (including when `undefined`).
+ * Exported so the `defineMcp*` helpers can fail loud at declaration time
+ * with the same rules the request handler enforces on provider output.
+ */
+export function describeAnnotationsProblem(
+  annotations: unknown,
+): string | null {
+  if (annotations === undefined) return null;
+  if (!isPlainObject(annotations)) return "annotations must be an object";
+  if (annotations.audience !== undefined) {
+    if (
+      !Array.isArray(annotations.audience) ||
+      !annotations.audience.every((a) => a === "user" || a === "assistant")
+    ) {
+      return 'annotations.audience must be an array of "user" | "assistant"';
+    }
+  }
+  if (annotations.priority !== undefined) {
+    if (
+      typeof annotations.priority !== "number" ||
+      annotations.priority < 0 ||
+      annotations.priority > 1
+    ) {
+      return "annotations.priority must be a number between 0 and 1";
+    }
+  }
+  if (
+    annotations.lastModified !== undefined &&
+    typeof annotations.lastModified !== "string"
+  ) {
+    return "annotations.lastModified must be a string";
+  }
+  return null;
+}
+
+/**
+ * Validate an MCP resource descriptor (a `resources/list` entry). Returns a
+ * problem string or `null`. `uri` and `name` are required non-empty strings;
+ * `title`/`description`/`mimeType` are optional strings; `size` is an
+ * optional non-negative number; `annotations` is validated as above.
+ */
+export function describeResourceProblem(resource: unknown): string | null {
+  if (!isPlainObject(resource)) return "resource must be an object";
+  if (typeof resource.uri !== "string" || resource.uri.length === 0) {
+    return "resource.uri must be a non-empty string";
+  }
+  if (typeof resource.name !== "string" || resource.name.length === 0) {
+    return "resource.name must be a non-empty string";
+  }
+  for (const field of ["title", "description", "mimeType"] as const) {
+    if (resource[field] !== undefined && typeof resource[field] !== "string") {
+      return `resource.${field} must be a string`;
+    }
+  }
+  if (
+    resource.size !== undefined &&
+    (typeof resource.size !== "number" ||
+      !Number.isFinite(resource.size) ||
+      resource.size < 0)
+  ) {
+    return "resource.size must be a non-negative number";
+  }
+  return describeAnnotationsProblem(resource.annotations);
+}
+
+/**
+ * Validate an MCP resource template descriptor (a `resources/templates/list`
+ * entry). Like `describeResourceProblem` but keyed on `uriTemplate` and
+ * without `size`.
+ */
+export function describeResourceTemplateProblem(
+  template: unknown,
+): string | null {
+  if (!isPlainObject(template)) return "resource template must be an object";
+  if (
+    typeof template.uriTemplate !== "string" ||
+    template.uriTemplate.length === 0
+  ) {
+    return "template.uriTemplate must be a non-empty string";
+  }
+  if (typeof template.name !== "string" || template.name.length === 0) {
+    return "template.name must be a non-empty string";
+  }
+  for (const field of ["title", "description", "mimeType"] as const) {
+    if (template[field] !== undefined && typeof template[field] !== "string") {
+      return `template.${field} must be a string`;
+    }
+  }
+  return describeAnnotationsProblem(template.annotations);
+}
+
+/**
+ * Validate the array a resource read handler returns. Must be an array; each
+ * item needs a non-empty string `uri`, optional string `mimeType`, and at
+ * least one of `text`/`blob` (each a string when present). Returns a problem
+ * string or `null`.
+ */
+export function describeResourceContentsProblem(
+  contents: unknown,
+): string | null {
+  if (!Array.isArray(contents)) {
+    return "resource read result must be an array of content items";
+  }
+  for (const item of contents) {
+    if (!isPlainObject(item)) return "each content item must be an object";
+    if (typeof item.uri !== "string" || item.uri.length === 0) {
+      return "content.uri must be a non-empty string";
+    }
+    if (item.mimeType !== undefined && typeof item.mimeType !== "string") {
+      return "content.mimeType must be a string";
+    }
+    if (item.text !== undefined && typeof item.text !== "string") {
+      return "content.text must be a string";
+    }
+    if (item.blob !== undefined && typeof item.blob !== "string") {
+      return "content.blob must be a string";
+    }
+    if (item.text === undefined && item.blob === undefined) {
+      return "content item must include text or blob";
+    }
+  }
+  return null;
+}
+
 function publicResource(resource: RegisteredResource): McpResource {
   return {
     uri: resource.uri,
@@ -637,10 +795,14 @@ function publicResourceTemplate(
   return {
     uriTemplate: template.uriTemplate,
     name: template.name,
+    ...(template.title !== undefined ? { title: template.title } : {}),
     ...(template.description !== undefined
       ? { description: template.description }
       : {}),
     ...(template.mimeType !== undefined ? { mimeType: template.mimeType } : {}),
+    ...(template.annotations !== undefined
+      ? { annotations: template.annotations }
+      : {}),
   };
 }
 
@@ -1120,6 +1282,18 @@ async function handlePost(
             }),
           )
         ).flat();
+        // Validate provider output before it reaches the client. A
+        // structurally invalid descriptor is a provider bug, so fail the
+        // whole list loudly with a deterministic -32603 (caught below)
+        // rather than ship malformed JSON-RPC.
+        for (const resource of providerResources) {
+          const problem = describeResourceProblem(resource);
+          if (problem) {
+            throw new Error(
+              `resources/list provider returned an invalid resource: ${problem}`,
+            );
+          }
+        }
         const metadataByUri = new Map(
           registeredResources.map((resource) => [
             resource.uri,
@@ -1220,6 +1394,12 @@ async function handlePost(
       try {
         const resourceTemplates = [];
         for (const provider of templates) {
+          const problem = describeResourceTemplateProblem(provider.template);
+          if (problem) {
+            throw new Error(
+              `resources/templates/list provider returned an invalid template: ${problem}`,
+            );
+          }
           const { decision, threw } = await safeAuthorizeResource(
             options.authorizeResource,
             ctx,
@@ -1376,6 +1556,17 @@ async function handlePost(
         // the templates).
         let providerError: string | null = null;
         const serveContents = async (contents: McpResourceContent[]) => {
+          // Validate handler output before returning it. Invalid contents
+          // are a provider bug; throw so the outer catch turns it into a
+          // deterministic -32603 instead of shipping malformed JSON-RPC.
+          // (Runs outside the per-provider try, so it is a hard error, not a
+          // provider-decline that falls through to the next provider.)
+          const problem = describeResourceContentsProblem(contents);
+          if (problem) {
+            throw new Error(
+              `resources/read provider returned invalid contents: ${problem}`,
+            );
+          }
           if (shouldAuditResource(options.auditResources, "read")) {
             await safeRecordResourceAudit(ctx, component, {
               resourceUri: uri,
