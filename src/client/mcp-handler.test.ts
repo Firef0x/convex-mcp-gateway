@@ -235,7 +235,7 @@ async function readJson(response: Response) {
 }
 
 describe("handleMcpRequest resources", () => {
-  test("advertises resources capability and initialize instructions", async () => {
+  test("advertises resources capability", async () => {
     const component = createComponent();
     const { ctx } = createCtx(component);
 
@@ -256,7 +256,6 @@ describe("handleMcpRequest resources", () => {
             read: async () => null,
           },
         ],
-        initializeInstructions: "Use resources/list to discover references.",
       },
     );
 
@@ -266,9 +265,6 @@ describe("handleMcpRequest resources", () => {
       tools: {},
       resources: {},
     });
-    expect(body.result?.instructions).toBe(
-      "Use resources/list to discover references.",
-    );
   });
 
   test("serves resources/list and resources/read through providers", async () => {
@@ -1554,7 +1550,7 @@ describe("handleMcpRequest resources", () => {
     });
   });
 
-  test("resources/templates/list rejects anonymous callers and audits the denial", async () => {
+  test("resources/templates/list rejects anonymous callers without auditing (anti-DoS)", async () => {
     const component = createComponent();
     const state = createCtx(component);
     // Make this caller anonymous for the whole exchange.
@@ -1591,14 +1587,10 @@ describe("handleMcpRequest resources", () => {
     expect(await readJson(list)).toMatchObject({
       error: { code: -32001, message: "Unauthorized: authentication required" },
     });
-    expect(state.resourceAuditEntries).toMatchObject([
-      {
-        resourceOperation: "templates_list",
-        outcome: "denied",
-        identitySubject: null,
-        errorCode: -32001,
-      },
-    ]);
+    // Anonymous denials are NOT audited: auditing them would let an
+    // unauthenticated client grow the audit table without bound (mirrors the
+    // unknown-tool path in dispatch.ts).
+    expect(state.resourceAuditEntries).toEqual([]);
   });
 
   test("templates-only deployment: resources/list returns an empty list, not -32601", async () => {

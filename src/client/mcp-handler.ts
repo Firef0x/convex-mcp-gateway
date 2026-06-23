@@ -331,12 +331,6 @@ export interface HandleMcpRequestOptions {
     subscribe?: boolean;
     listChanged?: boolean;
   };
-  /**
-   * Optional instructions appended to the `initialize` result. Useful for
-   * telling clients how to use the resource catalog without modifying the
-   * host's tool definitions.
-   */
-  initializeInstructions?: string;
 }
 
 /**
@@ -633,17 +627,6 @@ async function safeAuthorizeResource(
       threw: true,
     };
   }
-}
-
-function mergeInitializeInstructions(
-  existing: unknown,
-  instructions: string | undefined,
-): string | unknown {
-  if (!instructions) return existing;
-  if (typeof existing === "string" && existing.trim()) {
-    return `${existing.trim()}\n\n${instructions}`;
-  }
-  return instructions;
 }
 
 function dedupeResourceCandidates(
@@ -1258,10 +1241,6 @@ async function handlePost(
           name: SERVER_NAME,
           version: SERVER_VERSION,
         },
-        instructions: mergeInitializeInstructions(
-          undefined,
-          options.initializeInstructions,
-        ),
         capabilities: {
           tools: {},
           ...(advertiseResources
@@ -1302,17 +1281,12 @@ async function handlePost(
         break;
       }
       if (!identity) {
-        if (shouldAuditResource(options.auditResources, "list")) {
-          await safeRecordResourceAudit(ctx, component, {
-            resourceOperation: "list",
-            args: null,
-            outcome: "denied",
-            identitySubject: auditIdentitySubject,
-            durationMs: Date.now() - start,
-            errorCode: UNAUTHORIZED,
-            errorMessage: "Unauthorized: authentication required",
-          });
-        }
+        // Intentionally NOT audited on the anonymous deny path. An
+        // unauthenticated caller can `initialize` once then spam resource
+        // requests with no Bearer; auditing the denials would let them grow
+        // the audit table without bound (and `resources/read` carries a
+        // caller-controlled `uri`). Mirrors the unknown-tool path in
+        // dispatch.ts — only authenticated outcomes are audited.
         body = jsonErrorEnvelope(
           message.id,
           UNAUTHORIZED,
@@ -1436,17 +1410,8 @@ async function handlePost(
         break;
       }
       if (!identity) {
-        if (shouldAuditResource(options.auditResources, "templatesList")) {
-          await safeRecordResourceAudit(ctx, component, {
-            resourceOperation: "templates_list",
-            args: null,
-            outcome: "denied",
-            identitySubject: auditIdentitySubject,
-            durationMs: Date.now() - start,
-            errorCode: UNAUTHORIZED,
-            errorMessage: "Unauthorized: authentication required",
-          });
-        }
+        // Not audited on the anonymous deny path — see the resources/list
+        // rationale: anonymous spam must never grow the audit table.
         body = jsonErrorEnvelope(
           message.id,
           UNAUTHORIZED,
@@ -1543,21 +1508,11 @@ async function handlePost(
         break;
       }
       if (!identity) {
-        const maybeUri = message.params?.uri;
-        if (shouldAuditResource(options.auditResources, "read")) {
-          await safeRecordResourceAudit(ctx, component, {
-            ...(typeof maybeUri === "string" && maybeUri.length > 0
-              ? { resourceUri: maybeUri }
-              : {}),
-            resourceOperation: "read",
-            args: null,
-            outcome: "denied",
-            identitySubject: auditIdentitySubject,
-            durationMs: Date.now() - start,
-            errorCode: UNAUTHORIZED,
-            errorMessage: "Unauthorized: authentication required",
-          });
-        }
+        // Not audited on the anonymous deny path — see the resources/list
+        // rationale. This matters most here: the denied `read` carries a
+        // caller-controlled `uri`, so auditing would let an unauthenticated
+        // client grow the table with arbitrary large URIs after one
+        // `initialize`.
         body = jsonErrorEnvelope(
           message.id,
           UNAUTHORIZED,
