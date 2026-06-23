@@ -235,6 +235,49 @@ async function readJson(response: Response) {
 }
 
 describe("handleMcpRequest resources", () => {
+  test("initialize returns instructions when initializeInstructions is set", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+
+    const response = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18" },
+      }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        initializeInstructions: "Call kira_load_skill before answering.",
+      },
+    );
+
+    const body = await readJson(response);
+    expect(body.result?.instructions).toBe(
+      "Call kira_load_skill before answering.",
+    );
+  });
+
+  test("initialize omits instructions when initializeInstructions is unset", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+
+    const response = await handleMcpRequest(
+      ctx,
+      jsonRpcRequest({
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18" },
+      }),
+      component,
+      { authorize: async () => ({ allowed: true }) },
+    );
+
+    const body = await readJson(response);
+    expect(body.result).not.toHaveProperty("instructions");
+  });
+
   test("advertises resources capability", async () => {
     const component = createComponent();
     const { ctx } = createCtx(component);

@@ -230,6 +230,15 @@ recipes.
 > config (step 5). Leave it off for mixed public/private servers. Full
 > rationale: [oauth.md](./oauth.md#all-private-servers-and-browser-clients-requireauth).
 
+> **Server-level instructions.** Pass `initializeInstructions: "..."` in the
+> options to populate the MCP `initialize` result's `instructions` field:
+> guidance the client can hand the LLM about how to use the server as a whole,
+> without bloating individual tool descriptions. Omitted from the response
+> when unset, so the default `initialize` shape is unchanged. Treat it as a
+> best-effort hint: clients MAY use it, some ignore it, and those that honor it
+> may cap or front-truncate the text. Keep it short, lead with what matters,
+> and enforce hard rules in `authorize` or your tool handler.
+
 ## 5. (Optional) Mount OAuth discovery
 
 If you want MCP clients to discover your authorization server

@@ -39,6 +39,9 @@ Built as a [Convex Component](https://www.convex.dev/components).
 - **`requireAuth` for all-private servers**: opt-in 401-challenge on
   anonymous requests so browser clients (claude.ai) begin the OAuth flow
   instead of seeing an empty `tools/list` and never prompting a login
+- **`initializeInstructions`**: optional server-level guidance returned in
+  the MCP `initialize` result's `instructions` field, surfaced to the LLM
+  without bloating individual tool descriptions
 - **Audit log**: one row per call with per-tool argument redaction
   (verbatim / dropped / dotted-path redacted)
 - **Wire-error sanitization**: generic message on the wire, full detail
@@ -186,6 +189,13 @@ client like **claude.ai**, add `requireAuth: true` to the
 `tools/list` return 200 (empty) and the client never starts OAuth, it
 only reacts to a 401. See
 [OAuth: all-private servers](./docs/oauth.md#all-private-servers-and-browser-clients-requireauth).
+
+To give the model server-level guidance — how to use the server as a whole,
+not any single tool — pass `initializeInstructions` to `handleMcpRequest`. It
+populates the `initialize` result's `instructions` field and is omitted when
+unset, so the default response shape is unchanged. It's a best-effort hint
+(per the spec clients MAY use it; some ignore it), so keep it short and don't
+rely on it for hard constraints.
 
 ## Resources
 
