@@ -29,6 +29,11 @@
     never reaches the client.
   - New `docs/resources.md` and a runnable, tested example under
     `example`.
+- **`initializeInstructions` option.** Pass `initializeInstructions` to
+  `handleMcpRequest` to populate the MCP `initialize` result's `instructions`
+  field: server-level guidance the client can hand the LLM without touching
+  individual tool descriptions. Omitted from the response when unset, so the
+  default `initialize` shape is unchanged.
 
 ## 0.4.0 (2026-05-21)
 

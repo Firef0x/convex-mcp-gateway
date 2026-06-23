@@ -276,6 +276,21 @@ export interface HandleMcpRequestOptions {
    */
   tools?: McpToolRegistration[];
   /**
+   * Server-level guidance returned in the MCP `initialize` result's
+   * `instructions` field (see the spec's `InitializeResult.instructions`).
+   * Clients may hand this to the LLM to explain how to use the server as a
+   * whole — e.g. "call `kira_load_skill` before answering" — without bloating
+   * individual tool descriptions. Omitted from the response entirely when
+   * unset, so the default `initialize` shape is unchanged.
+   *
+   * Best-effort hint, not a guarantee: the spec says clients MAY add it to
+   * the system prompt, and some ignore it entirely. Clients that honor it
+   * tend to cap and front-truncate the text, so keep it short and put the
+   * critical guidance first. Enforce hard constraints in each tool's
+   * `authorize` / handler, never here.
+   */
+  initializeInstructions?: string;
+  /**
    * Optional MCP resources exposed by this gateway. Resources are listed
    * in `initialize.capabilities.resources`, served via `resources/list`,
    * and read via `resources/read`. Resource providers receive the resolved
@@ -1241,6 +1256,9 @@ async function handlePost(
           name: SERVER_NAME,
           version: SERVER_VERSION,
         },
+        ...(options.initializeInstructions
+          ? { instructions: options.initializeInstructions }
+          : {}),
         capabilities: {
           tools: {},
           ...(advertiseResources
