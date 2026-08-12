@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.7.0](https://github.com/Firef0x/convex-mcp-gateway/compare/v0.6.1...v0.7.0) (2026-08-12)
+
+
+### Features
+
+* add initialize instructions option ([ff1fc03](https://github.com/Firef0x/convex-mcp-gateway/commit/ff1fc03e64764e71c4a382774310a306eea99123))
+* Add MCP resource support ([1fcb5fd](https://github.com/Firef0x/convex-mcp-gateway/commit/1fcb5fda9ae5463d3dde07ae9935d8bdab8d6139))
+* add requireAuth to challenge anonymous requests with 401 ([d5e0af4](https://github.com/Firef0x/convex-mcp-gateway/commit/d5e0af4fc52b2bac4f8494adf6334244ec9e953b))
+* apply 2026-05-18 code review fixes (security, MCP spec, scale) ([9473a03](https://github.com/Firef0x/convex-mcp-gateway/commit/9473a0302013a3d2370aa7b62a97f6bae3f8311f))
+* audit pruning API, field-level redaction, authorizer-validator coverage ([906bc47](https://github.com/Firef0x/convex-mcp-gateway/commit/906bc4786144d1b2f37b1f906b6bd10e4e1eebbb))
+* **bridge:** add `overrides` to serveAuthorizationServerMetadata ([6f1c4e2](https://github.com/Firef0x/convex-mcp-gateway/commit/6f1c4e203f65b56b17dedcca7d3e286f75ad6c62))
+* **component:** audit log, scope-aware tools/list, OAuth discovery, replace mode ([90a66dc](https://github.com/Firef0x/convex-mcp-gateway/commit/90a66dcd018a7d41bd69de6d2bf3e78609955485))
+* CORS support for browser MCP clients (claude.ai, web inspectors) ([bf694bc](https://github.com/Firef0x/convex-mcp-gateway/commit/bf694bcd9f212bdc328f83fba5887bff5647f248))
+* declarative tools option with change-detected registry sync ([0ee32dd](https://github.com/Firef0x/convex-mcp-gateway/commit/0ee32ddca6095343141188f4f7f8308ed027352a))
+* harden MCP OAuth and multi-round trips ([4075ce6](https://github.com/Firef0x/convex-mcp-gateway/commit/4075ce6b447252960f1934132fee107c792ea30d))
+* inject caller identity into tools via identityArg ([7273255](https://github.com/Firef0x/convex-mcp-gateway/commit/72732551c8e5f09cff00ec5104d6ede47a071228))
+* opt-in OIDC bridge mode (DCR + AS metadata + tokenValidator) ([b8c625b](https://github.com/Firef0x/convex-mcp-gateway/commit/b8c625bbbe78b9b6b1c49251d51140059e2c4ca0))
+* optional `returns:` validator → outputSchema + structuredContent ([c58cc20](https://github.com/Firef0x/convex-mcp-gateway/commit/c58cc203845dfccf46e1be71141a43812844bb38))
+* redact sensitive tool error messages from audit logs ([10d4061](https://github.com/Firef0x/convex-mcp-gateway/commit/10d4061fd7692d1cff95b2ec5dcdbcced50a8556))
+* **security:** bind session DELETE to creator's identity (BREAKING) ([851fbe9](https://github.com/Firef0x/convex-mcp-gateway/commit/851fbe97b991dfef697b337d061c04bbaad8007a))
+* **security:** sanitize wire error messages; ConvexError pass-through ([516229f](https://github.com/Firef0x/convex-mcp-gateway/commit/516229f7809aaeeaada3c5ff6a16b3bfd833b28c))
+* support MCP 2026 stateless transport ([2b23232](https://github.com/Firef0x/convex-mcp-gateway/commit/2b232323109a5f55c36833848e11151143871106))
+* **transport:** MCP 2025-06-18 Streamable HTTP with sessions and SSE ([3a13ef1](https://github.com/Firef0x/convex-mcp-gateway/commit/3a13ef1fa11fc9e9dd6cf404bb1f5ea048ed7565))
+
+
+### Bug Fixes
+
+* **ci:** allow esbuild postinstall under pnpm 11 ([a3cec35](https://github.com/Firef0x/convex-mcp-gateway/commit/a3cec3503b8bae2fafd955abd76c09f5443f5d8b))
+* **component:** revert host-callable functions from internal* back to public ([c55b524](https://github.com/Firef0x/convex-mcp-gateway/commit/c55b524500e1d2bf54306261f56a0074e8447d18))
+* defer MRTR until pre-call hooks are available ([e1910b4](https://github.com/Firef0x/convex-mcp-gateway/commit/e1910b480f9bc96a74d58957450a2afbf0e9faf7))
+* don't 500 when ctx.auth.getUserIdentity throws on iss/aud mismatch ([bc3d76e](https://github.com/Firef0x/convex-mcp-gateway/commit/bc3d76e03ba4433b5e214ca3b36b1021ef6eb06d))
+* don't audit anonymous resource denials (audit-table DoS) ([476dc14](https://github.com/Firef0x/convex-mcp-gateway/commit/476dc14fb3ebab76bd424f40f7d171a94be0606b))
+* harden tool protocol metadata passthrough ([#16](https://github.com/Firef0x/convex-mcp-gateway/issues/16)) ([c5c6bbf](https://github.com/Firef0x/convex-mcp-gateway/commit/c5c6bbf4d282a8bcf991556dd1833caa18d31e98))
+* keep accidental exception text off the MCP wire ([407fad2](https://github.com/Firef0x/convex-mcp-gateway/commit/407fad22c261fb65a91a3ed3fbaaaf3377a22942))
+* **package:** correct author email in package.json ([0af24ac](https://github.com/Firef0x/convex-mcp-gateway/commit/0af24ac36be5fdaf17be94dbac7339365afbeca5))
+* preserve tool protocol metadata ([#10](https://github.com/Firef0x/convex-mcp-gateway/issues/10)) ([6b1bde8](https://github.com/Firef0x/convex-mcp-gateway/commit/6b1bde812c041253109d87157a574792e939a21c))
+* validate MCP tool names at registration (reject dotted names) ([3c10349](https://github.com/Firef0x/convex-mcp-gateway/commit/3c1034960dccada2009bda55b8513c15697380d8))
+
 ## [0.6.1](https://github.com/tfohlmeister/convex-mcp-gateway/compare/v0.6.0...v0.6.1) (2026-08-03)
 
 
