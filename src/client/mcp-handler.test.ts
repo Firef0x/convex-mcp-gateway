@@ -641,6 +641,62 @@ describe("handleMcpRequest metadata and resources", () => {
     });
   });
 
+  test("accepts a literal modern Mcp-Name ending in base64 marker text", async () => {
+    const component = createComponent();
+    const state = createCtx(component, [
+      {
+        name: "literal?=",
+        description: "Literal name",
+        kind: "query",
+        functionHandle: "function://literal",
+        inputSchema: { type: "object" },
+      },
+    ]);
+
+    const response = await handleMcpRequest(
+      state.ctx,
+      modernJsonRpcRequest({
+        id: 1,
+        method: "tools/call",
+        params: { name: "literal?=", arguments: {} },
+      }),
+      component,
+      { authorize: async () => ({ allowed: false, reason: "Forbidden" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await readJson(response)).toMatchObject({
+      error: { code: -32003 },
+    });
+  });
+
+  test("rejects a modern base64 routing header that decodes to a control character", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    let authorized = false;
+    const request = withHeaders(
+      modernJsonRpcRequest({
+        id: 1,
+        method: "tools/call",
+        params: { name: "bad\u0000name", arguments: {} },
+      }),
+      { "mcp-name": "=?base64?YmFkAG5hbWU=?=" },
+    );
+
+    const response = await handleMcpRequest(ctx, request, component, {
+      authorize: async () => {
+        authorized = true;
+        return { allowed: true };
+      },
+    });
+
+    expect(response.status).toBe(400);
+    expect(authorized).toBe(false);
+    expect(await readJson(response)).toMatchObject({
+      error: { code: -32020 },
+    });
+  });
+
   test("returns a modern JSON-RPC method error with HTTP 404", async () => {
     const component = createComponent();
     const { ctx } = createCtx(component);
@@ -720,6 +776,49 @@ describe("handleMcpRequest metadata and resources", () => {
     });
   });
 
+  test("rejects x-mcp-header declarations hidden in schema composition", async () => {
+    const component = createComponent();
+    const state = createCtx(component, [
+      {
+        name: "search",
+        description: "Search",
+        kind: "query",
+        functionHandle: "function://search",
+        inputSchema: {
+          allOf: [
+            {
+              type: "object",
+              properties: {
+                region: { type: "string", "x-mcp-header": "Region" },
+              },
+            },
+          ],
+        },
+      },
+    ]);
+    let authorized = false;
+
+    const response = await handleMcpRequest(
+      state.ctx,
+      modernJsonRpcRequest({
+        id: 1,
+        method: "tools/call",
+        params: { name: "search", arguments: { region: "us-east-1" } },
+      }),
+      component,
+      {
+        authorize: async () => {
+          authorized = true;
+          return { allowed: true };
+        },
+      },
+    );
+
+    expect(response.status).toBe(400);
+    expect(authorized).toBe(false);
+    expect(await readJson(response)).toMatchObject({ error: { code: -32020 } });
+  });
+
   test("decodes base64 modern x-mcp-header values", async () => {
     const component = createComponent();
     const state = createCtx(component, [
@@ -783,7 +882,7 @@ describe("handleMcpRequest metadata and resources", () => {
     },
   );
 
-  test("returns a controlled error when modern catalog sync fails", async () => {
+  test("returns HTTP 500 when modern catalog sync fails", async () => {
     const component = createComponent();
     const { ctx } = createCtx(component);
 
@@ -799,7 +898,7 @@ describe("handleMcpRequest metadata and resources", () => {
       },
     );
 
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(500);
     expect(await readJson(response)).toMatchObject({
       error: {
         code: -32603,

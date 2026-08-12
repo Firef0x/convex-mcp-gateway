@@ -121,4 +121,35 @@ describe("OAuth bridge CIMD and issuer hardening", () => {
       },
     );
   });
+
+  test.each([
+    "ftp://issuer.example",
+    "https://user:pass@issuer.example",
+    "https://issuer.example?tenant=one",
+    "https://issuer.example#fragment",
+  ])("rejects an invalid configured issuer: %s", async (upstreamIssuer) => {
+    const originalFetch = globalThis.fetch;
+    let fetched = false;
+    globalThis.fetch = async () => {
+      fetched = true;
+      throw new Error("should not fetch");
+    };
+    try {
+      const response = await gateway().serveAuthorizationServerMetadata(
+        null,
+        new Request(
+          "https://gateway.example/.well-known/oauth-authorization-server",
+        ),
+        { upstreamIssuer },
+      );
+
+      expect(response.status).toBe(502);
+      expect(fetched).toBe(false);
+      await expect(response.json()).resolves.toMatchObject({
+        error: "upstream_metadata_unreachable",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

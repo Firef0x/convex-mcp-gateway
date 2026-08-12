@@ -46,25 +46,6 @@ export const tools: McpToolRegistration[] = [
     fn: api.invoices.markPaid,
     args: { id: v.id("invoices") },
   }),
-  defineMcpMutation({
-    name: "invoices_archiveAfterConfirmation",
-    description:
-      "Ask for confirmation, then archive an invoice with a replay-safe retry.",
-    fn: api.invoices.archiveAfterConfirmation,
-    args: {
-      id: v.id("invoices"),
-      // These are gateway-only continuation arguments. They are intentionally
-      // absent from tools/list and cannot be supplied by the MCP client.
-      continuationState: v.optional(v.any()),
-      continuationResponses: v.optional(v.any()),
-      continuationKey: v.optional(v.string()),
-    },
-    mrtrArgs: {
-      state: "continuationState",
-      inputResponses: "continuationResponses",
-      idempotencyKey: "continuationKey",
-    },
-  }),
   defineMcpQuery({
     name: "invoices_whoami",
     description:

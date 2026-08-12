@@ -25,9 +25,6 @@ Built as a [Convex Component](https://www.convex.dev/components).
 - **MCP dual-era Streamable HTTP**: legacy 2025-03-26/2025-06-18 sessions
   remain supported alongside stateless 2026-07-28 requests, discovery,
   routing-header validation, and private cache hints
-- **Stateless multi-round trips**: modern tools can return `inputRequired()`
-  and receive HMAC-verified continuation state plus a durable idempotency key
-  on an authenticated retry; see [Multi-round-trip requests](#multi-round-trip-requests)
 - **MCP resources**: `defineMcpResource` / `defineMcpResourceTemplate`
   serve `resources/list`, `resources/read`, and `resources/templates/list`
   (RFC 6570). Central `authorizeResource` hook, opt-in resource audit,
@@ -214,57 +211,16 @@ with `server/discover`; modern requests never create or return
 `Mcp-Session-Id`. Discovery, list, and read results are explicitly
 non-shareable with `ttlMs: 0` and `cacheScope: "private"`.
 
+When a tool input schema marks a string, safe integer, or boolean property
+with `x-mcp-header`, the matching `Mcp-Param-<name>` header must carry the
+same value. Schemas that place this extension inside composition are rejected;
+the gateway does not resolve `$ref` or composition for routing headers.
+Base64-encoded routing headers must decode to at most 8 KiB of valid UTF-8
+without control characters.
+
 For browser clients, configure `cors` with the exact allowed origin or an
 allowlist. A modern request carrying an `Origin` header that is not allowed by
 this option is rejected before authorization or dispatch.
-
-### Multi-round-trip requests
-
-Modern tools can request elicitation, sampling, or roots input without a
-protocol session. Enable `mrtr` with stable private key material, then have a
-tool return `inputRequired()` before any side effect:
-
-```ts
-import { inputRequired } from "convex-mcp-gateway";
-
-// Register the three gateway-only continuation args on each MRTR tool.
-defineMcpMutation({
-  name: "invoices_archiveAfterConfirmation",
-  fn: api.invoices.archiveAfterConfirmation,
-  args: {
-    id: v.id("invoices"),
-    continuationState: v.optional(v.any()),
-    continuationResponses: v.optional(v.any()),
-    continuationKey: v.optional(v.string()),
-  },
-  mrtrArgs: {
-    state: "continuationState",
-    inputResponses: "continuationResponses",
-    idempotencyKey: "continuationKey",
-  },
-});
-
-// First invocation returns inputRequired({ confirm: ... }, { invoiceId }).
-// On a verified retry, persist continuationKey in the tool's own durable
-// idempotency store before performing a mutation.
-gateway.handleMcpRequest(ctx, request, {
-  authorize,
-  mrtr: { secret: process.env.MCP_MRTR_SECRET! },
-});
-```
-
-The gateway HMAC-signs the opaque `requestState` with a five-minute default
-TTL, binding it to the tool name, original public arguments, and authenticated
-caller subject. The `mrtrArgs` names are removed from `tools/list`, stripped
-from every client request, and injected only after this verification. A retry
-receives decoded state, untrusted `inputResponses`, and a stable idempotency
-key in the declared arguments. MRTR tools require an authenticated caller; the
-state is signed, not encrypted, so never put credentials or other secrets in
-it. See the runnable [example](./example/convex/mcp.ts) and its durable
-idempotency record in [invoices.ts](./example/convex/invoices.ts). Legacy
-requests do not enable MRTR. `subscriptions/listen`, Tasks, MCP Apps, and
-Enterprise Managed Authorization are not advertised until a host provides
-their required durable state or long-lived delivery infrastructure.
 
 ## Resources
 

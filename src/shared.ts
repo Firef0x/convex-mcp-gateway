@@ -67,13 +67,6 @@ export interface McpToolAnnotations {
   [key: string]: unknown;
 }
 
-/** Names of tool arguments reserved for gateway-injected MRTR data. */
-export interface McpMrtrArgs {
-  state: string;
-  inputResponses: string;
-  idempotencyKey: string;
-}
-
 /**
  * A single entry of a tool's `securitySchemes`. The field is still a
  * draft addition to the MCP Tool spec and the gateway only passes it
@@ -116,12 +109,6 @@ export interface McpToolDefinition {
    * `mcpCallerValidator` for the arg's validator.
    */
   identityArg?: string;
-  /**
-   * Tool arguments the gateway reserves for verified MRTR continuation data.
-   * These names are removed from the advertised input schema and from every
-   * client request; the gateway injects them only on a verified retry.
-   */
-  mrtrArgs?: McpMrtrArgs;
   metadata?: Record<string, unknown>;
 }
 

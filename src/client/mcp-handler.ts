@@ -214,39 +214,6 @@ export type McpResourceAuditOption =
       templatesList?: boolean;
     };
 
-/** A tool can return this through `inputRequired()` to begin an MRTR flow. */
-export type McpInputRequiredResult = {
-  __mcpInputRequired: true;
-  inputRequests?: Record<string, unknown>;
-  /**
-   * JSON-serializable continuation data. The gateway integrity-protects this
-   * value but does not encrypt it, so it must not contain credentials.
-   */
-  state?: unknown;
-};
-
-/**
- * Create the value a modern tool returns when it needs client input before it
- * can finish. Configure `handleMcpRequest({ mrtr })` to enable the flow.
- */
-export function inputRequired(
-  inputRequests: Record<string, unknown>,
-  state?: unknown,
-): McpInputRequiredResult {
-  return {
-    __mcpInputRequired: true,
-    inputRequests,
-    ...(state !== undefined ? { state } : {}),
-  };
-}
-
-export type McpMrtrOptions = {
-  /** At least 32 bytes of private, stable key material for HMAC-SHA-256. */
-  secret: string;
-  /** Maximum continuation lifetime. Defaults to five minutes. */
-  ttlMs?: number;
-};
-
 /**
  * Options for `gateway.handleMcpRequest`. The host supplies an
  * `authorize` callback that decides allowed vs denied per
@@ -380,15 +347,6 @@ export interface HandleMcpRequestOptions {
     subscribe?: boolean;
     listChanged?: boolean;
   };
-  /**
-   * Opt-in support for modern multi-round-trip requests (MRTR). Tools start
-   * a flow by returning `inputRequired(inputRequests, state)`. On retry the
-   * gateway verifies a short-lived request state before injecting the decoded
-   * state, untrusted input responses, and an idempotency key into the
-   * configured tool arguments. The tool must validate responses and use the
-   * key with its own durable idempotency store before side effects.
-   */
-  mrtr?: McpMrtrOptions;
 }
 
 /**
@@ -424,11 +382,6 @@ type RegisteredTool = {
   inputSchema: unknown;
   outputSchema?: unknown;
   identityArg?: string;
-  mrtrArgs?: {
-    state: string;
-    inputResponses: string;
-    idempotencyKey: string;
-  };
   protocolMetadata?: {
     title?: string;
     annotations?: unknown;
@@ -466,6 +419,15 @@ type RegisteredResourceTemplate = {
 };
 
 const LEGACY_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26"] as const;
+const MAX_MCP_HEADER_VALUE_LENGTH = 8 * 1024;
+
+function hasMcpHeaderControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codePoint = value.charCodeAt(index);
+    if (codePoint <= 0x1f || codePoint === 0x7f) return true;
+  }
+  return false;
+}
 const MODERN_PROTOCOL_VERSION = "2026-07-28";
 const SUPPORTED_PROTOCOL_VERSIONS = LEGACY_PROTOCOL_VERSIONS;
 const DEFAULT_PROTOCOL_VERSION = LEGACY_PROTOCOL_VERSIONS[0];
@@ -688,9 +650,10 @@ function modernErrorResponse(
   code: number,
   message: string,
   data: Record<string, unknown> = {},
+  status = 400,
 ): Response {
   return new Response(jsonErrorEnvelopeWithData(id, code, message, data), {
-    status: 400,
+    status,
     headers: { "content-type": "application/json" },
   });
 }
@@ -704,10 +667,16 @@ function modernProtocolVersion(message: JsonRpcMessage): string | null {
 
 function decodeMcpHeaderValue(value: string | null): string | null {
   if (value === null) return null;
+  if (
+    value.length > MAX_MCP_HEADER_VALUE_LENGTH ||
+    hasMcpHeaderControlCharacter(value)
+  ) {
+    return null;
+  }
   const prefix = "=?base64?";
   const suffix = "?=";
-  if (!value.startsWith(prefix) && !value.endsWith(suffix)) return value;
-  if (!value.startsWith(prefix) || !value.endsWith(suffix)) return null;
+  if (!value.startsWith(prefix)) return value;
+  if (!value.endsWith(suffix)) return null;
   const encoded = value.slice(prefix.length, -suffix.length);
   if (encoded.length === 0) return null;
   try {
@@ -715,7 +684,11 @@ function decodeMcpHeaderValue(value: string | null): string | null {
     const bytes = Uint8Array.from(binary, (character) =>
       character.charCodeAt(0),
     );
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return decoded.length <= MAX_MCP_HEADER_VALUE_LENGTH &&
+      !hasMcpHeaderControlCharacter(decoded)
+      ? decoded
+      : null;
   } catch {
     return null;
   }
@@ -756,6 +729,13 @@ function collectMcpHeaderParameters(schema: unknown): McpHeaderParameterResult {
     path: string[],
     reachable: boolean,
   ): string | null {
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const problem = visit(item, path, false);
+        if (problem) return problem;
+      }
+      return null;
+    }
     if (!isPlainObject(node)) return null;
 
     if ("x-mcp-header" in node) {
@@ -783,7 +763,11 @@ function collectMcpHeaderParameters(schema: unknown): McpHeaderParameterResult {
       if (key === "x-mcp-header") continue;
       if (key === "properties" && isPlainObject(value)) {
         for (const [propertyName, propertySchema] of Object.entries(value)) {
-          const problem = visit(propertySchema, [...path, propertyName], true);
+          const problem = visit(
+            propertySchema,
+            [...path, propertyName],
+            reachable,
+          );
           if (problem) return problem;
         }
         continue;
@@ -871,167 +855,6 @@ function finalizeModernResult(
     envelope.result.cacheScope ??= "private";
   }
   return JSON.stringify(envelope);
-}
-
-type VerifiedMrtrState = {
-  state: unknown;
-  idempotencyKey: string;
-};
-
-const MRTR_DEFAULT_TTL_MS = 5 * 60 * 1000;
-const MRTR_MAX_TTL_MS = 60 * 60 * 1000;
-const MRTR_MAX_STATE_BYTES = 8 * 1024;
-
-function isMcpInputRequiredResult(
-  value: unknown,
-): value is McpInputRequiredResult {
-  return (
-    isPlainObject(value) &&
-    value.__mcpInputRequired === true &&
-    (value.inputRequests === undefined || isPlainObject(value.inputRequests))
-  );
-}
-
-function base64UrlEncode(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary)
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replace(/=+$/, "");
-}
-
-function base64UrlDecode(value: string): Uint8Array | null {
-  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
-  try {
-    const padded = `${value.replaceAll("-", "+").replaceAll("_", "/")}${"=".repeat((4 - (value.length % 4)) % 4)}`;
-    return Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
-  } catch {
-    return null;
-  }
-}
-
-function cryptoBuffer(bytes: Uint8Array): ArrayBuffer {
-  return bytes.buffer.slice(
-    bytes.byteOffset,
-    bytes.byteOffset + bytes.byteLength,
-  ) as ArrayBuffer;
-}
-
-function stableJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
-    .join(",")}}`;
-}
-
-async function sha256Base64Url(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(value),
-  );
-  return base64UrlEncode(new Uint8Array(digest));
-}
-
-async function mrtrKey(secret: string): Promise<CryptoKey> {
-  if (new TextEncoder().encode(secret).byteLength < 32) {
-    throw new Error("MRTR secret must contain at least 32 bytes");
-  }
-  return await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign", "verify"],
-  );
-}
-
-async function sealMrtrState(
-  options: McpMrtrOptions,
-  toolName: string,
-  identitySubject: string | null,
-  args: Record<string, unknown>,
-  state: unknown,
-): Promise<string> {
-  const encodedState = stableJson(state);
-  if (
-    new TextEncoder().encode(encodedState).byteLength > MRTR_MAX_STATE_BYTES
-  ) {
-    throw new Error("MRTR state exceeds 8 KiB");
-  }
-  const ttlMs = Math.min(
-    Math.max(options.ttlMs ?? MRTR_DEFAULT_TTL_MS, 1),
-    MRTR_MAX_TTL_MS,
-  );
-  const now = Date.now();
-  const payload = {
-    v: 1,
-    toolName,
-    identitySubject,
-    argsDigest: await sha256Base64Url(stableJson(args)),
-    exp: now + ttlMs,
-    idempotencyKey: crypto.randomUUID(),
-    state,
-  };
-  const encoded = base64UrlEncode(
-    new TextEncoder().encode(JSON.stringify(payload)),
-  );
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    await mrtrKey(options.secret),
-    new TextEncoder().encode(encoded),
-  );
-  return `${encoded}.${base64UrlEncode(new Uint8Array(signature))}`;
-}
-
-async function verifyMrtrState(
-  options: McpMrtrOptions,
-  requestState: unknown,
-  toolName: string,
-  identitySubject: string | null,
-  args: Record<string, unknown>,
-): Promise<VerifiedMrtrState | null> {
-  if (typeof requestState !== "string") return null;
-  const [encoded, signature, extra] = requestState.split(".");
-  if (!encoded || !signature || extra !== undefined) return null;
-  const signatureBytes = base64UrlDecode(signature);
-  if (
-    !signatureBytes ||
-    !(await crypto.subtle.verify(
-      "HMAC",
-      await mrtrKey(options.secret),
-      cryptoBuffer(signatureBytes),
-      new TextEncoder().encode(encoded),
-    ))
-  ) {
-    return null;
-  }
-  const payloadBytes = base64UrlDecode(encoded);
-  if (!payloadBytes) return null;
-  let payload: Record<string, unknown>;
-  try {
-    payload = JSON.parse(new TextDecoder().decode(payloadBytes)) as Record<
-      string,
-      unknown
-    >;
-  } catch {
-    return null;
-  }
-  if (
-    payload.v !== 1 ||
-    payload.toolName !== toolName ||
-    payload.identitySubject !== identitySubject ||
-    typeof payload.exp !== "number" ||
-    payload.exp < Date.now() ||
-    typeof payload.idempotencyKey !== "string" ||
-    payload.argsDigest !== (await sha256Base64Url(stableJson(args)))
-  ) {
-    return null;
-  }
-  return { state: payload.state, idempotencyKey: payload.idempotencyKey };
 }
 
 async function ensureCatalogSynced(
@@ -1632,6 +1455,8 @@ async function handlePost(
         message.id,
         INTERNAL_ERROR,
         "Failed to synchronize the declarative catalog",
+        {},
+        500,
       );
     }
   }
@@ -2513,14 +2338,6 @@ async function handlePost(
         break;
       }
 
-      // Reserved continuation fields are never client-controlled. Strip them
-      // on both first calls and retries before any authorization or audit.
-      if (tool.mrtrArgs) {
-        delete args[tool.mrtrArgs.state];
-        delete args[tool.mrtrArgs.inputResponses];
-        delete args[tool.mrtrArgs.idempotencyKey];
-      }
-
       if (isModern) {
         const headerProblem = validateModernToolParameterHeaders(
           request,
@@ -2536,64 +2353,11 @@ async function handlePost(
         }
       }
 
-      let verifiedMrtrState: VerifiedMrtrState | null = null;
-      const requestState = message.params?.requestState;
-      const inputResponses = message.params?.inputResponses;
-      if (
-        isModern &&
-        (requestState !== undefined || inputResponses !== undefined)
-      ) {
-        if (!options.mrtr || inputResponses === undefined) {
-          body = jsonErrorEnvelope(
-            message.id,
-            INVALID_PARAMS,
-            "MRTR retries require configured state verification and inputResponses",
-          );
-          break;
-        }
-        if (!tool.mrtrArgs) {
-          body = jsonErrorEnvelope(
-            message.id,
-            INVALID_PARAMS,
-            "Tool does not declare MRTR continuation arguments",
-          );
-          break;
-        }
-        try {
-          verifiedMrtrState = await verifyMrtrState(
-            options.mrtr,
-            requestState,
-            tool.name,
-            auditIdentitySubject,
-            args,
-          );
-        } catch (err) {
-          console.error("[mcp-gateway] MRTR state verification failed", err);
-        }
-        if (!verifiedMrtrState) {
-          body = jsonErrorEnvelope(
-            message.id,
-            INVALID_PARAMS,
-            "Invalid, expired, or mismatched MRTR requestState",
-          );
-          break;
-        }
-      }
-
       // Identity-injected arg: the gateway fills this server-side from the
       // resolved caller, so a client-supplied value is meaningless and a
       // spoofing vector. Strip it before authorize / audit / dispatch.
       if (tool.identityArg !== undefined) {
         delete args[tool.identityArg];
-      }
-
-      if (isModern && options.mrtr && tool.mrtrArgs && !identity) {
-        body = jsonErrorEnvelope(
-          message.id,
-          UNAUTHORIZED,
-          "Unauthorized: MRTR tools require an authenticated caller",
-        );
-        break;
       }
 
       const start = Date.now();
@@ -2690,18 +2454,9 @@ async function handlePost(
 
       // Allowed: dispatch via the component, which runs the registered
       // handle and writes the audit entry.
-      const dispatchArgs = verifiedMrtrState
-        ? {
-            ...args,
-            [tool.mrtrArgs!.state]: verifiedMrtrState.state,
-            [tool.mrtrArgs!.inputResponses]: inputResponses,
-            [tool.mrtrArgs!.idempotencyKey]: verifiedMrtrState.idempotencyKey,
-          }
-        : args;
       const dispatched = await ctx.runAction(component.dispatch.runTool, {
         name,
-        args: dispatchArgs,
-        auditArgs: args,
+        args,
         auditIdentitySubject,
         identity,
       });
@@ -2724,43 +2479,6 @@ async function handlePost(
             content: [{ type: "text", text: dispatched.error.message }],
             isError: true,
           });
-        }
-        break;
-      }
-      if (isMcpInputRequiredResult(dispatched.data)) {
-        if (!isModern || !options.mrtr) {
-          body = jsonResultEnvelope(message.id, {
-            content: [
-              {
-                type: "text",
-                text: "Tool requested input, but MRTR is not enabled for this connection",
-              },
-            ],
-            isError: true,
-          });
-          break;
-        }
-        try {
-          body = jsonResultEnvelope(message.id, {
-            resultType: "input_required",
-            ...(dispatched.data.inputRequests !== undefined
-              ? { inputRequests: dispatched.data.inputRequests }
-              : {}),
-            requestState: await sealMrtrState(
-              options.mrtr,
-              tool.name,
-              auditIdentitySubject,
-              args,
-              dispatched.data.state ?? null,
-            ),
-          });
-        } catch (err) {
-          console.error("[mcp-gateway] failed to seal MRTR requestState", err);
-          body = jsonErrorEnvelope(
-            message.id,
-            INTERNAL_ERROR,
-            "Failed to create MRTR request state",
-          );
         }
         break;
       }

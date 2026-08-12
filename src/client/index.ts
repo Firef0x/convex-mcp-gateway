@@ -48,7 +48,6 @@ export type {
   McpToolDefinition,
   McpToolFunctionReference,
   McpToolKind,
-  McpMrtrArgs,
   McpToolRegistration,
   McpToolSecurityScheme,
 } from "../shared.js";
@@ -56,8 +55,6 @@ export type {
   HandleMcpRequestOptions,
   McpCorsOption,
   McpHandlerCtx,
-  McpInputRequiredResult,
-  McpMrtrOptions,
   McpIdentityResolver,
   McpResourceAuditOption,
   McpResourceAuthorizerArgs,
@@ -70,7 +67,6 @@ export type {
   McpResourceTemplateProvider,
   McpResourceTemplateReadHandler,
 } from "./mcp-handler.js";
-export { inputRequired } from "./mcp-handler.js";
 export {
   buildProtectedResourceMetadataUrl,
   buildResourceUrl,
@@ -212,8 +208,6 @@ type McpCallerArgKeys<ArgsV extends PropertyValidators> = {
 }[keyof ArgsV] &
   string;
 
-type McpArgKey<ArgsV extends PropertyValidators> = keyof ArgsV & string;
-
 interface McpToolConfigBase<
   Ref extends AnyToolFunctionReference,
   ArgsV extends PropertyValidators,
@@ -255,16 +249,6 @@ interface McpToolConfigBase<
    * before dispatch, so the tool never runs unscoped.
    */
   identityArg?: McpCallerArgKeys<ArgsV>;
-  /**
-   * Three arguments reserved for verified MRTR retries. They must name
-   * distinct `args` keys. The gateway removes them from the public schema and
-   * injects them only after it has verified requestState.
-   */
-  mrtrArgs?: {
-    state: McpArgKey<ArgsV>;
-    inputResponses: McpArgKey<ArgsV>;
-    idempotencyKey: McpArgKey<ArgsV>;
-  };
   /** Optional display title advertised in `tools/list`. */
   title?: string;
   /** MCP behavior hints advertised in `tools/list`. */
@@ -324,34 +308,12 @@ function build<
         `"${config.name}".`,
     );
   }
-  // Gateway-injected arguments are never part of the client contract.
-  const injectedArgs = [
-    ...(config.identityArg !== undefined ? [config.identityArg] : []),
-    ...(config.mrtrArgs !== undefined
-      ? [
-          config.mrtrArgs.state,
-          config.mrtrArgs.inputResponses,
-          config.mrtrArgs.idempotencyKey,
-        ]
-      : []),
-  ];
-  for (const arg of injectedArgs) {
-    if (arg === config.identityArg) continue;
-    if (!(arg in config.args)) {
-      throw new Error(
-        `Gateway-injected arg "${arg}" is not a key of args for tool ` +
-          `"${config.name}".`,
-      );
-    }
-  }
-  if (new Set(injectedArgs).size !== injectedArgs.length) {
-    throw new Error(
-      `Gateway-injected args must be distinct for tool "${config.name}".`,
-    );
-  }
-  const clientArgs: PropertyValidators = { ...config.args };
-  for (const arg of injectedArgs) {
-    delete (clientArgs as Record<string, unknown>)[arg];
+  // The identity-injected arg is server-filled, so it must NOT appear in
+  // the schema advertised to clients (they neither see nor send it).
+  let clientArgs: PropertyValidators = config.args;
+  if (config.identityArg !== undefined) {
+    clientArgs = { ...config.args };
+    delete (clientArgs as Record<string, unknown>)[config.identityArg];
   }
   return {
     name: config.name,
@@ -366,7 +328,6 @@ function build<
     ...(config.identityArg !== undefined
       ? { identityArg: config.identityArg }
       : {}),
-    ...(config.mrtrArgs !== undefined ? { mrtrArgs: config.mrtrArgs } : {}),
     ...(config.title !== undefined ? { title: config.title } : {}),
     ...(config.annotations !== undefined
       ? { annotations: config.annotations }
@@ -794,7 +755,6 @@ async function resolveToolHandles(tools: McpToolRegistration[]) {
       ...(tool.identityArg !== undefined
         ? { identityArg: tool.identityArg }
         : {}),
-      ...(tool.mrtrArgs !== undefined ? { mrtrArgs: tool.mrtrArgs } : {}),
       ...protocolMetadataField(tool),
       ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
     })),
@@ -817,7 +777,6 @@ function toolsFingerprint(tools: McpToolRegistration[]): string {
       inputSchema: tool.inputSchema ?? null,
       outputSchema: tool.outputSchema ?? null,
       identityArg: tool.identityArg ?? null,
-      mrtrArgs: tool.mrtrArgs ?? null,
       protocolMetadata: toolProtocolMetadata(tool) ?? null,
       metadata: tool.metadata ?? null,
     }))
@@ -913,7 +872,6 @@ export class McpGateway {
       ...(tool.identityArg !== undefined
         ? { identityArg: tool.identityArg }
         : {}),
-      ...(tool.mrtrArgs !== undefined ? { mrtrArgs: tool.mrtrArgs } : {}),
       ...protocolMetadataField(tool),
       ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
     });

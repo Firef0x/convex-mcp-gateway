@@ -96,22 +96,6 @@ declarative catalog is synchronized before discovery or dispatch. The legacy
 wire contract remains unchanged: `initialize` always uses the session path,
 including when a client incorrectly includes modern metadata.
 
-### Stateless multi-round trips (MRTR)
-
-Only a modern tool that declares `mrtrArgs` can return `inputRequired()`. On
-the first call, the gateway signs a short-lived `requestState` over the tool
-name, public arguments, and authenticated caller subject. On the retry it
-verifies all three values, removes any client-supplied continuation arguments,
-then injects decoded state, untrusted input responses, and one stable
-idempotency key immediately before dispatch. The three injected names are
-omitted from `tools/list` and audit arguments, so clients cannot discover or
-spoof them. Tools must persist the idempotency key around their side effect;
-the gateway intentionally does not own application-specific execution state.
-
-MRTR is disabled for the legacy transport and rejects anonymous calls. This
-keeps a signed continuation from becoming a bearer capability shared by
-unrelated clients.
-
 | Method | Purpose | Notes |
 |---|---|---|
 | `POST /mcp/` | Send a JSON-RPC message | First call must be `initialize`; subsequent calls require `Mcp-Session-Id` |

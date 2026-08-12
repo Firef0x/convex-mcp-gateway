@@ -46,13 +46,6 @@ export default defineSchema({
      * without the column stay valid courtesy of `v.optional`.
      */
     identityArg: v.optional(v.string()),
-    mrtrArgs: v.optional(
-      v.object({
-        state: v.string(),
-        inputResponses: v.string(),
-        idempotencyKey: v.string(),
-      }),
-    ),
     /** MCP-facing title, annotations, `_meta`, and security schemes. */
     protocolMetadata: v.optional(v.any()),
     metadata: v.optional(v.any()),

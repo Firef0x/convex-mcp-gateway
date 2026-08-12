@@ -547,28 +547,15 @@ describe("authorize callback (host's http.ts)", () => {
       }),
     });
     const body = (await res.json()) as {
-      result: {
-        tools: Array<{
-          name: string;
-          inputSchema?: { properties?: Record<string, unknown> };
-        }>;
-      };
+      result: { tools: Array<{ name: string }> };
     };
-    // alice has no admin role → markPaid is hidden. The MRTR example, list,
-    // summary, and identity-gated whoami are visible to authenticated users.
+    // alice has no admin role → markPaid is hidden, list + summary +
+    // whoami visible (whoami is identity-gated but alice is authenticated).
     expect(body.result.tools.map((tool) => tool.name).sort()).toEqual([
-      "invoices_archiveAfterConfirmation",
       "invoices_list",
       "invoices_summary",
       "invoices_whoami",
     ]);
-    expect(
-      body.result.tools.find(
-        (tool) => tool.name === "invoices_archiveAfterConfirmation",
-      )?.inputSchema?.properties,
-    ).toEqual({
-      id: { type: "string", format: "convex-id", "x-convex-table": "invoices" },
-    });
   });
 
   test("admin sees the full catalog including the role-gated mutation", async () => {
@@ -599,7 +586,6 @@ describe("authorize callback (host's http.ts)", () => {
       result: { tools: Array<{ name: string }> };
     };
     expect(body.result.tools.map((tool) => tool.name).sort()).toEqual([
-      "invoices_archiveAfterConfirmation",
       "invoices_list",
       "invoices_markPaid",
       "invoices_summary",

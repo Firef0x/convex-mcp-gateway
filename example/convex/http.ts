@@ -111,9 +111,6 @@ const mcpHandler = httpAction(async (ctx, request) =>
     authorize,
     cors: true,
     resolveIdentity,
-    // Stateless modern multi-round-trip requests. Use an environment-backed,
-    // high-entropy secret in production and keep it stable across deploys.
-    mrtr: { secret: "example-only-mrtr-secret-that-is-at-least-32-bytes" },
     // Declarative catalog: the registry is reconciled from this list on
     // each initialize, so no separate registerDefaults mutation is
     // needed for the HTTP path.
