@@ -1,5 +1,5 @@
 import { ConvexError, v } from "convex/values";
-import { mcpCallerValidator } from "convex-mcp-gateway";
+import { inputRequired, mcpCallerValidator } from "convex-mcp-gateway";
 import { mutation, query } from "./_generated/server";
 
 export const seed = mutation({
@@ -39,6 +39,58 @@ export const markPaid = mutation({
   handler: async (ctx, args) => {
     await ctx.db.patch("invoices", args.id, { status: "paid" });
     return null;
+  },
+});
+
+/**
+ * A mutation that demonstrates a stateless multi-round-trip request (MRTR).
+ * The first call asks the client for confirmation. On the verified retry the
+ * gateway injects the three continuation args declared in convex/mcp.ts;
+ * their idempotency key is persisted before returning the side-effect result.
+ */
+export const archiveAfterConfirmation = mutation({
+  args: {
+    id: v.id("invoices"),
+    continuationState: v.optional(v.any()),
+    continuationResponses: v.optional(v.any()),
+    continuationKey: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    if (!args.continuationState) {
+      return inputRequired(
+        {
+          confirm: {
+            method: "elicitation/create",
+            params: { message: "Archive this invoice?" },
+          },
+        },
+        { invoiceId: args.id },
+      );
+    }
+
+    const response = args.continuationResponses as
+      | { confirm?: { action?: string } }
+      | undefined;
+    if (response?.confirm?.action !== "accept") {
+      return { archived: false, invoiceId: args.id };
+    }
+    // A verified gateway retry always injects this. Keep the mutation
+    // side-effect-free if it is ever called outside that gateway path.
+    if (!args.continuationKey) return { archived: false, invoiceId: args.id };
+
+    const prior = await ctx.db
+      .query("mrtrExecutions")
+      .withIndex("by_key", (q) => q.eq("key", args.continuationKey!))
+      .unique();
+    if (prior) return prior.result;
+
+    const result = { archived: true, invoiceId: args.id };
+    await ctx.db.insert("mrtrExecutions", {
+      key: args.continuationKey,
+      invoiceId: args.id,
+      result,
+    });
+    return result;
   },
 });
 

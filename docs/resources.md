@@ -193,7 +193,7 @@ Two things are deliberately still verbatim on the wire, because both are
 written by the gateway and name only a field, never your data:
 
 - descriptor/content contract violations (`resource.uri must be a
-non-empty string`, `content item must include text or blob`), so a
+  non-empty string`, `content item must include text or blob`), so a
   provider bug stays diagnosable from the client
 - `Resource not found: <uri>`, which only echoes the URI the caller sent
 

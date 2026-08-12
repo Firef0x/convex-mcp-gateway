@@ -494,6 +494,65 @@ describe("handleMcpRequest metadata and resources", () => {
     });
   });
 
+  test("rejects malformed modern client info before authorization", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    let authorized = false;
+    const request = modernJsonRpcRequest({ id: 1, method: "tools/list" });
+    const body = await request.json();
+    (body.params._meta as Record<string, unknown>)[
+      "io.modelcontextprotocol/clientInfo"
+    ] = { name: "missing-version" };
+
+    const response = await handleMcpRequest(
+      ctx,
+      new Request(request.url, {
+        method: "POST",
+        headers: request.headers,
+        body: JSON.stringify(body),
+      }),
+      component,
+      {
+        authorize: async () => {
+          authorized = true;
+          return { allowed: true };
+        },
+      },
+    );
+
+    expect(response.status).toBe(400);
+    expect(authorized).toBe(false);
+    expect(await readJson(response)).toMatchObject({ error: { code: -32602 } });
+  });
+
+  test("keeps initialize session-based when legacy headers carry modern metadata", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+
+    const response = await handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        },
+      }),
+      component,
+      { authorize: async () => ({ allowed: true }) },
+    );
+
+    expect(response.headers.get("mcp-session-id")).toBeTruthy();
+    expect(state.sessions.size).toBe(1);
+    expect(await readJson(response)).toMatchObject({
+      result: { protocolVersion: "2025-06-18" },
+    });
+  });
+
   test("does not synchronize the catalog before rejecting an anonymous modern request", async () => {
     const component = createComponent();
     const { ctx } = createCtx(component);

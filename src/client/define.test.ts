@@ -142,6 +142,79 @@ describe("defineMcp* identityArg (inputSchema + compile-time safety)", () => {
   });
 });
 
+describe("defineMcp* mrtrArgs", () => {
+  type QueryRef<Args extends Record<string, unknown>> = FunctionReference<
+    "query",
+    "public",
+    Args,
+    unknown
+  >;
+
+  test("excludes MRTR continuation args from inputSchema", () => {
+    const ref = {} as QueryRef<{
+      id: string;
+      continuationState?: unknown;
+      continuationResponses?: unknown;
+      continuationKey?: string;
+    }>;
+    const tool = defineMcpQuery({
+      name: "confirm_tool",
+      description: "x",
+      fn: ref,
+      args: {
+        id: v.string(),
+        continuationState: v.optional(v.any()),
+        continuationResponses: v.optional(v.any()),
+        continuationKey: v.optional(v.string()),
+      },
+      mrtrArgs: {
+        state: "continuationState",
+        inputResponses: "continuationResponses",
+        idempotencyKey: "continuationKey",
+      },
+    });
+    const schema = tool.inputSchema as {
+      properties?: Record<string, unknown>;
+    };
+    expect(schema.properties ?? {}).toEqual({ id: { type: "string" } });
+    expect(tool.mrtrArgs).toEqual({
+      state: "continuationState",
+      inputResponses: "continuationResponses",
+      idempotencyKey: "continuationKey",
+    });
+  });
+
+  test("rejects missing or duplicate gateway-injected args", () => {
+    expect(() =>
+      (defineMcpQuery as unknown as (c: unknown) => unknown)({
+        name: "bad_mrtr_tool",
+        description: "x",
+        fn: {},
+        args: { id: v.string() },
+        mrtrArgs: {
+          state: "missing",
+          inputResponses: "id",
+          idempotencyKey: "id",
+        },
+      }),
+    ).toThrow(/Gateway-injected arg "missing" is not a key/);
+
+    expect(() =>
+      (defineMcpQuery as unknown as (c: unknown) => unknown)({
+        name: "duplicate_mrtr_tool",
+        description: "x",
+        fn: {},
+        args: { id: v.string(), state: v.optional(v.any()) },
+        mrtrArgs: {
+          state: "state",
+          inputResponses: "state",
+          idempotencyKey: "id",
+        },
+      }),
+    ).toThrow(/Gateway-injected args must be distinct/);
+  });
+});
+
 describe("defineMcp* outputSchema (from returns: validator)", () => {
   test("omitted returns → no outputSchema on the result", () => {
     const tool = (defineMcpQuery as unknown as (c: unknown) => any)({

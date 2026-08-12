@@ -1,7 +1,8 @@
 # Architecture
 
-The gateway is a Convex component that owns four storage tables (registry,
-config, audit, sessions) and a tiny dispatch action. The protocol surface
+The gateway is a Convex component that owns its tool/resource registry,
+configuration, audit, session, and subscription tables plus a tiny dispatch
+action. The protocol surface
 (`/mcp/`), the OAuth discovery route, and the policy decision (the
 authorize callback) all live in the **host's** `httpAction` context, not
 in the component.
@@ -28,7 +29,8 @@ That split is the entire architecture in one paragraph.
 
 The split:
 
-- **Component**: storage (registry, config, audit, sessions) and a thin
+- **Component**: storage (tools, resources, resource templates, config,
+  audit, sessions, subscriptions) and a thin
   dispatch action that runs a tool by name and writes audit rows. It
   has zero opinions about scopes, roles, or which tools are public.
 - **Host**: the `/mcp/` HTTP route, the authorize callback (one JS
@@ -53,7 +55,7 @@ client class.
 
 ![Component data model](./diagrams/data-model.svg)
 
-Four tables, all owned by the component:
+Seven tables, all owned by the component:
 
 - `tools` is a per-tool row keyed by `name`. `functionHandle` is the
   opaque reference returned by `createFunctionHandle(fn)` and dispatched
@@ -70,6 +72,11 @@ Four tables, all owned by the component:
   idle-pruning via `gateway.pruneSessions` if the host wants it.
 - `audit` grows linearly with `tools/call` traffic. Two indexes
   (`by_toolName`, `by_outcome`) keep the most common queries cheap.
+- `resources` and `resourceTemplates` store the component-level catalog for
+  imperative registrations. Declarative providers remain host-side because
+  their read functions are executable handles.
+- `subscriptions` records legacy resource subscription intent. The component
+  does not provide a durable push connection; hosts own notification delivery.
 
 ## MCP Streamable HTTP transport
 
@@ -80,8 +87,8 @@ session lifecycle below. A 2026-07-28 POST is stateless when both
 `params._meta["io.modelcontextprotocol/protocolVersion"]` equal
 `2026-07-28`; it must also mirror its JSON-RPC method in `Mcp-Method` and,
 for `tools/call`, `resources/read`, and `prompts/get`, its target in
-`Mcp-Name`. Modern `_meta` also carries the required `clientInfo` and
-`clientCapabilities` objects.
+`Mcp-Name`. Modern `_meta` requires `clientCapabilities`; `clientInfo` is
+optional, but when present must contain its name and version.
 
 Modern requests do not create, read, touch, delete, or return a session id.
 They use `server/discover` for server metadata and capabilities, and the
@@ -89,11 +96,27 @@ declarative catalog is synchronized before discovery or dispatch. The legacy
 wire contract remains unchanged: `initialize` always uses the session path,
 including when a client incorrectly includes modern metadata.
 
-| Method         | Purpose                           | Notes                                                                      |
-| -------------- | --------------------------------- | -------------------------------------------------------------------------- |
-| `POST /mcp/`   | Send a JSON-RPC message           | First call must be `initialize`; subsequent calls require `Mcp-Session-Id` |
-| `GET /mcp/`    | Open server-initiated SSE channel | Returns `405 Method Not Allowed`; we don't push notifications yet          |
-| `DELETE /mcp/` | Terminate session                 | Drops the session row; subsequent requests with that id get `404`          |
+### Stateless multi-round trips (MRTR)
+
+Only a modern tool that declares `mrtrArgs` can return `inputRequired()`. On
+the first call, the gateway signs a short-lived `requestState` over the tool
+name, public arguments, and authenticated caller subject. On the retry it
+verifies all three values, removes any client-supplied continuation arguments,
+then injects decoded state, untrusted input responses, and one stable
+idempotency key immediately before dispatch. The three injected names are
+omitted from `tools/list` and audit arguments, so clients cannot discover or
+spoof them. Tools must persist the idempotency key around their side effect;
+the gateway intentionally does not own application-specific execution state.
+
+MRTR is disabled for the legacy transport and rejects anonymous calls. This
+keeps a signed continuation from becoming a bearer capability shared by
+unrelated clients.
+
+| Method | Purpose | Notes |
+|---|---|---|
+| `POST /mcp/` | Send a JSON-RPC message | First call must be `initialize`; subsequent calls require `Mcp-Session-Id` |
+| `GET /mcp/` | Open server-initiated SSE channel | Returns `405 Method Not Allowed`; we don't push notifications yet |
+| `DELETE /mcp/` | Terminate session | Drops the session row; subsequent requests with that id get `404` |
 
 Two response shapes for `POST` are both supported. The server picks
 based on the client's `Accept` header:
@@ -137,7 +160,7 @@ A few invariants worth pointing out:
   through `safeRecordAudit`, which logs and swallows its own failures.
   A successful tool mutation always returns `ok: true`, even if the
   audit row could not be inserted.
-- **Audit is written _after_ the tool handler returns**, outside the
+- **Audit is written *after* the tool handler returns**, outside the
   handler's try/catch, so a failing audit insert can never invert a
   committed mutation into a `-32000` error response.
 - **Unknown-tool calls are not audited.** Anonymous callers can spam
@@ -249,18 +272,18 @@ itself).
 
 ## Failure modes summary
 
-| Failure                                                                   | What the gateway does                                                                                                                                                                                    |
-| ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Tool not registered                                                       | `-32602 Unknown tool` (no audit row)                                                                                                                                                                     |
-| Authorize returns `allowed: false`                                        | `-32001 Unauthorized` if reason starts `Unauth*`, else `-32003 Forbidden`. 401 also gets `WWW-Authenticate`. (audit `denied`)                                                                            |
-| Authorize throws                                                          | `-32603 Authorizer threw: ...` (audit `error`)                                                                                                                                                           |
-| Authorize returns malformed shape                                         | Treated as `allowed: false` with explanatory reason (audit `denied`)                                                                                                                                     |
-| Tool handler throws                                                       | `-32000` with the error message (audit `error`)                                                                                                                                                          |
-| Audit-write fails                                                         | Logged via `console.error`, swallowed. Dispatch outcome unchanged.                                                                                                                                       |
-| Session id missing on a non-`initialize` request                          | HTTP 400                                                                                                                                                                                                 |
-| Session id unknown / terminated                                           | HTTP 404 (forces fresh `initialize`)                                                                                                                                                                     |
-| Anonymous POST with `requireAuth: true`                                   | HTTP 401 (+ `WWW-Authenticate` when OAuth is configured) before session handling, so browser clients begin OAuth. Opt-in; see [oauth.md](./oauth.md#all-private-servers-and-browser-clients-requireauth) |
-| Declarative `tools` sync fails on `initialize` (e.g. duplicate tool name) | `initialize` fails loudly; cause logged via `console.error` with the `[mcp-gateway]` prefix                                                                                                              |
+| Failure | What the gateway does |
+|---|---|
+| Tool not registered | `-32602 Unknown tool` (no audit row) |
+| Authorize returns `allowed: false` | `-32001 Unauthorized` if reason starts `Unauth*`, else `-32003 Forbidden`. 401 also gets `WWW-Authenticate`. (audit `denied`) |
+| Authorize throws | `-32603 Authorizer threw: ...` (audit `error`) |
+| Authorize returns malformed shape | Treated as `allowed: false` with explanatory reason (audit `denied`) |
+| Tool handler throws | `-32000` with the error message (audit `error`) |
+| Audit-write fails | Logged via `console.error`, swallowed. Dispatch outcome unchanged. |
+| Session id missing on a non-`initialize` request | HTTP 400 |
+| Session id unknown / terminated | HTTP 404 (forces fresh `initialize`) |
+| Anonymous POST with `requireAuth: true` | HTTP 401 (+ `WWW-Authenticate` when OAuth is configured) before session handling, so browser clients begin OAuth. Opt-in; see [oauth.md](./oauth.md#all-private-servers-and-browser-clients-requireauth) |
+| Declarative `tools` sync fails on `initialize` (e.g. duplicate tool name) | `initialize` fails loudly; cause logged via `console.error` with the `[mcp-gateway]` prefix |
 
 ## Going deeper
 

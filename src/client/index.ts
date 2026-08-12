@@ -48,6 +48,7 @@ export type {
   McpToolDefinition,
   McpToolFunctionReference,
   McpToolKind,
+  McpMrtrArgs,
   McpToolRegistration,
   McpToolSecurityScheme,
 } from "../shared.js";
@@ -55,6 +56,8 @@ export type {
   HandleMcpRequestOptions,
   McpCorsOption,
   McpHandlerCtx,
+  McpInputRequiredResult,
+  McpMrtrOptions,
   McpIdentityResolver,
   McpResourceAuditOption,
   McpResourceAuthorizerArgs,
@@ -67,6 +70,7 @@ export type {
   McpResourceTemplateProvider,
   McpResourceTemplateReadHandler,
 } from "./mcp-handler.js";
+export { inputRequired } from "./mcp-handler.js";
 export {
   buildProtectedResourceMetadataUrl,
   buildResourceUrl,
@@ -208,6 +212,8 @@ type McpCallerArgKeys<ArgsV extends PropertyValidators> = {
 }[keyof ArgsV] &
   string;
 
+type McpArgKey<ArgsV extends PropertyValidators> = keyof ArgsV & string;
+
 interface McpToolConfigBase<
   Ref extends AnyToolFunctionReference,
   ArgsV extends PropertyValidators,
@@ -249,6 +255,16 @@ interface McpToolConfigBase<
    * before dispatch, so the tool never runs unscoped.
    */
   identityArg?: McpCallerArgKeys<ArgsV>;
+  /**
+   * Three arguments reserved for verified MRTR retries. They must name
+   * distinct `args` keys. The gateway removes them from the public schema and
+   * injects them only after it has verified requestState.
+   */
+  mrtrArgs?: {
+    state: McpArgKey<ArgsV>;
+    inputResponses: McpArgKey<ArgsV>;
+    idempotencyKey: McpArgKey<ArgsV>;
+  };
   /** Optional display title advertised in `tools/list`. */
   title?: string;
   /** MCP behavior hints advertised in `tools/list`. */
@@ -299,18 +315,43 @@ function build<
         `use "namespace_tool" instead.`,
     );
   }
-  // The identity-injected arg is server-filled, so it must NOT appear in
-  // the schema advertised to clients (they neither see nor send it).
-  let clientArgs: PropertyValidators = config.args;
-  if (config.identityArg !== undefined) {
-    if (!(config.identityArg in config.args)) {
+  if (
+    config.identityArg !== undefined &&
+    !(config.identityArg in config.args)
+  ) {
+    throw new Error(
+      `identityArg "${config.identityArg}" is not a key of args for tool ` +
+        `"${config.name}".`,
+    );
+  }
+  // Gateway-injected arguments are never part of the client contract.
+  const injectedArgs = [
+    ...(config.identityArg !== undefined ? [config.identityArg] : []),
+    ...(config.mrtrArgs !== undefined
+      ? [
+          config.mrtrArgs.state,
+          config.mrtrArgs.inputResponses,
+          config.mrtrArgs.idempotencyKey,
+        ]
+      : []),
+  ];
+  for (const arg of injectedArgs) {
+    if (arg === config.identityArg) continue;
+    if (!(arg in config.args)) {
       throw new Error(
-        `identityArg "${config.identityArg}" is not a key of args for tool ` +
-          `"${config.name}". Declare it in args with mcpCallerValidator.`,
+        `Gateway-injected arg "${arg}" is not a key of args for tool ` +
+          `"${config.name}".`,
       );
     }
-    clientArgs = { ...config.args };
-    delete (clientArgs as Record<string, unknown>)[config.identityArg];
+  }
+  if (new Set(injectedArgs).size !== injectedArgs.length) {
+    throw new Error(
+      `Gateway-injected args must be distinct for tool "${config.name}".`,
+    );
+  }
+  const clientArgs: PropertyValidators = { ...config.args };
+  for (const arg of injectedArgs) {
+    delete (clientArgs as Record<string, unknown>)[arg];
   }
   return {
     name: config.name,
@@ -325,6 +366,7 @@ function build<
     ...(config.identityArg !== undefined
       ? { identityArg: config.identityArg }
       : {}),
+    ...(config.mrtrArgs !== undefined ? { mrtrArgs: config.mrtrArgs } : {}),
     ...(config.title !== undefined ? { title: config.title } : {}),
     ...(config.annotations !== undefined
       ? { annotations: config.annotations }
@@ -752,6 +794,7 @@ async function resolveToolHandles(tools: McpToolRegistration[]) {
       ...(tool.identityArg !== undefined
         ? { identityArg: tool.identityArg }
         : {}),
+      ...(tool.mrtrArgs !== undefined ? { mrtrArgs: tool.mrtrArgs } : {}),
       ...protocolMetadataField(tool),
       ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
     })),
@@ -774,6 +817,7 @@ function toolsFingerprint(tools: McpToolRegistration[]): string {
       inputSchema: tool.inputSchema ?? null,
       outputSchema: tool.outputSchema ?? null,
       identityArg: tool.identityArg ?? null,
+      mrtrArgs: tool.mrtrArgs ?? null,
       protocolMetadata: toolProtocolMetadata(tool) ?? null,
       metadata: tool.metadata ?? null,
     }))
@@ -869,6 +913,7 @@ export class McpGateway {
       ...(tool.identityArg !== undefined
         ? { identityArg: tool.identityArg }
         : {}),
+      ...(tool.mrtrArgs !== undefined ? { mrtrArgs: tool.mrtrArgs } : {}),
       ...protocolMetadataField(tool),
       ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
     });
@@ -1462,6 +1507,15 @@ export class McpGateway {
       /** Path to your `handleClientRegistration` route. Default: `/oauth/register` */
       registrationPath?: string;
       /**
+       * Advertise Client ID Metadata Documents (CIMD) when the upstream
+       * authorization server declares support. This is intentionally opt-in:
+       * the bridge does not fetch or validate a client's metadata document,
+       * so it can only expose CIMD when the upstream authorization endpoint
+       * performs that validation itself. DCR remains advertised as a
+       * backwards-compatible fallback.
+       */
+      clientIdMetadataDocuments?: boolean;
+      /**
        * Fields to override in the bridged metadata. Useful for:
        *
        * - Removing `openid` from `scopes_supported` (when the client
@@ -1529,6 +1583,10 @@ export class McpGateway {
       // upstream and never round-trip through here.
       token_endpoint_auth_methods_supported: ["none"],
       registration_endpoint: `${url.origin}${registrationPath}`,
+      ...(options.clientIdMetadataDocuments &&
+      upstream.client_id_metadata_document_supported === true
+        ? { client_id_metadata_document_supported: true }
+        : {}),
       ...(options.overrides ?? {}),
     };
     return new Response(JSON.stringify(body), {
@@ -1702,11 +1760,12 @@ async function fetchOidcConfigCached(
     );
   }
 
-  const cached = oidcCache.get(issuer);
+  const normalizedIssuer = normalizeIssuer(parsed);
+  const cached = oidcCache.get(normalizedIssuer);
   if (cached && Date.now() - cached.fetchedAt < OIDC_CACHE_TTL_MS) {
     return cached.doc;
   }
-  const url = `${issuer.replace(/\/$/, "")}/.well-known/openid-configuration`;
+  const url = `${normalizedIssuer}/.well-known/openid-configuration`;
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(
@@ -1714,16 +1773,41 @@ async function fetchOidcConfigCached(
     );
   }
   const doc = (await res.json()) as Record<string, unknown>;
+  if (typeof doc.issuer !== "string") {
+    throw new Error(`Upstream OIDC discovery is missing issuer at ${url}`);
+  }
+  let metadataIssuer: string;
+  try {
+    metadataIssuer = normalizeIssuer(new URL(doc.issuer));
+  } catch {
+    throw new Error(`Upstream OIDC discovery has an invalid issuer at ${url}`);
+  }
+  if (metadataIssuer !== normalizedIssuer) {
+    throw new Error(
+      `Upstream OIDC discovery issuer mismatch: expected ${normalizedIssuer}, got ${metadataIssuer}`,
+    );
+  }
   // Soft cap on cache size: a host that ever calls this with many
   // distinct issuers (multi-tenant bridge) shouldn't be able to grow
   // the Map unboundedly. 32 entries comfortably covers every
   // realistic deployment.
-  if (oidcCache.size >= 32 && !oidcCache.has(issuer)) {
+  if (oidcCache.size >= 32 && !oidcCache.has(normalizedIssuer)) {
     const firstKey = oidcCache.keys().next().value;
     if (firstKey !== undefined) oidcCache.delete(firstKey);
   }
-  oidcCache.set(issuer, { fetchedAt: Date.now(), doc });
+  oidcCache.set(normalizedIssuer, { fetchedAt: Date.now(), doc });
   return doc;
+}
+
+function normalizeIssuer(url: URL): string {
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error(`issuer must use http or https, got: ${url.protocol}`);
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("issuer must not contain credentials, query, or fragment");
+  }
+  url.pathname = url.pathname.replace(/\/$/, "");
+  return url.toString().replace(/\/$/, "");
 }
 
 function jsonError(

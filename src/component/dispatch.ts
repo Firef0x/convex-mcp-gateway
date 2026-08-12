@@ -43,6 +43,12 @@ export const runTool = action({
   args: {
     name: v.string(),
     args: v.any(),
+    /**
+     * The host's original, client-controlled arguments. MRTR continuation
+     * fields are injected into `args` for the tool but must never reach the
+     * audit log, because request state can contain host-private context.
+     */
+    auditArgs: v.optional(v.any()),
     auditIdentitySubject: v.union(v.string(), v.null()),
     /**
      * Caller identity to inject into the tool's `identityArg` argument.
@@ -91,7 +97,13 @@ export const runTool = action({
       tool.identityArg !== undefined
         ? omitKey(request.args, tool.identityArg)
         : request.args;
-    const auditArgs = redactArgsForAudit(tool, callerArgs);
+    const auditSource =
+      request.auditArgs === undefined
+        ? callerArgs
+        : tool.identityArg !== undefined
+          ? omitKey(request.auditArgs, tool.identityArg)
+          : request.auditArgs;
+    const auditArgs = redactArgsForAudit(tool, auditSource);
     const callArgs =
       tool.identityArg !== undefined
         ? {

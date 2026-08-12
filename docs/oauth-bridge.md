@@ -121,6 +121,9 @@ http.route({
 const asHandler = httpAction(async (ctx, req) =>
   gateway.serveAuthorizationServerMetadata(ctx, req, {
     upstreamIssuer: UPSTREAM_ISSUER,
+    // Enable only when the upstream authorization server validates
+    // Client ID Metadata Documents itself. DCR remains available.
+    clientIdMetadataDocuments: true,
     // See "Pitfalls" below, issuer override matches tokens, NOT spec.
     overrides: { issuer: UPSTREAM_ISSUER },
   }),
@@ -145,6 +148,12 @@ http.route({ path: "/oauth/register", method: "OPTIONS", handler: dcrHandler });
 
 export default http;
 ```
+
+### Client ID Metadata Documents (CIMD)
+
+MCP 2026-07-28 clients prefer [Client ID Metadata Documents](https://modelcontextprotocol.io/specification/draft/basic/authorization#client-id-metadata-documents) when the authorization server advertises support. Setting `clientIdMetadataDocuments: true` advertises `client_id_metadata_document_supported: true` only when the upstream discovery document also declares it. The bridge continues to expose DCR for legacy clients.
+
+The bridge never fetches a client metadata URL. Do not enable CIMD unless the upstream authorization endpoint performs its own HTTPS URL, exact `client_id`, redirect URI, and SSRF validation. The bridge also rejects an upstream discovery document whose `issuer` does not match `upstreamIssuer` after harmless trailing-slash normalization. That protects discovery mix-up; the authorization-code client must still validate RFC 9207's `iss` authorization-response parameter when it redeems a code, because the gateway never receives that response.
 
 ### 3. Configure the OAuth config
 
