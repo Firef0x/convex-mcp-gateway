@@ -203,6 +203,9 @@ http.route({
 const asMetadataHandler = httpAction(async (ctx, request) =>
   gateway.serveAuthorizationServerMetadata(ctx, request, {
     upstreamIssuer: "https://upstream.example.com",
+    // Advertised only when the upstream discovery document explicitly supports
+    // CIMD. DCR remains available for legacy clients.
+    clientIdMetadataDocuments: true,
   }),
 );
 http.route({

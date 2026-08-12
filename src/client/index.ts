@@ -299,16 +299,19 @@ function build<
         `use "namespace_tool" instead.`,
     );
   }
+  if (
+    config.identityArg !== undefined &&
+    !(config.identityArg in config.args)
+  ) {
+    throw new Error(
+      `identityArg "${config.identityArg}" is not a key of args for tool ` +
+        `"${config.name}".`,
+    );
+  }
   // The identity-injected arg is server-filled, so it must NOT appear in
   // the schema advertised to clients (they neither see nor send it).
   let clientArgs: PropertyValidators = config.args;
   if (config.identityArg !== undefined) {
-    if (!(config.identityArg in config.args)) {
-      throw new Error(
-        `identityArg "${config.identityArg}" is not a key of args for tool ` +
-          `"${config.name}". Declare it in args with mcpCallerValidator.`,
-      );
-    }
     clientArgs = { ...config.args };
     delete (clientArgs as Record<string, unknown>)[config.identityArg];
   }
@@ -1311,13 +1314,16 @@ export class McpGateway {
             );
           }
         : undefined;
+    const ensureCatalogSynced = async () => {
+      await syncTools?.();
+      await syncResources?.();
+      await syncResourceTemplates?.();
+    };
     return await handleMcpRequestImpl(ctx, request, this.component, {
       ...rest,
       resources,
       resourceTemplates,
-      syncTools,
-      syncResources,
-      syncResourceTemplates,
+      ensureCatalogSynced,
     });
   }
 
@@ -1459,6 +1465,15 @@ export class McpGateway {
       /** Path to your `handleClientRegistration` route. Default: `/oauth/register` */
       registrationPath?: string;
       /**
+       * Advertise Client ID Metadata Documents (CIMD) when the upstream
+       * authorization server declares support. This is intentionally opt-in:
+       * the bridge does not fetch or validate a client's metadata document,
+       * so it can only expose CIMD when the upstream authorization endpoint
+       * performs that validation itself. DCR remains advertised as a
+       * backwards-compatible fallback.
+       */
+      clientIdMetadataDocuments?: boolean;
+      /**
        * Fields to override in the bridged metadata. Useful for:
        *
        * - Removing `openid` from `scopes_supported` (when the client
@@ -1526,6 +1541,10 @@ export class McpGateway {
       // upstream and never round-trip through here.
       token_endpoint_auth_methods_supported: ["none"],
       registration_endpoint: `${url.origin}${registrationPath}`,
+      ...(options.clientIdMetadataDocuments &&
+      upstream.client_id_metadata_document_supported === true
+        ? { client_id_metadata_document_supported: true }
+        : {}),
       ...(options.overrides ?? {}),
     };
     return new Response(JSON.stringify(body), {
@@ -1699,11 +1718,12 @@ async function fetchOidcConfigCached(
     );
   }
 
-  const cached = oidcCache.get(issuer);
+  const normalizedIssuer = normalizeIssuer(parsed);
+  const cached = oidcCache.get(normalizedIssuer);
   if (cached && Date.now() - cached.fetchedAt < OIDC_CACHE_TTL_MS) {
     return cached.doc;
   }
-  const url = `${issuer.replace(/\/$/, "")}/.well-known/openid-configuration`;
+  const url = `${normalizedIssuer}/.well-known/openid-configuration`;
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(
@@ -1711,16 +1731,41 @@ async function fetchOidcConfigCached(
     );
   }
   const doc = (await res.json()) as Record<string, unknown>;
+  if (typeof doc.issuer !== "string") {
+    throw new Error(`Upstream OIDC discovery is missing issuer at ${url}`);
+  }
+  let metadataIssuer: string;
+  try {
+    metadataIssuer = normalizeIssuer(new URL(doc.issuer));
+  } catch {
+    throw new Error(`Upstream OIDC discovery has an invalid issuer at ${url}`);
+  }
+  if (metadataIssuer !== normalizedIssuer) {
+    throw new Error(
+      `Upstream OIDC discovery issuer mismatch: expected ${normalizedIssuer}, got ${metadataIssuer}`,
+    );
+  }
   // Soft cap on cache size: a host that ever calls this with many
   // distinct issuers (multi-tenant bridge) shouldn't be able to grow
   // the Map unboundedly. 32 entries comfortably covers every
   // realistic deployment.
-  if (oidcCache.size >= 32 && !oidcCache.has(issuer)) {
+  if (oidcCache.size >= 32 && !oidcCache.has(normalizedIssuer)) {
     const firstKey = oidcCache.keys().next().value;
     if (firstKey !== undefined) oidcCache.delete(firstKey);
   }
-  oidcCache.set(issuer, { fetchedAt: Date.now(), doc });
+  oidcCache.set(normalizedIssuer, { fetchedAt: Date.now(), doc });
   return doc;
+}
+
+function normalizeIssuer(url: URL): string {
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error(`issuer must use http or https, got: ${url.protocol}`);
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("issuer must not contain credentials, query, or fragment");
+  }
+  url.pathname = url.pathname.replace(/\/$/, "");
+  return url.toString().replace(/\/$/, "");
 }
 
 function jsonError(

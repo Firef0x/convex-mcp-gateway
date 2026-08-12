@@ -22,9 +22,9 @@ Built as a [Convex Component](https://www.convex.dev/components).
   once and pass it as `tools` to `handleMcpRequest`, the registry
   auto-syncs on connect (no separate registration mutation), or call
   `gateway.register(...)` for imperative/dynamic catalogs
-- **MCP 2025-06-18 Streamable HTTP**: sessions, `Accept` negotiation,
-  `MCP-Protocol-Version` validation, identity-bound `DELETE`, single-
-  frame SSE
+- **MCP dual-era Streamable HTTP**: legacy 2025-03-26/2025-06-18 sessions
+  remain supported alongside stateless 2026-07-28 requests, discovery,
+  routing-header validation, and private cache hints
 - **MCP resources**: `defineMcpResource` / `defineMcpResourceTemplate`
   serve `resources/list`, `resources/read`, and `resources/templates/list`
   (RFC 6570). Central `authorizeResource` hook, opt-in resource audit,
@@ -35,7 +35,8 @@ Built as a [Convex Component](https://www.convex.dev/components).
 - **OAuth 2.1 protected-resource discovery**: RFC 9728 metadata,
   RFC 6750 `WWW-Authenticate` headers, multi-tenant ready
 - **Optional OAuth bridge**: RFC 8414 AS metadata wrap + RFC 7591 DCR
-  for browser MCP clients (claude.ai) against IdPs without DCR support
+  for browser MCP clients (claude.ai) against IdPs without DCR support, with
+  opt-in CIMD advertisement when the upstream authorization server supports it
 - **`requireAuth` for all-private servers**: opt-in 401-challenge on
   anonymous requests so browser clients (claude.ai) begin the OAuth flow
   instead of seeing an empty `tools/list` and never prompting a login
@@ -58,10 +59,10 @@ Built as a [Convex Component](https://www.convex.dev/components).
 
 You mount the gateway in a single `httpAction` and pass an `authorize`
 JS callback that decides per call whether the request goes through.
-The gateway handles the JSON-RPC envelope, the Streamable-HTTP session
-lifecycle, the OAuth discovery doc, the `WWW-Authenticate` headers, and
-the audit log. Your existing Convex auth (Clerk, Auth0, Pocket-ID,
-custom JWT issuer) just works.
+The gateway handles the JSON-RPC envelope, legacy Streamable-HTTP session
+lifecycle, stateless 2026-07-28 requests, the OAuth discovery doc, the
+`WWW-Authenticate` headers, and the audit log. Your existing Convex auth
+(Clerk, Auth0, Pocket-ID, custom JWT issuer) just works.
 
 A standalone editorial-styled version of the diagram is at
 [`docs/diagrams/architecture.html`](./docs/diagrams/architecture.html);
@@ -196,6 +197,30 @@ populates the `initialize` result's `instructions` field and is omitted when
 unset, so the default response shape is unchanged. It's a best-effort hint
 (per the spec clients MAY use it; some ignore it), so keep it short and don't
 rely on it for hard constraints.
+
+### MCP 2026-07-28 clients
+
+The same endpoint also accepts stateless 2026-07-28 requests. Send
+`MCP-Protocol-Version: 2026-07-28`, an exactly matching
+`params._meta["io.modelcontextprotocol/protocolVersion"]`, and an
+`Mcp-Method` header matching the JSON-RPC method. The `_meta` object must carry
+`clientCapabilities`; when supplied, `clientInfo` must include a name and
+version. `tools/call`, `resources/read`,
+and `prompts/get` require `Mcp-Name` to match the requested name or URI. Start
+with `server/discover`; modern requests never create or return
+`Mcp-Session-Id`. Discovery, list, and read results are explicitly
+non-shareable with `ttlMs: 0` and `cacheScope: "private"`.
+
+When a tool input schema marks a string, safe integer, or boolean property
+with `x-mcp-header`, the matching `Mcp-Param-<name>` header must carry the
+same value. Schemas that place this extension inside composition are rejected;
+the gateway does not resolve `$ref` or composition for routing headers.
+Base64-encoded routing headers must decode to at most 8 KiB of valid UTF-8
+without control characters.
+
+For browser clients, configure `cors` with the exact allowed origin or an
+allowlist. A modern request carrying an `Origin` header that is not allowed by
+this option is rejected before authorization or dispatch.
 
 ## Resources
 

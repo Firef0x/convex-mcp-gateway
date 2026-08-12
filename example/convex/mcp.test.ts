@@ -475,7 +475,12 @@ describe("authorize callback (host's http.ts)", () => {
       method: "tools/list",
     });
     const body = (await res.json()) as {
-      result: { tools: Array<{ name: string }> };
+      result: {
+        tools: Array<{
+          name: string;
+          inputSchema?: { properties?: Record<string, unknown> };
+        }>;
+      };
     };
     expect(body.result.tools.map((tool) => tool.name)).toEqual([
       "invoices_summary",
@@ -1721,6 +1726,7 @@ describe("RFC 8414 AS metadata bridge", () => {
           token_endpoint: "https://upstream.example.com/token",
           userinfo_endpoint: "https://upstream.example.com/userinfo",
           jwks_uri: "https://upstream.example.com/jwks",
+          client_id_metadata_document_supported: true,
           scopes_supported: ["openid", "profile"],
           response_types_supported: ["code"],
           grant_types_supported: ["authorization_code"],
@@ -1743,6 +1749,7 @@ describe("RFC 8414 AS metadata bridge", () => {
       "https://upstream.example.com/authorize",
     );
     expect(body.registration_endpoint).toMatch(/\/oauth\/register$/);
+    expect(body.client_id_metadata_document_supported).toBe(true);
     // Public-client (PKCE), secrets stay upstream.
     expect(body.token_endpoint_auth_methods_supported).toEqual(["none"]);
   });

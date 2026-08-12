@@ -1,7 +1,8 @@
 # Architecture
 
-The gateway is a Convex component that owns four storage tables (registry,
-config, audit, sessions) and a tiny dispatch action. The protocol surface
+The gateway is a Convex component that owns its tool/resource registry,
+configuration, audit, session, and subscription tables plus a tiny dispatch
+action. The protocol surface
 (`/mcp/`), the OAuth discovery route, and the policy decision (the
 authorize callback) all live in the **host's** `httpAction` context, not
 in the component.
@@ -28,7 +29,8 @@ That split is the entire architecture in one paragraph.
 
 The split:
 
-- **Component**: storage (registry, config, audit, sessions) and a thin
+- **Component**: storage (tools, resources, resource templates, config,
+  audit, sessions, subscriptions) and a thin
   dispatch action that runs a tool by name and writes audit rows. It
   has zero opinions about scopes, roles, or which tools are public.
 - **Host**: the `/mcp/` HTTP route, the authorize callback (one JS
@@ -53,7 +55,7 @@ client class.
 
 ![Component data model](./diagrams/data-model.svg)
 
-Four tables, all owned by the component:
+Seven tables, all owned by the component:
 
 - `tools` is a per-tool row keyed by `name`. `functionHandle` is the
   opaque reference returned by `createFunctionHandle(fn)` and dispatched
@@ -70,11 +72,29 @@ Four tables, all owned by the component:
   idle-pruning via `gateway.pruneSessions` if the host wants it.
 - `audit` grows linearly with `tools/call` traffic. Two indexes
   (`by_toolName`, `by_outcome`) keep the most common queries cheap.
+- `resources` and `resourceTemplates` store the component-level catalog for
+  imperative registrations. Declarative providers remain host-side because
+  their read functions are executable handles.
+- `subscriptions` records legacy resource subscription intent. The component
+  does not provide a durable push connection; hosts own notification delivery.
 
 ## MCP Streamable HTTP transport
 
-The host-mounted `handleMcpRequest` implements MCP 2025-06-18 Streamable
-HTTP at the `/mcp/` endpoint:
+The host-mounted `handleMcpRequest` supports two protocol eras on the same
+`/mcp/` endpoint. Legacy 2025-03-26 and 2025-06-18 requests retain the
+session lifecycle below. A 2026-07-28 POST is stateless when both
+`MCP-Protocol-Version` and
+`params._meta["io.modelcontextprotocol/protocolVersion"]` equal
+`2026-07-28`; it must also mirror its JSON-RPC method in `Mcp-Method` and,
+for `tools/call`, `resources/read`, and `prompts/get`, its target in
+`Mcp-Name`. Modern `_meta` requires `clientCapabilities`; `clientInfo` is
+optional, but when present must contain its name and version.
+
+Modern requests do not create, read, touch, delete, or return a session id.
+They use `server/discover` for server metadata and capabilities, and the
+declarative catalog is synchronized before discovery or dispatch. The legacy
+wire contract remains unchanged: `initialize` always uses the session path,
+including when a client incorrectly includes modern metadata.
 
 | Method | Purpose | Notes |
 |---|---|---|

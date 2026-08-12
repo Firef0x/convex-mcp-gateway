@@ -53,10 +53,11 @@ const handbook = defineMcpResource({
 // gateway.handleMcpRequest(ctx, req, { authorize, resources: [handbook] });
 ```
 
-Concrete resources declared this way are also reconciled into the
-component registry on `initialize` (change-detected), so `resources/list`
-returns them even from a request that doesn't pass a provider. See the
-registry-sync behaviour in [Architecture](./architecture.md).
+Concrete resources declared this way are reconciled into the component
+registry on legacy `initialize` and before a modern 2026-07-28 request
+(change-detected), so `resources/list` returns them even from a request that
+doesn't pass a provider. See the registry-sync behaviour in
+[Architecture](./architecture.md).
 
 ### Migrating from a raw provider
 
