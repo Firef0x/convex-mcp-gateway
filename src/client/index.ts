@@ -1311,13 +1311,16 @@ export class McpGateway {
             );
           }
         : undefined;
+    const ensureCatalogSynced = async () => {
+      await syncTools?.();
+      await syncResources?.();
+      await syncResourceTemplates?.();
+    };
     return await handleMcpRequestImpl(ctx, request, this.component, {
       ...rest,
       resources,
       resourceTemplates,
-      syncTools,
-      syncResources,
-      syncResourceTemplates,
+      ensureCatalogSynced,
     });
   }
 

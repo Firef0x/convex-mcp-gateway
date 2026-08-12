@@ -53,10 +53,11 @@ const handbook = defineMcpResource({
 // gateway.handleMcpRequest(ctx, req, { authorize, resources: [handbook] });
 ```
 
-Concrete resources declared this way are also reconciled into the
-component registry on `initialize` (change-detected), so `resources/list`
-returns them even from a request that doesn't pass a provider. See the
-registry-sync behaviour in [Architecture](./architecture.md).
+Concrete resources declared this way are reconciled into the component
+registry on legacy `initialize` and before a modern 2026-07-28 request
+(change-detected), so `resources/list` returns them even from a request that
+doesn't pass a provider. See the registry-sync behaviour in
+[Architecture](./architecture.md).
 
 ### Migrating from a raw provider
 
@@ -192,7 +193,7 @@ Two things are deliberately still verbatim on the wire, because both are
 written by the gateway and name only a field, never your data:
 
 - descriptor/content contract violations (`resource.uri must be a
-  non-empty string`, `content item must include text or blob`), so a
+non-empty string`, `content item must include text or blob`), so a
   provider bug stays diagnosable from the client
 - `Resource not found: <uri>`, which only echoes the URI the caller sent
 

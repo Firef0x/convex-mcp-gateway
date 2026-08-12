@@ -350,15 +350,12 @@ export interface HandleMcpRequestOptions {
 }
 
 /**
- * Internal handler options: the public `HandleMcpRequestOptions` plus
- * the `syncTools` callback that `McpGateway.handleMcpRequest` derives
- * from the `tools` option and injects. Not exported, hosts never set
- * `syncTools` directly.
+ * Internal handler options: the public `HandleMcpRequestOptions` plus the
+ * catalog synchronizer that `McpGateway.handleMcpRequest` derives from the
+ * declarative catalog options. Not exported, hosts never set it directly.
  */
 type InternalHandleMcpRequestOptions = HandleMcpRequestOptions & {
-  syncTools?: () => Promise<void>;
-  syncResources?: () => Promise<void>;
-  syncResourceTemplates?: () => Promise<void>;
+  ensureCatalogSynced?: () => Promise<void>;
 };
 
 export type McpHandlerCtx = {
@@ -421,8 +418,10 @@ type RegisteredResourceTemplate = {
   annotations?: McpResourceAnnotations;
 };
 
-const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26"] as const;
-const DEFAULT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
+const LEGACY_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26"] as const;
+const MODERN_PROTOCOL_VERSION = "2026-07-28";
+const SUPPORTED_PROTOCOL_VERSIONS = LEGACY_PROTOCOL_VERSIONS;
+const DEFAULT_PROTOCOL_VERSION = LEGACY_PROTOCOL_VERSIONS[0];
 const SERVER_NAME = "convex-mcp-gateway";
 const SERVER_VERSION = "0.0.0";
 
@@ -430,6 +429,8 @@ const UNAUTHORIZED = -32001;
 const FORBIDDEN = -32003;
 const INVALID_PARAMS = -32602;
 const INTERNAL_ERROR = -32603;
+const UNSUPPORTED_PROTOCOL_VERSION = -32022;
+const HEADER_MISMATCH = -32020;
 
 /**
  * What the MCP client is told when host code threw instead of returning
@@ -620,6 +621,215 @@ function jsonErrorEnvelope(
     id: id ?? null,
     error: { code, message },
   });
+}
+
+function jsonErrorEnvelopeWithData(
+  id: JsonRpcMessage["id"],
+  code: number,
+  message: string,
+  data: Record<string, unknown>,
+): string {
+  return JSON.stringify({
+    jsonrpc: "2.0",
+    id: id ?? null,
+    error: { code, message, data },
+  });
+}
+
+function modernErrorResponse(
+  id: JsonRpcMessage["id"],
+  code: number,
+  message: string,
+  data: Record<string, unknown> = {},
+): Response {
+  return new Response(jsonErrorEnvelopeWithData(id, code, message, data), {
+    status: 400,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function modernProtocolVersion(message: JsonRpcMessage): string | null {
+  const meta = message.params?._meta;
+  if (!isPlainObject(meta)) return null;
+  const version = meta["io.modelcontextprotocol/protocolVersion"];
+  return typeof version === "string" ? version : null;
+}
+
+function decodeMcpHeaderValue(value: string | null): string | null {
+  if (value === null) return null;
+  const prefix = "=?base64?";
+  const suffix = "?=";
+  if (!value.startsWith(prefix) && !value.endsWith(suffix)) return value;
+  if (!value.startsWith(prefix) || !value.endsWith(suffix)) return null;
+  const encoded = value.slice(prefix.length, -suffix.length);
+  if (encoded.length === 0) return null;
+  try {
+    const binary = atob(encoded);
+    const bytes = Uint8Array.from(binary, (character) =>
+      character.charCodeAt(0),
+    );
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+function modernNameMatches(message: JsonRpcMessage, request: Request): boolean {
+  const headerName = decodeMcpHeaderValue(request.headers.get("mcp-name"));
+  switch (message.method) {
+    case "tools/call":
+      return headerName === message.params?.name;
+    case "resources/read":
+      return headerName === message.params?.uri;
+    case "prompts/get":
+      return headerName === message.params?.name;
+    default:
+      return true;
+  }
+}
+
+type McpHeaderParameter = {
+  headerName: string;
+  path: string[];
+  type: "string" | "integer" | "boolean";
+};
+
+type McpHeaderParameterResult =
+  | { parameters: McpHeaderParameter[]; problem?: never }
+  | { parameters?: never; problem: string };
+
+const HTTP_FIELD_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+function collectMcpHeaderParameters(schema: unknown): McpHeaderParameterResult {
+  const parameters: McpHeaderParameter[] = [];
+  const names = new Set<string>();
+
+  function visit(
+    node: unknown,
+    path: string[],
+    reachable: boolean,
+  ): string | null {
+    if (!isPlainObject(node)) return null;
+
+    if ("x-mcp-header" in node) {
+      const headerName = node["x-mcp-header"];
+      const type = node.type;
+      if (!reachable || path.length === 0) {
+        return "x-mcp-header must be reachable through schema properties";
+      }
+      if (
+        typeof headerName !== "string" ||
+        !HTTP_FIELD_NAME.test(headerName) ||
+        (type !== "string" && type !== "integer" && type !== "boolean")
+      ) {
+        return "x-mcp-header must name a string, integer, or boolean property";
+      }
+      const normalizedName = headerName.toLowerCase();
+      if (names.has(normalizedName)) {
+        return "x-mcp-header names must be case-insensitively unique";
+      }
+      names.add(normalizedName);
+      parameters.push({ headerName, path, type });
+    }
+
+    for (const [key, value] of Object.entries(node)) {
+      if (key === "x-mcp-header") continue;
+      if (key === "properties" && isPlainObject(value)) {
+        for (const [propertyName, propertySchema] of Object.entries(value)) {
+          const problem = visit(propertySchema, [...path, propertyName], true);
+          if (problem) return problem;
+        }
+        continue;
+      }
+      if (typeof value === "object" && value !== null) {
+        const problem = visit(value, path, false);
+        if (problem) return problem;
+      }
+    }
+    return null;
+  }
+
+  const problem = visit(schema, [], true);
+  return problem ? { problem } : { parameters };
+}
+
+function headerValueForArgument(
+  argumentsValue: unknown,
+  parameter: McpHeaderParameter,
+): string | null {
+  let value = argumentsValue;
+  for (const segment of parameter.path) {
+    if (!isPlainObject(value) || !(segment in value)) return null;
+    value = value[segment];
+  }
+  if (value === null || value === undefined) return null;
+  if (parameter.type === "string" && typeof value === "string") return value;
+  if (parameter.type === "boolean" && typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  if (parameter.type === "integer" && typeof value === "number") {
+    return Number.isSafeInteger(value) ? String(value) : null;
+  }
+  return null;
+}
+
+function validateModernToolParameterHeaders(
+  request: Request,
+  inputSchema: unknown,
+  argumentsValue: unknown,
+): string | null {
+  const result = collectMcpHeaderParameters(inputSchema);
+  if (result.parameters === undefined) return result.problem;
+
+  for (const parameter of result.parameters) {
+    const header = request.headers.get(`mcp-param-${parameter.headerName}`);
+    const expected = headerValueForArgument(argumentsValue, parameter);
+    if (expected === null) {
+      if (header !== null) {
+        return `Mcp-Param-${parameter.headerName} must be omitted`;
+      }
+      continue;
+    }
+    if (header === null || decodeMcpHeaderValue(header) !== expected) {
+      return `Mcp-Param-${parameter.headerName} must match the request arguments`;
+    }
+  }
+  return null;
+}
+
+function finalizeModernResult(
+  body: string,
+  method: string,
+  options: HandleMcpRequestOptions,
+): string {
+  const envelope = JSON.parse(body) as { result?: Record<string, unknown> };
+  if (!envelope.result) return body;
+  envelope.result.resultType ??= "complete";
+  const meta = isPlainObject(envelope.result._meta)
+    ? envelope.result._meta
+    : {};
+  meta["io.modelcontextprotocol/serverInfo"] = options.serverInfo ?? {
+    name: SERVER_NAME,
+    version: SERVER_VERSION,
+  };
+  envelope.result._meta = meta;
+  if (
+    method === "server/discover" ||
+    method === "tools/list" ||
+    method === "resources/list" ||
+    method === "resources/templates/list" ||
+    method === "resources/read"
+  ) {
+    envelope.result.ttlMs ??= 0;
+    envelope.result.cacheScope ??= "private";
+  }
+  return JSON.stringify(envelope);
+}
+
+async function ensureCatalogSynced(
+  options: InternalHandleMcpRequestOptions,
+): Promise<void> {
+  await options.ensureCatalogSynced?.();
 }
 
 let warnedRequireAuthWithoutOAuth = false;
@@ -1109,6 +1319,82 @@ async function handlePost(
     );
   }
 
+  const isInitialize = message.method === "initialize";
+  const headerProtocolVersion = request.headers.get("mcp-protocol-version");
+  const metadataProtocolVersion = modernProtocolVersion(message);
+  // `initialize` is always legacy, even when a broken client attaches modern
+  // metadata. This keeps its version negotiation and session contract intact.
+  const isModern =
+    !isInitialize &&
+    (headerProtocolVersion === MODERN_PROTOCOL_VERSION ||
+      metadataProtocolVersion !== null);
+
+  // The 2026 protocol moves protocol negotiation to each request. Check the
+  // mirrored routing metadata before identity resolution, catalog writes,
+  // authorization, auditing, or tool dispatch.
+  if (isModern) {
+    if (headerProtocolVersion !== metadataProtocolVersion) {
+      return modernErrorResponse(
+        message.id,
+        HEADER_MISMATCH,
+        "MCP-Protocol-Version must exactly match request metadata",
+      );
+    }
+    if (metadataProtocolVersion !== MODERN_PROTOCOL_VERSION) {
+      return modernErrorResponse(
+        message.id,
+        UNSUPPORTED_PROTOCOL_VERSION,
+        `Unsupported MCP protocol version: ${metadataProtocolVersion}`,
+        {
+          supported: [MODERN_PROTOCOL_VERSION, ...LEGACY_PROTOCOL_VERSIONS],
+          requested: metadataProtocolVersion,
+        },
+      );
+    }
+    const metadata = message.params?._meta;
+    const clientInfo = metadata?.["io.modelcontextprotocol/clientInfo"];
+    const clientCapabilities =
+      metadata?.["io.modelcontextprotocol/clientCapabilities"];
+    if (
+      !isPlainObject(clientCapabilities) ||
+      (clientInfo !== undefined &&
+        (!isPlainObject(clientInfo) ||
+          typeof clientInfo.name !== "string" ||
+          typeof clientInfo.version !== "string"))
+    ) {
+      return modernErrorResponse(
+        message.id,
+        INVALID_PARAMS,
+        "Invalid required modern request metadata",
+      );
+    }
+    if (request.headers.get("mcp-method") !== message.method) {
+      return modernErrorResponse(
+        message.id,
+        HEADER_MISMATCH,
+        "Mcp-Method must exactly match the JSON-RPC method",
+      );
+    }
+    if (!modernNameMatches(message, request)) {
+      return modernErrorResponse(
+        message.id,
+        HEADER_MISMATCH,
+        "Mcp-Name must exactly match the JSON-RPC request name",
+      );
+    }
+    const origin = request.headers.get("origin");
+    if (origin !== null && resolveCorsOrigin(options.cors, origin) === null) {
+      return new Response(
+        jsonErrorEnvelope(
+          message.id,
+          FORBIDDEN,
+          "Forbidden: origin is not allowed",
+        ),
+        { status: 403, headers: { "content-type": "application/json" } },
+      );
+    }
+  }
+
   // Resolve identity once at the boundary and reuse it everywhere below
   // (the requireAuth gate, stale-session cleanup, audit subject, the
   // authorize callback input, and the session-binding subject). One
@@ -1126,13 +1412,27 @@ async function handlePost(
     return await requireAuthChallenge(ctx, request, component, message.id);
   }
 
-  const isInitialize = message.method === "initialize";
+  // Declarative catalog synchronization can write component state. Modern
+  // traffic must remain stateless at the protocol level, but anonymous
+  // requests must not be able to trigger those writes before requireAuth.
+  if (isModern) {
+    try {
+      await ensureCatalogSynced(options);
+    } catch (err) {
+      console.error("[mcp-gateway] declarative catalog sync failed", err);
+      return modernErrorResponse(
+        message.id,
+        INTERNAL_ERROR,
+        "Failed to synchronize the declarative catalog",
+      );
+    }
+  }
 
   // MCP-Protocol-Version header: required on post-initialize requests
   // by spec. Missing → silently default to 2025-03-26 (legacy clients).
   // Unsupported value → MUST 400 per spec.
-  if (!isInitialize) {
-    const protoHeader = request.headers.get("mcp-protocol-version");
+  if (!isInitialize && !isModern) {
+    const protoHeader = headerProtocolVersion;
     if (
       protoHeader !== null &&
       !(SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(protoHeader)
@@ -1148,14 +1448,17 @@ async function handlePost(
   // Session validation. Initialize creates a fresh session. All other
   // requests must carry a valid Mcp-Session-Id; missing is 400, unknown
   // is 404 (per MCP 2025-06-18 §Session Management).
-  let sessionId: string;
+  let sessionId = "";
   let issueSessionHeader = false;
   // The identity bound to the session at create time (undefined for the
   // initialize path and for legacy pre-binding rows). Used to identity-bind
   // session-scoped mutations like resources/subscribe.
   let sessionOwnerSubject: string | null | undefined;
 
-  if (isInitialize) {
+  if (isModern) {
+    // Modern MCP is deliberately stateless. Ignore a legacy session id rather
+    // than looking it up, touching it, or echoing it back to the client.
+  } else if (isInitialize) {
     sessionId = generateSessionId();
     issueSessionHeader = true;
     // Best-effort: if the caller `initialize`s while carrying an old
@@ -1209,6 +1512,14 @@ async function handlePost(
     }
   }
 
+  if (isModern && isJsonRpcNotificationOrResponse(message)) {
+    return modernErrorResponse(
+      message.id,
+      -32600,
+      "Client notifications are not supported by this server",
+    );
+  }
+
   // Notifications / responses: 202 Accepted, no body.
   if (isJsonRpcNotificationOrResponse(message)) {
     const headers: Record<string, string> = {};
@@ -1229,55 +1540,20 @@ async function handlePost(
     "Handler did not produce a response",
   );
   let raw: Response | null = null;
+  let responseStatus = 200;
 
   switch (message.method) {
     case "initialize": {
-      // Lazily reconcile the registry from the host's declarative `tools`
-      // option (if provided). Runs on initialize, which is when a client
-      // connects, so a tool-list change in the host's code takes effect
-      // on the next connect without a manual registration mutation. The
-      // sync is change-detected, so an unchanged list is a cheap no-op.
-      // A failure here (e.g. a duplicate tool name) should fail the
-      // connection loudly, but log first: it's the only fallible step in
-      // this handler whose cause would otherwise be invisible.
-      if (options.syncTools) {
-        try {
-          await options.syncTools();
-        } catch (err) {
-          console.error(
-            "[mcp-gateway] declarative tool sync failed during initialize; " +
-              "the connection will fail. Check the `tools` list passed to " +
-              "handleMcpRequest (e.g. duplicate tool names).",
-            err,
-          );
-          throw err;
-        }
-      }
-      if (options.syncResources) {
-        try {
-          await options.syncResources();
-        } catch (err) {
-          console.error(
-            "[mcp-gateway] declarative resource sync failed during initialize; " +
-              "the connection will fail. Check the static resources passed to " +
-              "handleMcpRequest (e.g. duplicate resource URIs).",
-            err,
-          );
-          throw err;
-        }
-      }
-      if (options.syncResourceTemplates) {
-        try {
-          await options.syncResourceTemplates();
-        } catch (err) {
-          console.error(
-            "[mcp-gateway] declarative resource-template sync failed during " +
-              "initialize; the connection will fail. Check the resourceTemplates " +
-              "passed to handleMcpRequest (e.g. duplicate uriTemplates).",
-            err,
-          );
-          throw err;
-        }
+      // Legacy clients reconcile their declarative catalog when they
+      // initialize. Modern requests do the same work before dispatch above.
+      try {
+        await ensureCatalogSynced(options);
+      } catch (err) {
+        console.error(
+          "[mcp-gateway] declarative catalog sync failed during initialize",
+          err,
+        );
+        throw err;
       }
       const registeredResources = (await ctx.runQuery(
         component.registry.listResources,
@@ -1337,6 +1613,45 @@ async function handlePost(
       break;
     }
 
+    case "server/discover": {
+      if (!isModern) {
+        body = jsonErrorEnvelope(
+          message.id,
+          -32601,
+          `Unsupported method: ${message.method}`,
+        );
+        break;
+      }
+      const registeredResources = (await ctx.runQuery(
+        component.registry.listResources,
+        {},
+      )) as RegisteredResource[];
+      const registeredTemplates = (await ctx.runQuery(
+        component.registry.listResourceTemplates,
+        {},
+      )) as RegisteredResourceTemplate[];
+      const advertiseResources =
+        registeredResources.length > 0 ||
+        registeredTemplates.length > 0 ||
+        (options.resources ?? []).length > 0 ||
+        (options.resourceTemplates ?? []).length > 0;
+      body = jsonResultEnvelope(message.id, {
+        resultType: "complete",
+        supportedVersions: [
+          MODERN_PROTOCOL_VERSION,
+          ...LEGACY_PROTOCOL_VERSIONS,
+        ],
+        ...(options.initializeInstructions
+          ? { instructions: options.initializeInstructions }
+          : {}),
+        capabilities: {
+          tools: {},
+          ...(advertiseResources ? { resources: {} } : {}),
+        },
+      });
+      break;
+    }
+
     case "resources/list": {
       const start = Date.now();
       const providers = options.resources ?? [];
@@ -1350,6 +1665,7 @@ async function handlePost(
         registeredResources.length === 0 &&
         templates.length === 0
       ) {
+        if (isModern) responseStatus = 404;
         body = jsonErrorEnvelope(
           message.id,
           -32601,
@@ -1449,6 +1765,9 @@ async function handlePost(
             durationMs: Date.now() - start,
           });
         }
+        if (isModern) {
+          resources.sort((a, b) => a.uri.localeCompare(b.uri));
+        }
         body = jsonResultEnvelope(message.id, { resources });
       } catch (err) {
         const { full, wire } = splitErrorText(err, GENERIC_RESOURCE_LIST_ERROR);
@@ -1480,6 +1799,7 @@ async function handlePost(
       // configured at all (no runtime providers and none registered). A
       // registry-only template catalog is fully supported.
       if (providers.length === 0 && registeredTemplates.length === 0) {
+        if (isModern) responseStatus = 404;
         body = jsonErrorEnvelope(
           message.id,
           -32601,
@@ -1546,6 +1866,11 @@ async function handlePost(
             durationMs: Date.now() - start,
           });
         }
+        if (isModern) {
+          resourceTemplates.sort((a, b) =>
+            a.uriTemplate.localeCompare(b.uriTemplate),
+          );
+        }
         body = jsonResultEnvelope(message.id, { resourceTemplates });
       } catch (err) {
         const { full, wire } = splitErrorText(
@@ -1582,6 +1907,7 @@ async function handlePost(
         registeredResources.length === 0 &&
         templates.length === 0
       ) {
+        if (isModern) responseStatus = 404;
         body = jsonErrorEnvelope(
           message.id,
           -32601,
@@ -1814,6 +2140,15 @@ async function handlePost(
 
     case "resources/subscribe":
     case "resources/unsubscribe": {
+      if (isModern) {
+        responseStatus = 404;
+        body = jsonErrorEnvelope(
+          message.id,
+          -32601,
+          `${message.method} is legacy-only; use subscriptions/listen when it is supported`,
+        );
+        break;
+      }
       // Off by default: the gateway's HTTP transport can't push, so the
       // capability is unadvertised and these methods report a clear,
       // descriptive -32601 rather than silently accepting a subscription
@@ -1945,6 +2280,9 @@ async function handlePost(
           });
         }
       }
+      if (isModern) {
+        visible.sort((a, b) => a.name.localeCompare(b.name));
+      }
       body = jsonResultEnvelope(message.id, { tools: visible });
       break;
     }
@@ -1965,6 +2303,21 @@ async function handlePost(
         // callers can spam arbitrary names with arbitrary args.
         body = jsonErrorEnvelope(message.id, -32602, `Unknown tool: ${name}`);
         break;
+      }
+
+      if (isModern) {
+        const headerProblem = validateModernToolParameterHeaders(
+          request,
+          tool.inputSchema,
+          message.params?.arguments,
+        );
+        if (headerProblem) {
+          return modernErrorResponse(
+            message.id,
+            HEADER_MISMATCH,
+            headerProblem,
+          );
+        }
       }
 
       // Identity-injected arg: the gateway fills this server-side from the
@@ -2118,6 +2471,7 @@ async function handlePost(
     }
 
     default:
+      if (isModern) responseStatus = 404;
       body = jsonErrorEnvelope(
         message.id,
         -32601,
@@ -2126,6 +2480,17 @@ async function handlePost(
   }
 
   if (raw) return raw;
+
+  if (isModern) {
+    body = finalizeModernResult(body, message.method!, options);
+  }
+
+  if (responseStatus !== 200) {
+    return new Response(body, {
+      status: responseStatus,
+      headers: { "content-type": "application/json" },
+    });
+  }
 
   const headers: Record<string, string> = {};
   if (issueSessionHeader) headers["mcp-session-id"] = sessionId;

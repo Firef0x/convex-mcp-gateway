@@ -73,14 +73,27 @@ Four tables, all owned by the component:
 
 ## MCP Streamable HTTP transport
 
-The host-mounted `handleMcpRequest` implements MCP 2025-06-18 Streamable
-HTTP at the `/mcp/` endpoint:
+The host-mounted `handleMcpRequest` supports two protocol eras on the same
+`/mcp/` endpoint. Legacy 2025-03-26 and 2025-06-18 requests retain the
+session lifecycle below. A 2026-07-28 POST is stateless when both
+`MCP-Protocol-Version` and
+`params._meta["io.modelcontextprotocol/protocolVersion"]` equal
+`2026-07-28`; it must also mirror its JSON-RPC method in `Mcp-Method` and,
+for `tools/call`, `resources/read`, and `prompts/get`, its target in
+`Mcp-Name`. Modern `_meta` also carries the required `clientInfo` and
+`clientCapabilities` objects.
 
-| Method | Purpose | Notes |
-|---|---|---|
-| `POST /mcp/` | Send a JSON-RPC message | First call must be `initialize`; subsequent calls require `Mcp-Session-Id` |
-| `GET /mcp/` | Open server-initiated SSE channel | Returns `405 Method Not Allowed`; we don't push notifications yet |
-| `DELETE /mcp/` | Terminate session | Drops the session row; subsequent requests with that id get `404` |
+Modern requests do not create, read, touch, delete, or return a session id.
+They use `server/discover` for server metadata and capabilities, and the
+declarative catalog is synchronized before discovery or dispatch. The legacy
+wire contract remains unchanged: `initialize` always uses the session path,
+including when a client incorrectly includes modern metadata.
+
+| Method         | Purpose                           | Notes                                                                      |
+| -------------- | --------------------------------- | -------------------------------------------------------------------------- |
+| `POST /mcp/`   | Send a JSON-RPC message           | First call must be `initialize`; subsequent calls require `Mcp-Session-Id` |
+| `GET /mcp/`    | Open server-initiated SSE channel | Returns `405 Method Not Allowed`; we don't push notifications yet          |
+| `DELETE /mcp/` | Terminate session                 | Drops the session row; subsequent requests with that id get `404`          |
 
 Two response shapes for `POST` are both supported. The server picks
 based on the client's `Accept` header:
@@ -124,7 +137,7 @@ A few invariants worth pointing out:
   through `safeRecordAudit`, which logs and swallows its own failures.
   A successful tool mutation always returns `ok: true`, even if the
   audit row could not be inserted.
-- **Audit is written *after* the tool handler returns**, outside the
+- **Audit is written _after_ the tool handler returns**, outside the
   handler's try/catch, so a failing audit insert can never invert a
   committed mutation into a `-32000` error response.
 - **Unknown-tool calls are not audited.** Anonymous callers can spam
@@ -236,18 +249,18 @@ itself).
 
 ## Failure modes summary
 
-| Failure | What the gateway does |
-|---|---|
-| Tool not registered | `-32602 Unknown tool` (no audit row) |
-| Authorize returns `allowed: false` | `-32001 Unauthorized` if reason starts `Unauth*`, else `-32003 Forbidden`. 401 also gets `WWW-Authenticate`. (audit `denied`) |
-| Authorize throws | `-32603 Authorizer threw: ...` (audit `error`) |
-| Authorize returns malformed shape | Treated as `allowed: false` with explanatory reason (audit `denied`) |
-| Tool handler throws | `-32000` with the error message (audit `error`) |
-| Audit-write fails | Logged via `console.error`, swallowed. Dispatch outcome unchanged. |
-| Session id missing on a non-`initialize` request | HTTP 400 |
-| Session id unknown / terminated | HTTP 404 (forces fresh `initialize`) |
-| Anonymous POST with `requireAuth: true` | HTTP 401 (+ `WWW-Authenticate` when OAuth is configured) before session handling, so browser clients begin OAuth. Opt-in; see [oauth.md](./oauth.md#all-private-servers-and-browser-clients-requireauth) |
-| Declarative `tools` sync fails on `initialize` (e.g. duplicate tool name) | `initialize` fails loudly; cause logged via `console.error` with the `[mcp-gateway]` prefix |
+| Failure                                                                   | What the gateway does                                                                                                                                                                                    |
+| ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tool not registered                                                       | `-32602 Unknown tool` (no audit row)                                                                                                                                                                     |
+| Authorize returns `allowed: false`                                        | `-32001 Unauthorized` if reason starts `Unauth*`, else `-32003 Forbidden`. 401 also gets `WWW-Authenticate`. (audit `denied`)                                                                            |
+| Authorize throws                                                          | `-32603 Authorizer threw: ...` (audit `error`)                                                                                                                                                           |
+| Authorize returns malformed shape                                         | Treated as `allowed: false` with explanatory reason (audit `denied`)                                                                                                                                     |
+| Tool handler throws                                                       | `-32000` with the error message (audit `error`)                                                                                                                                                          |
+| Audit-write fails                                                         | Logged via `console.error`, swallowed. Dispatch outcome unchanged.                                                                                                                                       |
+| Session id missing on a non-`initialize` request                          | HTTP 400                                                                                                                                                                                                 |
+| Session id unknown / terminated                                           | HTTP 404 (forces fresh `initialize`)                                                                                                                                                                     |
+| Anonymous POST with `requireAuth: true`                                   | HTTP 401 (+ `WWW-Authenticate` when OAuth is configured) before session handling, so browser clients begin OAuth. Opt-in; see [oauth.md](./oauth.md#all-private-servers-and-browser-clients-requireauth) |
+| Declarative `tools` sync fails on `initialize` (e.g. duplicate tool name) | `initialize` fails loudly; cause logged via `console.error` with the `[mcp-gateway]` prefix                                                                                                              |
 
 ## Going deeper
 

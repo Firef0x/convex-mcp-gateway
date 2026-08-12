@@ -28,6 +28,7 @@ function createComponent() {
     registry: {
       getOAuthConfig: Symbol("getOAuthConfig"),
       listTools: Symbol("listTools"),
+      getTool: Symbol("getTool"),
       listResources: Symbol("listResources"),
       getResourcesFingerprint: Symbol("getResourcesFingerprint"),
       replaceResources: Symbol("replaceResources"),
@@ -94,6 +95,9 @@ function createCtx(component: ComponentApi, tools: RegisteredTool[] = []) {
         }
         if (ref === component.registry.listTools) {
           return tools;
+        }
+        if (ref === component.registry.getTool) {
+          return tools.find((tool) => tool.name === String(args.name)) ?? null;
         }
         if (ref === component.registry.listResources) {
           return resources;
@@ -238,6 +242,55 @@ function jsonRpcRequest(
   });
 }
 
+function modernJsonRpcRequest(body: Record<string, unknown>): Request {
+  const method = String(body.method);
+  const params = (body.params ?? {}) as Record<string, unknown>;
+  const name =
+    method === "tools/call"
+      ? params.name
+      : method === "resources/read"
+        ? params.uri
+        : undefined;
+  return new Request("https://app.example.com/mcp/", {
+    method: "POST",
+    headers: {
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+      "mcp-protocol-version": "2026-07-28",
+      "mcp-method": method,
+      ...(typeof name === "string" && /^[\x20-\x7e]+$/.test(name)
+        ? { "mcp-name": name }
+        : {}),
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      ...body,
+      params: {
+        ...params,
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": {
+            name: "mcp-handler-test",
+            version: "1.0.0",
+          },
+          "io.modelcontextprotocol/clientCapabilities": {},
+        },
+      },
+    }),
+  });
+}
+
+function withHeaders(
+  request: Request,
+  additions: Record<string, string>,
+): Request {
+  const headers = new Headers(request.headers);
+  for (const [name, value] of Object.entries(additions)) {
+    headers.set(name, value);
+  }
+  return new Request(request, { headers });
+}
+
 async function readJson(response: Response) {
   return (await response.json()) as {
     result?: Record<string, unknown>;
@@ -246,6 +299,490 @@ async function readJson(response: Response) {
 }
 
 describe("handleMcpRequest metadata and resources", () => {
+  test("serves stateless modern discovery without creating a session", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+
+    const response = await handleMcpRequest(
+      state.ctx,
+      modernJsonRpcRequest({ id: 1, method: "server/discover" }),
+      component,
+      { authorize: async () => ({ allowed: true }) },
+    );
+
+    expect(response.headers.get("mcp-session-id")).toBeNull();
+    expect(state.sessions.size).toBe(0);
+    expect(await readJson(response)).toMatchObject({
+      result: {
+        resultType: "complete",
+        supportedVersions: ["2026-07-28", "2025-06-18", "2025-03-26"],
+        capabilities: { tools: {} },
+        ttlMs: 0,
+        cacheScope: "private",
+      },
+    });
+  });
+
+  test("syncs a declarative catalog before modern discovery", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    const gateway = new McpGateway(component);
+    const resource = defineMcpResource({
+      uri: "docs://modern",
+      name: "Modern Docs",
+      read: async () => [{ uri: "docs://modern", text: "ok" }],
+    });
+
+    const response = await gateway.handleMcpRequest(
+      state.ctx,
+      modernJsonRpcRequest({ id: 1, method: "server/discover" }),
+      {
+        authorize: async () => ({ allowed: true }),
+        resources: [resource],
+      },
+    );
+
+    expect(response.headers.get("mcp-session-id")).toBeNull();
+    expect(state.sessions.size).toBe(0);
+    expect(state.resources).toMatchObject([
+      { uri: "docs://modern", name: "Modern Docs" },
+    ]);
+  });
+
+  test("serves modern tools/list statelessly with private cache hints", async () => {
+    const component = createComponent();
+    const state = createCtx(component, [
+      {
+        name: "zebra",
+        description: "Zebra tool",
+        kind: "query",
+        functionHandle: "function://zebra",
+        inputSchema: { type: "object" },
+      },
+      {
+        name: "alpha",
+        description: "Alpha tool",
+        kind: "query",
+        functionHandle: "function://alpha",
+        inputSchema: { type: "object" },
+      },
+    ]);
+
+    const response = await handleMcpRequest(
+      state.ctx,
+      modernJsonRpcRequest({ id: 1, method: "tools/list" }),
+      component,
+      { authorize: async () => ({ allowed: true }) },
+    );
+
+    const body = await readJson(response);
+    expect(response.headers.get("mcp-session-id")).toBeNull();
+    expect(state.sessions.size).toBe(0);
+    expect(body.result).toMatchObject({
+      resultType: "complete",
+      ttlMs: 0,
+      cacheScope: "private",
+      _meta: {
+        "io.modelcontextprotocol/serverInfo": {
+          name: "convex-mcp-gateway",
+          version: "0.0.0",
+        },
+      },
+    });
+    expect(
+      (body.result?.tools as Array<{ name: string }>).map((tool) => tool.name),
+    ).toEqual(["alpha", "zebra"]);
+  });
+
+  test("rejects modern header mismatches before authorization", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    let authorized = false;
+    const request = modernJsonRpcRequest({ id: 1, method: "tools/list" });
+    const headers = new Headers(request.headers);
+    headers.set("mcp-method", "tools/call");
+    const response = await handleMcpRequest(
+      ctx,
+      new Request(request, { headers }),
+      component,
+      {
+        authorize: async () => {
+          authorized = true;
+          return { allowed: true };
+        },
+      },
+    );
+
+    expect(response.status).toBe(400);
+    expect(authorized).toBe(false);
+    expect(await readJson(response)).toMatchObject({
+      error: { code: -32020 },
+    });
+  });
+
+  test("rejects an unconfigured modern browser origin before authorization", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    let authorized = false;
+    const request = modernJsonRpcRequest({ id: 1, method: "tools/list" });
+    const response = await handleMcpRequest(
+      ctx,
+      withHeaders(request, { origin: "https://untrusted.example.com" }),
+      component,
+      {
+        authorize: async () => {
+          authorized = true;
+          return { allowed: true };
+        },
+      },
+    );
+
+    expect(response.status).toBe(403);
+    expect(authorized).toBe(false);
+    expect(await readJson(response)).toMatchObject({
+      error: { code: -32003 },
+    });
+  });
+
+  test("rejects a modern request without client capabilities metadata", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const request = modernJsonRpcRequest({ id: 1, method: "tools/list" });
+    const body = await request.json();
+    delete (body.params._meta as Record<string, unknown>)[
+      "io.modelcontextprotocol/clientCapabilities"
+    ];
+
+    const response = await handleMcpRequest(
+      ctx,
+      new Request(request.url, {
+        method: "POST",
+        headers: request.headers,
+        body: JSON.stringify(body),
+      }),
+      component,
+      { authorize: async () => ({ allowed: true }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(await readJson(response)).toMatchObject({ error: { code: -32602 } });
+  });
+
+  test("accepts a modern request without optional client info metadata", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const request = modernJsonRpcRequest({ id: 1, method: "tools/list" });
+    const body = await request.json();
+    delete (body.params._meta as Record<string, unknown>)[
+      "io.modelcontextprotocol/clientInfo"
+    ];
+
+    const response = await handleMcpRequest(
+      ctx,
+      new Request(request.url, {
+        method: "POST",
+        headers: request.headers,
+        body: JSON.stringify(body),
+      }),
+      component,
+      { authorize: async () => ({ allowed: true }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await readJson(response)).toMatchObject({
+      result: { resultType: "complete" },
+    });
+  });
+
+  test("does not synchronize the catalog before rejecting an anonymous modern request", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    let synchronized = false;
+
+    const response = await handleMcpRequest(
+      ctx,
+      modernJsonRpcRequest({ id: 1, method: "tools/list" }),
+      component,
+      {
+        requireAuth: true,
+        resolveIdentity: async () => null,
+        authorize: async () => ({ allowed: true }),
+        ensureCatalogSynced: async () => {
+          synchronized = true;
+        },
+      },
+    );
+
+    expect(response.status).toBe(401);
+    expect(synchronized).toBe(false);
+  });
+
+  test("reports the requested version in an unsupported modern version error", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+    const request = modernJsonRpcRequest({ id: 1, method: "tools/list" });
+    const headers = new Headers(request.headers);
+    headers.set("mcp-protocol-version", "2099-01-01");
+    const body = await request.json();
+    (body.params._meta as Record<string, unknown>)[
+      "io.modelcontextprotocol/protocolVersion"
+    ] = "2099-01-01";
+
+    const response = await handleMcpRequest(
+      ctx,
+      new Request(request.url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      }),
+      component,
+      { authorize: async () => ({ allowed: true }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(await readJson(response)).toMatchObject({
+      error: {
+        code: -32022,
+        data: {
+          requested: "2099-01-01",
+          supported: ["2026-07-28", "2025-06-18", "2025-03-26"],
+        },
+      },
+    });
+  });
+
+  test("accepts a base64-encoded modern Mcp-Name", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    const request = modernJsonRpcRequest({
+      id: 1,
+      method: "tools/call",
+      params: { name: "weather/世界", arguments: {} },
+    });
+    const headers = new Headers(request.headers);
+    headers.set("mcp-name", "=?base64?d2VhdGhlci/kuJbnlYw=?=");
+    let authorized = false;
+
+    const response = await handleMcpRequest(
+      state.ctx,
+      new Request(request, { headers }),
+      component,
+      {
+        authorize: async () => {
+          authorized = true;
+          return { allowed: true };
+        },
+      },
+    );
+
+    expect(authorized).toBe(false);
+    expect(response.status).toBe(200);
+    expect(await readJson(response)).toMatchObject({
+      error: { code: -32602, message: "Unknown tool: weather/世界" },
+    });
+  });
+
+  test("returns a modern JSON-RPC method error with HTTP 404", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+
+    const response = await handleMcpRequest(
+      ctx,
+      modernJsonRpcRequest({ id: 1, method: "unknown/method" }),
+      component,
+      { authorize: async () => ({ allowed: true }) },
+    );
+
+    expect(response.status).toBe(404);
+    expect(await readJson(response)).toMatchObject({ error: { code: -32601 } });
+  });
+
+  test("validates modern x-mcp-header values before authorization", async () => {
+    const component = createComponent();
+    const state = createCtx(component, [
+      {
+        name: "search",
+        description: "Search",
+        kind: "query",
+        functionHandle: "function://search",
+        inputSchema: {
+          type: "object",
+          properties: {
+            region: { type: "string", "x-mcp-header": "Region" },
+            filters: {
+              type: "object",
+              properties: {
+                limit: { type: "integer", "x-mcp-header": "Limit" },
+              },
+            },
+          },
+        },
+      },
+    ]);
+    let authorized = false;
+    const requestBody = {
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "search",
+        arguments: { region: "us-east-1", filters: { limit: 25 } },
+      },
+    };
+
+    const rejected = await handleMcpRequest(
+      state.ctx,
+      modernJsonRpcRequest(requestBody),
+      component,
+      {
+        authorize: async () => {
+          authorized = true;
+          return { allowed: true };
+        },
+      },
+    );
+    expect(rejected.status).toBe(400);
+    expect(authorized).toBe(false);
+    expect(await readJson(rejected)).toMatchObject({
+      error: { code: -32020 },
+    });
+
+    const accepted = await handleMcpRequest(
+      state.ctx,
+      withHeaders(modernJsonRpcRequest(requestBody), {
+        "mcp-param-region": "us-east-1",
+        "mcp-param-limit": "25",
+      }),
+      component,
+      { authorize: async () => ({ allowed: false, reason: "Forbidden" }) },
+    );
+    expect(accepted.status).toBe(200);
+    expect(await readJson(accepted)).toMatchObject({
+      error: { code: -32003 },
+    });
+  });
+
+  test("decodes base64 modern x-mcp-header values", async () => {
+    const component = createComponent();
+    const state = createCtx(component, [
+      {
+        name: "search",
+        description: "Search",
+        kind: "query",
+        functionHandle: "function://search",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", "x-mcp-header": "Query" },
+          },
+        },
+      },
+    ]);
+    const request = modernJsonRpcRequest({
+      id: 1,
+      method: "tools/call",
+      params: { name: "search", arguments: { query: "Hello, 世界" } },
+    });
+
+    const response = await handleMcpRequest(
+      state.ctx,
+      withHeaders(request, {
+        "mcp-name": "search",
+        "mcp-param-query": "=?base64?SGVsbG8sIOS4lueVjA==?=",
+      }),
+      component,
+      { authorize: async () => ({ allowed: false, reason: "Forbidden" }) },
+    );
+    expect(response.status).toBe(200);
+    expect(await readJson(response)).toMatchObject({
+      error: { code: -32003 },
+    });
+  });
+
+  test.each(["resources/list", "resources/templates/list", "resources/read"])(
+    "returns HTTP 404 when modern %s is not configured",
+    async (method) => {
+      const component = createComponent();
+      const { ctx } = createCtx(component);
+
+      const response = await handleMcpRequest(
+        ctx,
+        modernJsonRpcRequest({
+          id: 1,
+          method,
+          ...(method === "resources/read"
+            ? { params: { uri: "docs://x" } }
+            : {}),
+        }),
+        component,
+        { authorize: async () => ({ allowed: true }) },
+      );
+
+      expect(response.status).toBe(404);
+      expect(await readJson(response)).toMatchObject({
+        error: { code: -32601 },
+      });
+    },
+  );
+
+  test("returns a controlled error when modern catalog sync fails", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+
+    const response = await handleMcpRequest(
+      ctx,
+      modernJsonRpcRequest({ id: 1, method: "tools/list" }),
+      component,
+      {
+        authorize: async () => ({ allowed: true }),
+        ensureCatalogSynced: async () => {
+          throw new Error("catalog contains a secret URL");
+        },
+      },
+    );
+
+    expect(response.status).toBe(400);
+    expect(await readJson(response)).toMatchObject({
+      error: {
+        code: -32603,
+        message: "Failed to synchronize the declarative catalog",
+      },
+    });
+  });
+
+  test("rejects modern notifications instead of silently accepting them", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+
+    const response = await handleMcpRequest(
+      ctx,
+      modernJsonRpcRequest({ method: "notifications/cancelled" }),
+      component,
+      { authorize: async () => ({ allowed: true }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(await readJson(response)).toMatchObject({ error: { code: -32600 } });
+  });
+
+  test("checks Mcp-Name before rejecting an unsupported modern prompts/get", async () => {
+    const component = createComponent();
+    const { ctx } = createCtx(component);
+
+    const response = await handleMcpRequest(
+      ctx,
+      modernJsonRpcRequest({
+        id: 1,
+        method: "prompts/get",
+        params: { name: "x" },
+      }),
+      component,
+      { authorize: async () => ({ allowed: true }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(await readJson(response)).toMatchObject({ error: { code: -32020 } });
+  });
+
   test("tools/list preserves registered protocol metadata", async () => {
     const component = createComponent();
     const protocolMetadata = {
