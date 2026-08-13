@@ -2,6 +2,8 @@ import { describe, expect, test, vi } from "vitest";
 import type { ComponentApi } from "../component/_generated/component.js";
 import {
   completeCall,
+  completeRead,
+  declineRead,
   inputRequired,
   type McpBeforeCallArgs,
   type McpToolRegistration,
@@ -38,6 +40,9 @@ function component() {
     registry: {
       getTool: Symbol("getTool"),
       getOAuthConfig: Symbol("getOAuthConfig"),
+      // Read by the resources path; the MRTR-on-reads tests below use it.
+      listResources: Symbol("listResources"),
+      listResourceTemplates: Symbol("listResourceTemplates"),
     },
     dispatch: {
       runTool: Symbol("runTool"),
@@ -149,6 +154,21 @@ function harness(overrides: { tool?: unknown; oauthConfig?: unknown } = {}) {
     runQuery: async (ref: unknown, args: Record<string, unknown> = {}) => {
       if (ref === api.registry.getTool) {
         return overrides.tool ?? registeredTool;
+      }
+      if (
+        ref === api.registry.listResources ||
+        ref === api.registry.listResourceTemplates
+      ) {
+        return [];
+      }
+      // Legacy requests look the session up; the read tests below use one
+      // to exercise the legacy half of the fail-closed rule.
+      if (ref === api.sessions.getSession) {
+        return {
+          sessionId: "s".repeat(32),
+          protocolVersion: "2025-06-18",
+          identitySubject: "user-1",
+        };
       }
       if (ref === api.registry.getOAuthConfig) {
         return overrides.oauthConfig ?? null;
@@ -1481,5 +1501,602 @@ describe("chain resolution", () => {
     );
     expect(flipped.error?.code).toBe(-32602);
     expect(dispatched).toHaveLength(0);
+  });
+});
+
+/**
+ * MRTR on `resources/read`. The spec allows a read to answer with an
+ * `InputRequiredResult`, and the mechanics are the tool path's: a sealed
+ * `requestState`, a one-time `jti` redemption, and a chain that resolves
+ * exactly once. These tests cover what is specific to reads, namely the
+ * two read-shaped terminal decisions and the URI binding.
+ */
+describe("MRTR on resources/read", () => {
+  const URI = "docs://confidential";
+  const CONTENTS = [{ uri: URI, mimeType: "text/plain", text: "full text" }];
+
+  function readRequest(
+    id: number,
+    params: Record<string, unknown> = {},
+    clientCapabilities: Record<string, unknown> = { elicitation: { form: {} } },
+    uri: string = URI,
+  ): Request {
+    return new Request("https://gateway.example/mcp", {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2026-07-28",
+        "mcp-method": "resources/read",
+        "mcp-name": uri,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "resources/read",
+        params: {
+          uri,
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": clientCapabilities,
+          },
+          ...params,
+        },
+      }),
+    });
+  }
+
+  function readHarness(
+    beforeResourceRead: (
+      ctx: unknown,
+      args: {
+        uri: string;
+        resourceMetadata: unknown;
+        identity: { subject: string };
+        state?: unknown;
+        inputResponses?: Record<string, unknown>;
+        round?: number;
+      },
+    ) => unknown,
+  ) {
+    const { api, ctx } = harness();
+    const reads: string[] = [];
+    const options = {
+      authorize: async () => ({ allowed: true as const }),
+      mrtr: { secret: "x".repeat(32) },
+      beforeResourceRead: beforeResourceRead as never,
+      resources: [
+        {
+          name: "docs",
+          list: async () => [{ uri: URI, name: "confidential" }],
+          read: async () => {
+            reads.push(URI);
+            return CONTENTS;
+          },
+        },
+      ] as never,
+    };
+    return { api, ctx, options, reads };
+  }
+
+  test("asks, then serves the resource once the answer arrives", async () => {
+    const hookCalls: Array<Record<string, unknown>> = [];
+    const { api, ctx, options, reads } = readHarness((_ctx, args) => {
+      hookCalls.push(args as unknown as Record<string, unknown>);
+      if (args.inputResponses === undefined) {
+        return inputRequired(CONFIRM_REQUEST, { uri: args.uri });
+      }
+      return null;
+    });
+
+    const first = await json(
+      await handleMcpRequest(ctx, readRequest(1), api, options),
+    );
+    expect(first.result?.resultType).toBe("input_required");
+    expect(first.result?.inputRequests).toEqual(CONFIRM_REQUEST);
+    // Nothing was read: the gate ran before any provider.
+    expect(reads).toHaveLength(0);
+    // The hook sees the resource identity, not tool arguments.
+    expect(hookCalls[0]).toMatchObject({ uri: URI, resourceMetadata: null });
+
+    const second = await json(
+      await handleMcpRequest(
+        ctx,
+        readRequest(2, {
+          requestState: first.result!.requestState,
+          inputResponses: { confirm: { action: "accept" } },
+        }),
+        api,
+        options,
+      ),
+    );
+    expect(second.result).toMatchObject({ contents: CONTENTS });
+    expect(reads).toEqual([URI]);
+    // The continuation carried the decoded state and the round.
+    expect(hookCalls[1]).toMatchObject({
+      state: { uri: URI },
+      inputResponses: { confirm: { action: "accept" } },
+      round: 1,
+    });
+  });
+
+  test("declineRead refuses on the error channel, without reading", async () => {
+    const { api, ctx, options, reads } = readHarness((_ctx, args) =>
+      args.inputResponses === undefined
+        ? inputRequired(CONFIRM_REQUEST)
+        : declineRead("Owner declined to share this document"),
+    );
+    const first = await json(
+      await handleMcpRequest(ctx, readRequest(1), api, options),
+    );
+    const declined = await json(
+      await handleMcpRequest(
+        ctx,
+        readRequest(2, {
+          requestState: first.result!.requestState,
+          inputResponses: { confirm: { action: "decline" } },
+        }),
+        api,
+        options,
+      ),
+    );
+    // -32003, the same family as an authorizeResource denial: the caller
+    // asked for a resource and is getting none.
+    expect(declined.error?.code).toBe(-32003);
+    expect(declined.error?.message).toBe(
+      "Owner declined to share this document",
+    );
+    expect(reads).toHaveLength(0);
+  });
+
+  test("completeRead serves the hook's own contents instead of the provider's", async () => {
+    const summary = [{ uri: URI, mimeType: "text/plain", text: "summary only" }];
+    const { api, ctx, options, reads } = readHarness((_ctx, args) =>
+      args.inputResponses === undefined
+        ? inputRequired(CONFIRM_REQUEST)
+        : completeRead(summary),
+    );
+    const first = await json(
+      await handleMcpRequest(ctx, readRequest(1), api, options),
+    );
+    const served = await json(
+      await handleMcpRequest(
+        ctx,
+        readRequest(2, {
+          requestState: first.result!.requestState,
+          inputResponses: { confirm: { action: "accept" } },
+        }),
+        api,
+        options,
+      ),
+    );
+    expect(served.result).toMatchObject({ contents: summary });
+    expect(reads).toHaveLength(0);
+  });
+
+  test("a continuation is bound to its URI and cannot be replayed at another", async () => {
+    const { api, ctx, options } = readHarness((_ctx, args) =>
+      args.inputResponses === undefined ? inputRequired(CONFIRM_REQUEST) : null,
+    );
+    const first = await json(
+      await handleMcpRequest(ctx, readRequest(1), api, options),
+    );
+    // Same sealed state, different URI: the seal binds
+    // `resources/read:<uri>`, so verification must reject it rather than
+    // serve a resource the negotiation was never about.
+    const elsewhere = await json(
+      await handleMcpRequest(
+        ctx,
+        readRequest(
+          2,
+          {
+            requestState: first.result!.requestState,
+            inputResponses: { confirm: { action: "accept" } },
+          },
+          { elicitation: { form: {} } },
+          "docs://other",
+        ),
+        api,
+        options,
+      ),
+    );
+    expect(elsewhere.error?.code).toBe(-32602);
+    expect(elsewhere.error?.message).toMatch(/Invalid, expired, or mismatched/);
+  });
+
+  test("a settled read refuses a forked branch without re-running the hook", async () => {
+    // Answering "again" makes the hook ask again, which forks the chain: a
+    // second jti under the same chain key. The branch that serves the read
+    // settles it, and the older branch, replayed with the same answer it
+    // was redeemed with, must then be refused rather than handed a fresh
+    // continuation for a decision that is over.
+    let hookRuns = 0;
+    const { api, ctx, options } = readHarness((_ctx, args) => {
+      hookRuns++;
+      const confirm = args.inputResponses?.confirm as
+        | { action?: string }
+        | undefined;
+      if (confirm === undefined) return inputRequired(CONFIRM_REQUEST);
+      if (confirm.action === "again") return inputRequired(CONFIRM_REQUEST);
+      return null;
+    });
+    const first = await json(
+      await handleMcpRequest(ctx, readRequest(1), api, options),
+    );
+    const second = await json(
+      await handleMcpRequest(
+        ctx,
+        readRequest(2, {
+          requestState: first.result!.requestState,
+          inputResponses: { confirm: { action: "again" } },
+        }),
+        api,
+        options,
+      ),
+    );
+    expect(second.result?.resultType).toBe("input_required");
+    // Branch B settles the chain by serving the read.
+    const settled = await json(
+      await handleMcpRequest(
+        ctx,
+        readRequest(3, {
+          requestState: second.result!.requestState,
+          inputResponses: { confirm: { action: "accept" } },
+        }),
+        api,
+        options,
+      ),
+    );
+    expect(settled.result).toMatchObject({ contents: CONTENTS });
+    // Branch A replayed with the answer it was redeemed with: the
+    // redemption allows it (same digest), and the chain check is what
+    // refuses it. Without that check the hook would mint a fresh
+    // continuation for a chain another branch already settled.
+    const forked = await json(
+      await handleMcpRequest(
+        ctx,
+        readRequest(4, {
+          requestState: first.result!.requestState,
+          inputResponses: { confirm: { action: "again" } },
+        }),
+        api,
+        options,
+      ),
+    );
+    expect(forked.error?.code).toBe(-32602);
+    expect(forked.error?.message).toMatch(/already been resolved/);
+    // The refusal happens BEFORE the hook. The hook is not documented as
+    // side-effect-free, so a client holding sibling continuations must not
+    // be able to drive it once per sibling on a settled decision.
+    expect(hookRuns).toBe(3);
+  });
+
+  test("a read that demands input fails closed where no continuation can travel", async () => {
+    const { api, ctx, options, reads } = readHarness(() =>
+      inputRequired(CONFIRM_REQUEST),
+    );
+    // Same shape as the tool path: a hook that demands input on a mount
+    // with no `mrtr` cannot be answered, so the read must fail rather than
+    // be served with the gate skipped.
+    const { mrtr: _dropped, ...withoutMrtr } = options;
+    const body = await json(
+      await handleMcpRequest(ctx, readRequest(1), api, withoutMrtr as never),
+    );
+    expect(body.error?.code).toBe(-32603);
+    expect(body.error?.message).toMatch(/MRTR is not configured/);
+    expect(reads).toHaveLength(0);
+  });
+
+  test("a legacy read whose hook asks fails closed with an actionable code", async () => {
+    const { api, ctx, options, reads } = readHarness(() =>
+      inputRequired(CONFIRM_REQUEST),
+    );
+    // The other half of the fail-closed rule, and deliberately a different
+    // answer from the misconfiguration above: this one is the client's to
+    // fix, so it gets -32601 naming the protocol rather than -32603.
+    const legacy = await json(
+      await handleMcpRequest(
+        ctx,
+        new Request("https://gateway.example/mcp", {
+          method: "POST",
+          headers: {
+            accept: "application/json, text/event-stream",
+            "content-type": "application/json",
+            "mcp-protocol-version": "2025-06-18",
+            "mcp-session-id": "s".repeat(32),
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "resources/read",
+            params: { uri: URI },
+          }),
+        }),
+        api,
+        options,
+      ),
+    );
+    expect(legacy.error?.code).toBe(-32601);
+    expect(legacy.error?.message).toMatch(/2026-07-28 or later/);
+    expect(reads).toHaveLength(0);
+  });
+
+  test("a redemption that cannot run is an envelope, not a thrown 500", async () => {
+    // The invariant the guard's own comment states: a component deployment
+    // that predates `mrtrRedemptions` must yield a logged -32603, not a raw
+    // throw that skips the CORS wrapper. One test covers both call paths,
+    // since the redemption lives in the shared helper.
+    const { api, ctx, options, reads } = readHarness((_ctx, args) =>
+      args.inputResponses === undefined ? inputRequired(CONFIRM_REQUEST) : null,
+    );
+    const first = await json(
+      await handleMcpRequest(ctx, readRequest(1), api, options),
+    );
+    const inner = ctx.runMutation;
+    (ctx as { runMutation: unknown }).runMutation = async (
+      ref: unknown,
+      args: Record<string, unknown>,
+    ) => {
+      if (ref === api.mrtr.redeemContinuation) {
+        throw new Error("mrtrRedemptions table does not exist");
+      }
+      return await inner(ref, args);
+    };
+    const response = await handleMcpRequest(
+      ctx,
+      readRequest(2, {
+        requestState: first.result!.requestState,
+        inputResponses: { confirm: { action: "accept" } },
+      }),
+      api,
+      options,
+    );
+    // The load-bearing assertions: a parseable body at HTTP 200, which is
+    // exactly what a raw throw destroys.
+    expect(response.status).toBe(200);
+    const body = await json(response);
+    expect(body.error?.code).toBe(-32603);
+    expect(body.error?.message).toMatch(/MRTR verification failed/);
+    expect(reads).toHaveLength(0);
+  });
+
+  test("a continuation cannot be answered by a different identity", async () => {
+    // The seal binds the caller's subject. Without that binding a captured
+    // requestState lets user B read a document under user A's negotiated
+    // consent, which is the whole point of sealing the subject in.
+    const { api, ctx, options, reads } = readHarness((_ctx, args) =>
+      args.inputResponses === undefined ? inputRequired(CONFIRM_REQUEST) : null,
+    );
+    const first = await json(
+      await handleMcpRequest(ctx, readRequest(1), api, options),
+    );
+    (ctx as { auth: unknown }).auth = {
+      getUserIdentity: async () => ({ subject: "someone-else" }),
+    };
+    const stolen = await json(
+      await handleMcpRequest(
+        ctx,
+        readRequest(2, {
+          requestState: first.result!.requestState,
+          inputResponses: { confirm: { action: "accept" } },
+        }),
+        api,
+        options,
+      ),
+    );
+    expect(stolen.error?.code).toBe(-32602);
+    expect(stolen.error?.message).toMatch(/Invalid, expired, or mismatched/);
+    expect(reads).toHaveLength(0);
+  });
+
+  test("authorizeResource denies before the hook can prompt", async () => {
+    // Ordering is a confidentiality property: if the hook ran first, the
+    // elicitation would confirm the existence and name of a resource the
+    // caller may not read, in the client's UI, before any authorization.
+    const hookCalls: string[] = [];
+    const { api, ctx, options, reads } = readHarness((_ctx, args) => {
+      hookCalls.push(args.uri);
+      return inputRequired(CONFIRM_REQUEST);
+    });
+    const denied = await json(
+      await handleMcpRequest(ctx, readRequest(1), api, {
+        ...options,
+        authorizeResource: async () => ({
+          allowed: false as const,
+          reason: "nope",
+        }),
+      } as never),
+    );
+    expect(denied.error?.code).toBe(-32003);
+    expect(denied.error?.message).toBe("nope");
+    expect(hookCalls).toHaveLength(0);
+    expect(reads).toHaveLength(0);
+  });
+
+  test("a terminal read reproduces itself for a lost response", async () => {
+    // MRTR's core promise. If the resolution label ever collapses to one
+    // value, `isChainRepeat` stops matching and an honest retry is told the
+    // chain "has already been resolved", pushing the client into a new
+    // chain, i.e. a new idempotency key, i.e. the duplicate the key exists
+    // to prevent.
+    const { api, ctx, options } = readHarness((_ctx, args) =>
+      args.inputResponses === undefined
+        ? inputRequired(CONFIRM_REQUEST)
+        : declineRead("owner said no"),
+    );
+    const first = await json(
+      await handleMcpRequest(ctx, readRequest(1), api, options),
+    );
+    const answer = {
+      requestState: first.result!.requestState,
+      inputResponses: { confirm: { action: "decline" } },
+    };
+    const once = await json(
+      await handleMcpRequest(ctx, readRequest(2, answer), api, options),
+    );
+    const again = await json(
+      await handleMcpRequest(ctx, readRequest(3, answer), api, options),
+    );
+    expect(once.error).toEqual(again.error);
+    expect(again.error?.message).toBe("owner said no");
+  });
+
+  test("a malformed completeRead fails loudly and stays reproducible", async () => {
+    const { api, ctx, options, reads } = readHarness((_ctx, args) =>
+      args.inputResponses === undefined
+        ? inputRequired(CONFIRM_REQUEST)
+        : completeRead(["not-a-content-block"]),
+    );
+    const first = await json(
+      await handleMcpRequest(ctx, readRequest(1), api, options),
+    );
+    const answer = {
+      requestState: first.result!.requestState,
+      inputResponses: { confirm: { action: "accept" } },
+    };
+    const bad = await json(
+      await handleMcpRequest(ctx, readRequest(2, answer), api, options),
+    );
+    expect(bad.error?.code).toBe(-32603);
+    expect(bad.error?.message).toMatch(/invalid contents/);
+    expect(bad.result).toBeUndefined();
+    expect(reads).toHaveLength(0);
+    // Contents are validated BEFORE the chain is settled, so a host that
+    // fixes its hook can still be answered on the same continuation rather
+    // than being told the decision is over.
+    const retry = await json(
+      await handleMcpRequest(ctx, readRequest(3, answer), api, options),
+    );
+    expect(retry.error?.message).toMatch(/invalid contents/);
+  });
+
+  test("a hook that returns nonsense is a host bug, not a served read", async () => {
+    const { api, ctx, options, reads } = readHarness(
+      () => ({ nonsense: true }) as never,
+    );
+    const body = await json(
+      await handleMcpRequest(ctx, readRequest(1), api, options),
+    );
+    expect(body.error?.code).toBe(-32603);
+    expect(body.error?.message).toMatch(/returned an invalid result/);
+    expect(reads).toHaveLength(0);
+  });
+
+  test("a tools/call continuation cannot be presented at resources/read", async () => {
+    // The seal binds `resources/read:<uri>`; a tool's binds the tool name.
+    const tool = declarativeTool(async (_ctx, hookArgs) =>
+      hookArgs.inputResponses === undefined
+        ? inputRequired(CONFIRM_REQUEST)
+        : null,
+    );
+    const { api, ctx } = harness();
+    const toolAsk = await json(
+      await handleMcpRequest(ctx, request(1, {}), api, options(tool)),
+    );
+    const { api: readApi, ctx: readCtx, options: readOptions, reads } =
+      readHarness((_ctx, args) =>
+        args.inputResponses === undefined
+          ? inputRequired(CONFIRM_REQUEST)
+          : null,
+      );
+    const crossed = await json(
+      await handleMcpRequest(
+        readCtx,
+        readRequest(2, {
+          requestState: toolAsk.result!.requestState,
+          inputResponses: { confirm: { action: "accept" } },
+        }),
+        readApi,
+        readOptions,
+      ),
+    );
+    expect(crossed.error?.code).toBe(-32602);
+    expect(crossed.error?.message).toMatch(/Invalid, expired, or mismatched/);
+    expect(reads).toHaveLength(0);
+  });
+
+  test("a hook-only mount advertises resources and serves a read", async () => {
+    // No providers, no templates, no registry rows: the hook is the entire
+    // read implementation (ask, then answer with completeRead). The absence
+    // of this test is what let the escape hatch land on resources/list.
+    const { api, ctx } = harness();
+    const contents = [{ uri: URI, mimeType: "text/plain", text: "from hook" }];
+    const options = {
+      authorize: async () => ({ allowed: true as const }),
+      mrtr: { secret: "x".repeat(32) },
+      beforeResourceRead: (async (
+        _ctx: unknown,
+        args: { inputResponses?: Record<string, unknown> },
+      ) =>
+        args.inputResponses === undefined
+          ? inputRequired(CONFIRM_REQUEST)
+          : completeRead(contents)) as never,
+    };
+
+    // The capability has to be advertised, or a client never tries a read.
+    const discovery = await json(
+      await handleMcpRequest(
+        ctx,
+        new Request("https://gateway.example/mcp", {
+          method: "POST",
+          headers: {
+            accept: "application/json, text/event-stream",
+            "content-type": "application/json",
+            "mcp-protocol-version": "2026-07-28",
+            "mcp-method": "server/discover",
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "server/discover",
+            params: {
+              _meta: {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+              },
+            },
+          }),
+        }),
+        api,
+        options,
+      ),
+    );
+    expect(
+      (discovery.result as { capabilities?: Record<string, unknown> })
+        ?.capabilities,
+    ).toHaveProperty("resources");
+
+    // And the read must reach the hook rather than -32601.
+    const asked = await json(
+      await handleMcpRequest(ctx, readRequest(2), api, options),
+    );
+    expect(asked.result?.resultType).toBe("input_required");
+    const served = await json(
+      await handleMcpRequest(
+        ctx,
+        readRequest(3, {
+          requestState: asked.result!.requestState,
+          inputResponses: { confirm: { action: "accept" } },
+        }),
+        api,
+        options,
+      ),
+    );
+    expect(served.result).toMatchObject({ contents });
+  });
+
+  test("a continuation without a configured hook is refused, not ignored", async () => {
+    const { api, ctx } = harness();
+    const body = await json(
+      await handleMcpRequest(ctx, readRequest(1, { requestState: "x.y" }), api, {
+        authorize: async () => ({ allowed: true as const }),
+        mrtr: { secret: "x".repeat(32) },
+        resources: [
+          { name: "docs", list: async () => [], read: async () => CONTENTS },
+        ] as never,
+      }),
+    );
+    expect(body.error?.code).toBe(-32602);
+    expect(body.error?.message).toMatch(/does not support MRTR continuations/);
   });
 });

@@ -52,8 +52,13 @@ export type {
   McpBeforeCallArgs,
   McpBeforeCallHandler,
   McpBeforeCallResult,
+  McpBeforeResourceReadArgs,
+  McpBeforeResourceReadHandler,
+  McpBeforeResourceReadResult,
   McpCaller,
   McpCompleteCallResult,
+  McpCompleteReadResult,
+  McpDeclineReadResult,
   McpHostCallbackCtx,
   McpIcon,
   McpInputRequiredResult,
@@ -86,7 +91,12 @@ export type {
   McpTaskExecutor,
   McpTasksOptions,
 } from "./mcp-handler.js";
-export { completeCall, inputRequired } from "../shared.js";
+export {
+  completeCall,
+  completeRead,
+  declineRead,
+  inputRequired,
+} from "../shared.js";
 export {
   buildProtectedResourceMetadataUrl,
   buildResourceUrl,

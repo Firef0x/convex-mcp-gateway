@@ -105,6 +105,36 @@ export type McpBeforeCallResult =
   | null
   | undefined;
 
+/**
+ * A host-side `beforeResourceRead` decision that ends the read by serving
+ * `contents` itself, without consulting any provider or template. The
+ * read counterpart of `completeCall`: a `resources/read` result is
+ * `{ contents }` rather than a `CallToolResult`, so the two cannot share
+ * one shape.
+ */
+export type McpCompleteReadResult = {
+  __mcpCompleteRead: true;
+  contents: unknown[];
+};
+
+/**
+ * A host-side `beforeResourceRead` decision that refuses the read after
+ * the caller answered. Distinct from returning substitute `contents`:
+ * the client asked for a resource and is getting none, so it belongs on
+ * the error channel, in the same family as an `authorizeResource` denial.
+ */
+export type McpDeclineReadResult = {
+  __mcpDeclineRead: true;
+  reason: string;
+};
+
+export type McpBeforeResourceReadResult =
+  | McpInputRequiredResult
+  | McpCompleteReadResult
+  | McpDeclineReadResult
+  | null
+  | undefined;
+
 /** Create a host-side `beforeCall` result that requests another round trip. */
 export function inputRequired(
   inputRequests: Record<string, unknown> = {},
@@ -115,6 +145,26 @@ export function inputRequired(
     inputRequests,
     ...(state !== undefined ? { state } : {}),
   };
+}
+
+/**
+ * Create a host-side `beforeResourceRead` result that serves `contents`
+ * directly, e.g. a redacted summary after the owner declined to share the
+ * full document. Contents are validated exactly like a provider's, so a
+ * malformed block fails loudly instead of shipping invalid JSON-RPC.
+ */
+export function completeRead(contents: unknown[]): McpCompleteReadResult {
+  return { __mcpCompleteRead: true, contents };
+}
+
+/**
+ * Create a host-side `beforeResourceRead` result that refuses the read.
+ * `reason` is host-authored and reaches the caller verbatim, like an
+ * `authorizeResource` denial reason; it must not carry anything the caller
+ * may not see.
+ */
+export function declineRead(reason: string): McpDeclineReadResult {
+  return { __mcpDeclineRead: true, reason };
 }
 
 /**
@@ -363,6 +413,37 @@ export type McpBeforeCallHandler = (
   ctx: McpHostCallbackCtx,
   args: McpBeforeCallArgs,
 ) => McpBeforeCallResult | Promise<McpBeforeCallResult>;
+
+/**
+ * Args the gateway passes to the host's `beforeResourceRead` hook, on the
+ * first read and on every verified continuation of it. Mirrors
+ * `McpBeforeCallArgs`, with the resource identity in place of the tool's
+ * arguments: a read has no arguments, and its `uri` is what the sealed
+ * continuation binds.
+ *
+ * `resourceMetadata` is the registry `metadata` of the concrete resource
+ * when the URI names one, `null` otherwise (a template expansion, or a
+ * provider-served URI that is not persisted). Same value the host's
+ * `authorizeResource` receives, so one policy can inform both.
+ */
+export type McpBeforeResourceReadArgs = {
+  uri: string;
+  resourceMetadata: Record<string, unknown> | null;
+  identity: McpCaller;
+  state?: unknown;
+  inputResponses?: Record<string, unknown>;
+  round?: number;
+};
+
+export type McpBeforeResourceReadHandler = (
+  ctx: { auth: { getUserIdentity: () => Promise<unknown> } } & Record<
+    string,
+    unknown
+  >,
+  args: McpBeforeResourceReadArgs,
+) =>
+  | McpBeforeResourceReadResult
+  | Promise<McpBeforeResourceReadResult>;
 
 /**
  * Args that the gateway passes to the host's `authorize` callback for
