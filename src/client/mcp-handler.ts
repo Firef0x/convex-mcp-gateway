@@ -6,6 +6,7 @@ import {
   type McpAuthorizerArgs,
   type McpAuthorizerDecision,
   type McpAuthorizerHandler,
+  type McpIcon,
   type McpInputRequiredResult,
   type McpToolRegistration,
 } from "../shared.js";
@@ -100,6 +101,7 @@ export type McpResource = {
   description?: string;
   mimeType?: string;
   annotations?: McpResourceAnnotations;
+  icons?: McpIcon[];
   /** Raw size in bytes, if known. */
   size?: number;
 };
@@ -140,6 +142,7 @@ export type McpResourceTemplate = {
   description?: string;
   mimeType?: string;
   annotations?: McpResourceAnnotations;
+  icons?: McpIcon[];
 };
 
 /**
@@ -596,6 +599,13 @@ type RegisteredResourceTemplate = {
   description?: string;
   mimeType?: string;
   annotations?: McpResourceAnnotations;
+  /**
+   * Persisted, unlike a concrete resource's icons: a registry-only template
+   * must still list its full descriptor, which is the whole reason the
+   * column exists. Declared here so narrowing this row through an
+   * explicitly-typed literal cannot silently drop it.
+   */
+  icons?: McpIcon[];
 };
 
 /**
@@ -1823,6 +1833,53 @@ function nestsTooDeep(value: unknown): boolean {
  * Exported so the `defineMcp*` helpers can fail loud at declaration time
  * with the same rules the request handler enforces on provider output.
  */
+/**
+ * Validate an MCP `icons` array (tools, resources, and resource templates all
+ * carry the same shape). Per the spec's `Icon`: `src` is required, everything
+ * else optional, `theme` constrained to `"light"` / `"dark"`.
+ *
+ * `src` is checked for being a non-empty string and nothing more. The gateway
+ * is the producer here and never dereferences the URI; the spec puts the
+ * fetch-side burden on consumers ("SHOULD take steps to ensure URLs serving
+ * icons are from the same domain", "SHOULD take appropriate precautions when
+ * consuming SVGs"). So an icon `src` is host-authored content that reaches
+ * the client verbatim, exactly like a description.
+ *
+ * `label` names the enclosing descriptor in the message ("resource", "tool"),
+ * so a rejection points at what to fix.
+ */
+export function describeIconsProblem(
+  icons: unknown,
+  label: string,
+): string | null {
+  if (icons === undefined) return null;
+  if (!Array.isArray(icons)) return `${label}.icons must be an array`;
+  for (const icon of icons) {
+    if (!isPlainObject(icon)) return `${label}.icons entries must be objects`;
+    if (typeof icon.src !== "string" || icon.src.length === 0) {
+      return `${label}.icons[].src must be a non-empty string`;
+    }
+    if (icon.mimeType !== undefined && typeof icon.mimeType !== "string") {
+      return `${label}.icons[].mimeType must be a string`;
+    }
+    if (
+      icon.sizes !== undefined &&
+      (!Array.isArray(icon.sizes) ||
+        !icon.sizes.every((size) => typeof size === "string"))
+    ) {
+      return `${label}.icons[].sizes must be an array of strings`;
+    }
+    if (
+      icon.theme !== undefined &&
+      icon.theme !== "light" &&
+      icon.theme !== "dark"
+    ) {
+      return `${label}.icons[].theme must be "light" or "dark"`;
+    }
+  }
+  return null;
+}
+
 export function describeAnnotationsProblem(
   annotations: unknown,
 ): string | null {
@@ -1881,6 +1938,8 @@ export function describeResourceProblem(resource: unknown): string | null {
   ) {
     return "resource.size must be a non-negative number";
   }
+  const iconsProblem = describeIconsProblem(resource.icons, "resource");
+  if (iconsProblem) return iconsProblem;
   return describeAnnotationsProblem(resource.annotations);
 }
 
@@ -1907,6 +1966,8 @@ export function describeResourceTemplateProblem(
       return `template.${field} must be a string`;
     }
   }
+  const iconsProblem = describeIconsProblem(template.icons, "template");
+  if (iconsProblem) return iconsProblem;
   return describeAnnotationsProblem(template.annotations);
 }
 
@@ -1972,6 +2033,7 @@ function pickResourceFields(resource: McpResource): McpResource {
     ...(resource.annotations !== undefined
       ? { annotations: resource.annotations }
       : {}),
+    ...(resource.icons !== undefined ? { icons: resource.icons } : {}),
     ...(resource.size !== undefined ? { size: resource.size } : {}),
   };
 }
@@ -1997,6 +2059,7 @@ export function pickTemplateFields(
     ...(template.annotations !== undefined
       ? { annotations: template.annotations }
       : {}),
+    ...(template.icons !== undefined ? { icons: template.icons } : {}),
   };
 }
 

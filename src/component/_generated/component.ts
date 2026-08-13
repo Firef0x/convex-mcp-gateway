@@ -258,6 +258,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           _id: string;
           annotations?: any;
           description?: string;
+          icons?: any;
           mimeType?: string;
           name: string;
           title?: string;
@@ -306,6 +307,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         {
           annotations?: any;
           description?: string;
+          icons?: any;
           mimeType?: string;
           name: string;
           title?: string;
@@ -358,6 +360,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           templates: Array<{
             annotations?: any;
             description?: string;
+            icons?: any;
             mimeType?: string;
             name: string;
             title?: string;

@@ -20,6 +20,7 @@ import {
   SCHEMA_RESOLVER_VERSION,
   type McpBeforeCallHandler,
   type McpCaller,
+  type McpIcon,
   type McpToolAnnotations,
   type McpToolDefinition,
   type McpToolKind,
@@ -27,6 +28,7 @@ import {
   type McpToolSecurityScheme,
 } from "../shared.js";
 import {
+  describeIconsProblem,
   describeResourceProblem,
   describeResourceTemplateProblem,
   describeToolHeaderSchemaProblem,
@@ -52,6 +54,7 @@ export type {
   McpBeforeCallResult,
   McpCaller,
   McpCompleteCallResult,
+  McpIcon,
   McpInputRequiredResult,
   McpToolAnnotations,
   McpToolDefinition,
@@ -317,6 +320,11 @@ interface McpToolConfigBase<
   /** Authentication schemes advertised in `tools/list`. */
   securitySchemes?: McpToolSecurityScheme[];
   /**
+   * Icons a client may display next to this tool. Advertised verbatim in
+   * `tools/list`; the gateway never dereferences an icon `src`.
+   */
+  icons?: McpIcon[];
+  /**
    * Free-form metadata stored alongside the tool registration. The
    * component never inspects this; it is surfaced to the host's
    * authorize callback as `args.toolMetadata` so per-tool scope/role
@@ -465,6 +473,7 @@ function build<
     ...(config.securitySchemes !== undefined
       ? { securitySchemes: config.securitySchemes }
       : {}),
+    ...(config.icons !== undefined ? { icons: config.icons } : {}),
     ...(config.metadata !== undefined ? { metadata: config.metadata } : {}),
   } as McpToolDefinition & { fn: Ref; kind: Kind };
 }
@@ -577,10 +586,11 @@ export function defineMcpResource(
     ...(config.annotations !== undefined
       ? { annotations: config.annotations }
       : {}),
+    ...(config.icons !== undefined ? { icons: config.icons } : {}),
     ...(config.size !== undefined ? { size: config.size } : {}),
   };
   // Narrow descriptor persisted in the registry: only the fields the
-  // component schema accepts. title/annotations/size are runtime-only and
+  // component schema accepts. title/annotations/icons/size are runtime-only and
   // must NOT leak here, or declarative sync (replaceResources) would reject
   // them as unknown fields.
   const resource: McpResourceDescriptor = {
@@ -807,6 +817,9 @@ function resourceTemplatesFingerprint(
       description: template.description ?? null,
       mimeType: template.mimeType ?? null,
       annotations: template.annotations ?? null,
+      // Persisted, so a change has to churn the fingerprint or the row
+      // would keep serving the old icons.
+      icons: template.icons ?? null,
     }))
     .sort((a, b) =>
       a.uriTemplate < b.uriTemplate
@@ -853,6 +866,7 @@ function toolProtocolMetadata(
     ...(tool.securitySchemes !== undefined
       ? { securitySchemes: tool.securitySchemes }
       : {}),
+    ...(tool.icons !== undefined ? { icons: tool.icons } : {}),
   };
   return Object.keys(protocolMetadata).length > 0
     ? protocolMetadata
@@ -896,6 +910,22 @@ function assertToolHeaderSchemas(tools: McpToolRegistration[]): void {
       throw new Error(
         `MCP tool "${tool.name}" has an invalid inputSchema: ${problem}.`,
       );
+    }
+  }
+}
+
+/**
+ * Reject a malformed `icons` array where a catalog enters the gateway, so a
+ * typo names the tool here instead of shipping a descriptor a validating
+ * client would drop. Resources and templates get the same check through
+ * `describeResourceProblem` / `describeResourceTemplateProblem`, which run
+ * at declaration time inside `defineMcpResource*`.
+ */
+function assertToolIcons(tools: McpToolRegistration[]): void {
+  for (const tool of tools) {
+    const problem = describeIconsProblem(tool.icons, "tool");
+    if (problem) {
+      throw new Error(`MCP tool "${tool.name}" has invalid icons: ${problem}.`);
     }
   }
 }
@@ -1058,6 +1088,7 @@ function assertTaskAuditCompatibility(tools: McpToolRegistration[]): void {
 
 async function resolveToolHandles(tools: McpToolRegistration[]) {
   assertToolHeaderSchemas(tools);
+  assertToolIcons(tools);
   assertTaskAuditCompatibility(tools);
   assertMrtrToolInvariants(tools);
   const handles = await Promise.all(
@@ -1171,6 +1202,7 @@ async function syncDeclaredTools(
   // would let a catalog that was synced under an older version keep its
   // matching fingerprint and never get checked at all.
   assertToolHeaderSchemas(tools);
+  assertToolIcons(tools);
   assertTaskAuditCompatibility(tools);
   assertMrtrToolInvariants(tools);
   const fingerprint = toolsFingerprint(tools);
@@ -1255,6 +1287,7 @@ export class McpGateway {
     tool: McpToolRegistration,
   ): Promise<void> {
     assertToolHeaderSchemas([tool]);
+    assertToolIcons([tool]);
     assertTaskAuditCompatibility([tool]);
     assertNoImperativeBeforeCall([tool]);
     // The cross-registration gate rule needs both rows to compare, so it

@@ -53,6 +53,7 @@ const resourceTemplateReturnValidator = v.object({
   description: v.optional(v.string()),
   mimeType: v.optional(v.string()),
   annotations: v.optional(v.any()),
+  icons: v.optional(v.any()),
 });
 
 const resourceTemplateInputFields = {
@@ -62,6 +63,7 @@ const resourceTemplateInputFields = {
   description: v.optional(v.string()),
   mimeType: v.optional(v.string()),
   annotations: v.optional(v.any()),
+  icons: v.optional(v.any()),
 };
 
 const resourceTemplateInputValidator = v.object(resourceTemplateInputFields);

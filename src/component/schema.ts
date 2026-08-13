@@ -126,6 +126,13 @@ export default defineSchema({
     description: v.optional(v.string()),
     mimeType: v.optional(v.string()),
     annotations: v.optional(v.any()),
+    /**
+     * Icons a client may display next to the template. Stored as `v.any()`
+     * like `annotations` (the shape is validated host-side before the
+     * write), and persisted for the same reason `title` is: a registry-only
+     * template must still list its full descriptor.
+     */
+    icons: v.optional(v.any()),
   }).index("by_uriTemplate", ["uriTemplate"]),
 
   /**

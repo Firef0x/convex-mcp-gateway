@@ -463,6 +463,10 @@ export const resources = [
     name: "invoice-summary",
     title: "Invoice summary",
     mimeType: "application/json",
+    // Optional icons, advertised verbatim in `resources/list`. Tools and
+    // resource templates take the same field. The gateway never fetches an
+    // icon; see docs/resources.md.
+    icons: [{ src: "https://example.com/invoices.png", sizes: ["48x48"] }],
     // Read handlers receive the resolved caller identity; anonymous
     // resource requests are rejected before this runs.
     read: async (ctx, { uri, identity }) => {

@@ -102,16 +102,30 @@ A resource descriptor (a `resources/list` entry, and the object
 | `mimeType`    | `string?` |                                                                                                                                                                         |
 | `size`        | `number?` | raw size in bytes, non-negative                                                                                                                                         |
 | `annotations` | `object?` | `{ audience?: ("user"\|"assistant")[]; priority?: number /* 0..1 */; lastModified?: string /* conventionally ISO 8601; validated as a string, format not enforced */ }` |
+| `icons`       | `array?`  | `{ src: string /* required, non-empty */; mimeType?: string; sizes?: string[] /* "48x48", or "any" for a scalable format */; theme?: "light" \| "dark" }[]` |
 
-A resource template adds `annotations` (no `size`). A read returns an array
-of contents, each `{ uri, mimeType?, text?, blob? }` with **at least one of
-`text`/`blob`**.
+A resource template adds `annotations` and `icons` (no `size`). A read
+returns an array of contents, each `{ uri, mimeType?, text?, blob? }` with
+**at least one of `text`/`blob`**.
 
-`title`, `annotations`, and `size` are **runtime-only**: they are served
-from a resource provider's `list` output, but are not persisted in the
-registry. So a resource listed purely from the registry (declared but not
-passed as a provider on the request) carries only `uri`/`name`/
-`description`/`mimeType`.
+`title`, `annotations`, `icons`, and `size` are **runtime-only** for a
+concrete resource: they are served from a resource provider's `list`
+output, but are not persisted in the registry. So a resource listed purely
+from the registry (declared but not passed as a provider on the request)
+carries only `uri`/`name`/`description`/`mimeType`. A **template**'s
+`title`, `annotations`, and `icons` *are* persisted, so a registry-only
+template still lists its full descriptor.
+
+An icon `src` is host-authored content that reaches the client verbatim:
+the gateway advertises it and never fetches it. The spec puts the
+fetch-side burden on the consumer, which "SHOULD take steps to ensure URLs
+serving icons are from the same domain as the client/server or a trusted
+domain" and "SHOULD take appropriate precautions when consuming SVGs as
+they can contain executable JavaScript". A malformed entry is rejected at
+declaration time for a resource or template (inside `defineMcpResource` /
+`defineMcpResourceTemplate`) and at catalog sync, with the tool named, for
+a tool. Either way it never ships a descriptor a validating client would
+drop.
 
 These shapes are validated at two points so structurally malformed
 descriptors never reach the client:

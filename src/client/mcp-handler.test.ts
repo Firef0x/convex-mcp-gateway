@@ -8,6 +8,7 @@ import {
 } from "./index.js";
 import {
   describeAnnotationsProblem,
+  describeIconsProblem,
   describeResourceContentsProblem,
   describeResourceProblem,
   describeResourceTemplateProblem,
@@ -83,6 +84,7 @@ function createCtx(component: ComponentApi, tools: RegisteredTool[] = []) {
     description?: string;
     mimeType?: string;
     annotations?: unknown;
+    icons?: unknown;
   }> = [];
   const sessions = new Map<
     string,
@@ -178,6 +180,7 @@ function createCtx(component: ComponentApi, tools: RegisteredTool[] = []) {
             "description",
             "mimeType",
             "annotations",
+            "icons",
           ]);
           for (const template of incoming) {
             for (const key of Object.keys(template)) {
@@ -235,6 +238,9 @@ function createCtx(component: ComponentApi, tools: RegisteredTool[] = []) {
     },
     get resourceTemplates() {
       return resourceTemplates;
+    },
+    get templatesFingerprint() {
+      return templatesFingerprint;
     },
     resourceAuditEntries,
     setDispatchResult(value: unknown) {
@@ -3490,6 +3496,7 @@ describe("handleMcpRequest metadata and resources", () => {
           name: "Invoice",
           title: "Invoice by id",
           annotations: { priority: 0.7 },
+          icons: [{ src: "https://example.com/invoice.png", sizes: ["96x96"] }],
         },
       ],
       fingerprint: "fp",
@@ -3522,6 +3529,12 @@ describe("handleMcpRequest metadata and resources", () => {
             name: "Invoice",
             title: "Invoice by id",
             annotations: { priority: 0.7 },
+            // The guarantee that justifies persisting icons for templates
+            // (a concrete resource's are runtime-only): a registry-only
+            // template still lists its full descriptor.
+            icons: [
+              { src: "https://example.com/invoice.png", sizes: ["96x96"] },
+            ],
           },
         ],
       },
@@ -3789,6 +3802,118 @@ describe("resources/read not-found error payload", () => {
       message: expect.any(String),
     });
     expect(body.error?.message).not.toContain("internal/creds");
+  });
+});
+
+describe("icons and the declarative template fingerprint", () => {
+  test("changing icons re-syncs the template row", async () => {
+    const component = createComponent();
+    const state = createCtx(component);
+    const gateway = new McpGateway(component);
+    const options = (icons: unknown[]) => ({
+      authorize: async () => ({ allowed: true as const }),
+      resourceTemplates: [
+        defineMcpResourceTemplate({
+          uriTemplate: "docs://{id}",
+          name: "docs",
+          icons: icons as never,
+          read: async () => null,
+        }),
+      ],
+    });
+    const first = [{ src: "https://example.com/a.png" }];
+    await gateway.handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 1, method: "initialize" }),
+      options(first),
+    );
+    // Persisted, unlike a concrete resource's icons, so a registry-only
+    // template still lists its full descriptor.
+    expect(state.resourceTemplates[0]?.icons).toEqual(first);
+    const afterFirst = state.templatesFingerprint;
+
+    // Same catalog: the fingerprint short-circuit must hold.
+    await gateway.handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 2, method: "initialize" }),
+      options(first),
+    );
+    expect(state.templatesFingerprint).toBe(afterFirst);
+
+    // Changed icons: the fingerprint has to churn or the row would keep
+    // serving the old ones forever.
+    const second = [{ src: "https://example.com/b.png", theme: "dark" }];
+    await gateway.handleMcpRequest(
+      state.ctx,
+      jsonRpcRequest({ id: 3, method: "initialize" }),
+      options(second),
+    );
+    expect(state.templatesFingerprint).not.toBe(afterFirst);
+    expect(state.resourceTemplates[0]?.icons).toEqual(second);
+  });
+});
+
+describe("icons validation", () => {
+  test("accepts the spec's Icon shape and rejects each malformed field", () => {
+    expect(
+      describeIconsProblem(
+        [
+          {
+            src: "https://example.com/i.png",
+            mimeType: "image/png",
+            sizes: ["48x48"],
+          },
+          { src: "data:image/svg+xml;base64,AAA=", sizes: ["any"], theme: "dark" },
+        ],
+        "resource",
+      ),
+    ).toBeNull();
+    // Absent is fine; an empty array is a host saying "no icons", also fine.
+    expect(describeIconsProblem(undefined, "tool")).toBeNull();
+    expect(describeIconsProblem([], "tool")).toBeNull();
+
+    // Each message names the field so a typo is findable.
+    expect(describeIconsProblem({}, "tool")).toBe("tool.icons must be an array");
+    expect(describeIconsProblem(["x"], "tool")).toBe(
+      "tool.icons entries must be objects",
+    );
+    expect(describeIconsProblem([{}], "resource")).toBe(
+      "resource.icons[].src must be a non-empty string",
+    );
+    expect(describeIconsProblem([{ src: "" }], "resource")).toBe(
+      "resource.icons[].src must be a non-empty string",
+    );
+    expect(describeIconsProblem([{ src: "a", mimeType: 1 }], "template")).toBe(
+      "template.icons[].mimeType must be a string",
+    );
+    expect(
+      describeIconsProblem([{ src: "a", sizes: "48x48" }], "template"),
+    ).toBe("template.icons[].sizes must be an array of strings");
+    expect(describeIconsProblem([{ src: "a", sizes: [48] }], "template")).toBe(
+      "template.icons[].sizes must be an array of strings",
+    );
+    expect(describeIconsProblem([{ src: "a", theme: "sepia" }], "tool")).toBe(
+      'tool.icons[].theme must be "light" or "dark"',
+    );
+  });
+
+  test("the resource and template validators reject bad icons", () => {
+    // Reached through the descriptor validators, which is where a
+    // declarative catalog is checked.
+    expect(
+      describeResourceProblem({
+        uri: "docs://a",
+        name: "a",
+        icons: [{ mimeType: "image/png" }],
+      }),
+    ).toBe("resource.icons[].src must be a non-empty string");
+    expect(
+      describeResourceTemplateProblem({
+        uriTemplate: "docs://{id}",
+        name: "a",
+        icons: "nope",
+      }),
+    ).toBe("template.icons must be an array");
   });
 });
 
