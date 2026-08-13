@@ -30,7 +30,10 @@ function component() {
       getTool: Symbol("getTool"),
       getOAuthConfig: Symbol("getOAuthConfig"),
     },
-    dispatch: { runTool: Symbol("runTool") },
+    dispatch: {
+      runTool: Symbol("runTool"),
+      recordAuthDenial: Symbol("recordAuthDenial"),
+    },
     tasks: {
       createTask: Symbol("createTask"),
       getTaskForOwner: Symbol("getTaskForOwner"),
@@ -545,6 +548,66 @@ describe("wire negotiation", () => {
     ).toBe(-32601);
   });
 
+  test("an anonymous task-augmented call is audited, not only refused", async () => {
+    const { api, ctx, mutations, options } = harness({});
+    (ctx as { auth: unknown }).auth = { getUserIdentity: async () => null };
+    const response = await handleMcpRequest(
+      ctx,
+      request(
+        40,
+        "tools/call",
+        { name: registeredTool.name, arguments: {}, task: {} },
+        { name: registeredTool.name },
+      ),
+      api,
+      options,
+    );
+    // This branch sits before `safeAuthorize`, so without its own audit row
+    // an anonymous caller could probe which tools accept tasks and leave no
+    // trace at all.
+    const denial = mutations.find(
+      (m) => m.ref === api.dispatch.recordAuthDenial,
+    );
+    expect(denial?.args).toMatchObject({
+      name: registeredTool.name,
+      auditIdentitySubject: null,
+      outcome: "denied",
+      errorMessage: "Task-augmented calls require authentication",
+    });
+    // ...and it must still be the real challenge, not a 200 with an error.
+    expect(response.status).toBe(401);
+    expect(mutations.some((m) => m.ref === api.tasks.createTask)).toBe(false);
+  });
+
+  test("an audit failure on that path does not swallow the challenge", async () => {
+    const { api, ctx, options } = harness({});
+    (ctx as { auth: unknown }).auth = { getUserIdentity: async () => null };
+    const inner = ctx.runMutation;
+    (ctx as { runMutation: unknown }).runMutation = async (
+      ref: unknown,
+      args: Record<string, unknown>,
+    ) => {
+      if (ref === api.dispatch.recordAuthDenial) {
+        throw new Error("audit table unavailable");
+      }
+      return await inner(ref, args);
+    };
+    // Audit must never change the outcome (see safeRecordAudit in
+    // dispatch.ts): the caller still gets the 401 challenge.
+    const response = await handleMcpRequest(
+      ctx,
+      request(
+        41,
+        "tools/call",
+        { name: registeredTool.name, arguments: {}, task: {} },
+        { name: registeredTool.name },
+      ),
+      api,
+      options,
+    );
+    expect(response.status).toBe(401);
+  });
+
   test("a task-augmented call 404s when tasks are not configured", async () => {
     const { api, ctx, options } = harness(undefined);
     const response = await handleMcpRequest(
@@ -621,7 +684,7 @@ describe("wire negotiation", () => {
 /**
  * A tool can be both MRTR-gated and task-capable. The host-side hook runs
  * at task-creation time, so the negotiation happens over `requestState`
- * BEFORE any durable task row exists — the two input channels never
+ * BEFORE any durable task row exists: the two input channels never
  * compete for the same call.
  */
 describe("a task-capable tool with an MRTR beforeCall hook", () => {
@@ -777,7 +840,7 @@ describe("a task-capable tool with an MRTR beforeCall hook", () => {
     ).json()) as {
       result: { resultType: string; requestState: string };
     };
-    // The MRTR envelope, not a task handle — and nothing durable yet.
+    // The MRTR envelope, not a task handle, and nothing durable yet.
     expect(first.result.resultType).toBe("input_required");
     expect(mutations.some((m) => m.ref === api.tasks.createTask)).toBe(false);
 

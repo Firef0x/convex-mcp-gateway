@@ -395,8 +395,8 @@ describe("tasks: idempotency-key reuse", () => {
         taskId: "task-1",
         ownerSubject: "alice",
       });
-      // Same request, replayed. Its outcome — the cancel the owner asked
-      // for — is the honest answer; creating a new row would re-run the
+      // Same request, replayed. Its outcome, the cancel the owner asked
+      // for, is the honest answer; creating a new row would re-run the
       // tool whose task they just cancelled.
       const replay = await createTask(ctx, {
         taskId: "task-2",
@@ -430,6 +430,33 @@ describe("tasks: idempotency-key reuse", () => {
       });
       expect(afterStart.reused).toBe(true);
       expect(afterStart.startPending).toBeUndefined();
+    });
+  });
+
+  test("an input_required row that never recorded a start is not startPending", async () => {
+    const t = newTest();
+    await t.run(async (ctx) => {
+      await createTask(ctx);
+      // The window this guards: `execute` put the row into input_required
+      // and then the start marker failed to record (logged, not fatal). The
+      // row is non-terminal with no startedAt, but it demonstrably STARTED,
+      // because its executor is what asked for input.
+      await ctx.runMutation(api.tasks.requireTaskInput, {
+        taskId: "task-1",
+        inputRequests: {
+          confirm: { method: "elicitation/create", params: { mode: "form" } },
+        },
+      });
+      const replay = await createTask(ctx, {
+        taskId: "task-2",
+        idempotencyKey: "idem-task-1",
+      });
+      // Load-bearing: without this the next assertion could pass because
+      // the row was not reused at all.
+      expect(replay.reused).toBe(true);
+      // Starting it again would re-run the executor against a task the
+      // owner is mid-way through answering, and re-fire the elicitation.
+      expect(replay.startPending).toBeUndefined();
     });
   });
 
@@ -1095,7 +1122,7 @@ describe("tasks: input_required round-trip", () => {
  * Guards the built-in executor applies BEFORE it dispatches. They all
  * matter because a scheduled action is at-most-once: a guard that
  * returns without failing the task leaves the client polling a handle
- * that will never resolve. A fake function handle is enough — none of
+ * that will never resolve. A fake function handle is enough: none of
  * these paths reach the tool.
  */
 describe("tasks: built-in executor guards", () => {
@@ -1201,10 +1228,14 @@ describe("tasks: built-in executor guards", () => {
       taskId: "task-2",
       ownerSubject: "alice",
     });
-    // The fake handle cannot run, so this fails inside dispatch — the
-    // point is that it got PAST the eligibility gate.
-    expect(task?.status).toBe("failed");
-    expect(task?.error?.message).not.toMatch(/no longer eligible/);
+    // The fake handle cannot run, so dispatch reports a tool execution
+    // error, which is a COMPLETED call carrying isError. The point is that
+    // it got PAST the eligibility gate rather than being refused there.
+    expect(task?.status).toBe("completed");
+    expect(
+      (task?.result as { isError?: boolean } | undefined)?.isError,
+    ).toBe(true);
+    expect(JSON.stringify(task?.result)).not.toMatch(/no longer eligible/);
   });
 });
 
@@ -1224,7 +1255,12 @@ describe("tasks: completion and failure", () => {
         ownerSubject: "alice",
       });
       expect(done?.status).toBe("completed");
-      expect(done?.result).toEqual({ total: 7 });
+      // The row stores the value; the descriptor derives the wire envelope,
+      // with compact JSON so the derived form cannot inflate with nesting.
+      expect(done?.result).toEqual({
+        content: [{ type: "text", text: '{"total":7}' }],
+        isError: false,
+      });
       expect(done?.error).toBeUndefined();
 
       await createTask(ctx, { taskId: "task-2" });
@@ -1266,6 +1302,114 @@ describe("tasks: completion and failure", () => {
     });
   });
 
+  test("an isError result audits as an error, not a clean success", async () => {
+    const t = newTest();
+    await t.run(async (ctx) => {
+      await createTask(ctx);
+      expect(
+        await ctx.runMutation(api.tasks.completeTask, {
+          taskId: "task-1",
+          result: "Confirmation declined.",
+          isError: true,
+        }),
+      ).toBe("finalized");
+      const audit = await ctx.runQuery(api.audit.listEntries, {
+        taskId: "task-1",
+      });
+      const complete = audit.find((row) => row.taskOperation === "complete");
+      // For a host-executed task this is the ONLY audit row: there is no
+      // dispatch.runTool row. If it said "allowed", a declined destructive
+      // write would be indistinguishable from an approved one.
+      expect(complete).toMatchObject({ outcome: "error", errorCode: -32000 });
+      // The payload contract stands: only the flag and a code travel.
+      expect(complete?.errorMessage).toBeUndefined();
+      expect(complete?.args).toBeNull();
+    });
+  });
+
+  test("a structured error payload survives, and carries no structuredContent", async () => {
+    const t = newTest();
+    await t.run(async (ctx) => {
+      await createTask(ctx);
+      // The documented host path: pass the tool's own value plus isError.
+      // Stringifying it as `String(value)` would hand the client
+      // "[object Object]" and lose the payload for good.
+      expect(
+        await ctx.runMutation(api.tasks.completeTask, {
+          taskId: "task-1",
+          result: { reason: "quota exceeded", retryAfter: 30 },
+          isError: true,
+        }),
+      ).toBe("finalized");
+      const task = await ctx.runQuery(api.tasks.getTaskForOwner, {
+        taskId: "task-1",
+        ownerSubject: "alice",
+      });
+      const envelope = task?.result as {
+        content: Array<{ text: string }>;
+        isError: boolean;
+        structuredContent?: unknown;
+      };
+      expect(envelope.isError).toBe(true);
+      expect(JSON.parse(envelope.content[0]!.text)).toEqual({
+        reason: "quota exceeded",
+        retryAfter: 30,
+      });
+      // An error result carries a message, not a typed value to validate
+      // against the tool's outputSchema; the synchronous path never emits
+      // one either.
+      expect("structuredContent" in envelope).toBe(false);
+    });
+  });
+
+  test("a legal value that would inflate when wrapped still completes", async () => {
+    const t = newTest();
+    await t.run(async (ctx) => {
+      await createTask(ctx);
+      // The shape that broke the previous design: a nested value whose
+      // pretty-printed envelope is several times its own size (indentation
+      // per level, plus a second copy under structuredContent). Storing the
+      // value and deriving the envelope on read means only the value is
+      // capped, so a documented-legal result cannot fail AFTER the tool
+      // committed its writes.
+      const row = Array.from({ length: 40 }, (_, i) => [i, i + 1, i + 2]);
+      const value = { rows: Array.from({ length: 500 }, () => row) };
+      const compact = JSON.stringify(value).length;
+      // What a PRETTY-PRINTED envelope would have cost. Left in as the
+      // reason the derived form is serialized compactly: this shape
+      // inflates about 7x, past Convex's 1 MiB, and a derived envelope
+      // that does not fit makes a COMPLETED task unreadable on every poll
+      // with no code path able to report it.
+      const pretty = JSON.stringify({
+        content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
+        structuredContent: value,
+        isError: false,
+      }).length;
+      expect(compact).toBeLessThan(256 * 1024);
+      expect(pretty).toBeGreaterThan(1024 * 1024);
+      expect(
+        await ctx.runMutation(api.tasks.completeTask, {
+          taskId: "task-1",
+          result: value,
+        }),
+      ).toBe("finalized");
+      const task = await ctx.runQuery(api.tasks.getTaskForOwner, {
+        taskId: "task-1",
+        ownerSubject: "alice",
+      });
+      expect(task?.status).toBe("completed");
+      // Readable, and derived compactly: the whole envelope stays inside
+      // what a Convex query may return.
+      const envelope = task?.result as Record<string, unknown>;
+      expect(JSON.stringify(envelope).length).toBeLessThan(1024 * 1024);
+      expect(
+        JSON.parse(
+          (envelope.content as Array<{ text: string }>)[0]!.text,
+        ),
+      ).toEqual(value);
+    });
+  });
+
   test("an oversized result fails the task instead of storing it", async () => {
     const t = newTest();
     await t.run(async (ctx) => {
@@ -1273,7 +1417,9 @@ describe("tasks: completion and failure", () => {
       expect(
         await ctx.runMutation(api.tasks.completeTask, {
           taskId: "task-1",
-          result: { blob: "x".repeat(256 * 1024 + 1) },
+          // One byte past the documented cap, which is the only cap now
+          // that the row stores the value rather than an envelope.
+          result: "x".repeat(256 * 1024 - 1),
         }),
         // NOT "finalized": the caller's work succeeded while the client
         // will be served a failure, and the caller must be able to tell.

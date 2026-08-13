@@ -64,7 +64,7 @@ export const tools: McpToolRegistration[] = [
     // negotiates FIRST (an `input_required` round creates no task), and
     // only the approved continuation becomes a task. The task then
     // inherits the MRTR chain's idempotency key, and the built-in
-    // executor injects it into `continuationKey` — so the mutation
+    // executor injects it into `continuationKey`: so the mutation
     // dedupes a replayed continuation exactly as on the synchronous path,
     // without knowing which path it ran on.
     taskSupport: true,
@@ -136,8 +136,9 @@ export const tools: McpToolRegistration[] = [
     args: {
       failWith: v.optional(v.string()),
       failPlain: v.optional(v.string()),
+      padResult: v.optional(v.float64()),
     },
-    returns: v.object({ total: v.float64() }),
+    returns: v.object({ total: v.float64(), pad: v.optional(v.string()) }),
     // Opt-in MCP Tasks: with the `tasks` option configured in http.ts, a
     // modern client may send `tools/call` with a `task` request and poll
     // the returned handle. The mutation then runs after the HTTP request
@@ -178,7 +179,7 @@ export const tools: McpToolRegistration[] = [
     // It lives in the ONE shared catalog on purpose. The component keeps a
     // single tool registry and a single catalog fingerprint, so two mounts
     // passing different `tools` arrays would each re-sync (and delete the
-    // other's tools) on every modern request — a tool that is registered
+    // other's tools) on every modern request: a tool that is registered
     // could then answer -32602 to a concurrent call. Mounts differ by
     // their `tasks` / `authorize` options, never by their catalog. On the
     // main mount, which has no `tasks.execute`, a task call to this tool

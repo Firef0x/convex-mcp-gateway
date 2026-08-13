@@ -3,7 +3,7 @@
 Every `tools/call` produces one row in the component's `audit` table,
 and so does every resource operation and every task lifecycle
 transition. The row records who called what, when, and what the gateway
-decided — plus the arguments, for tool rows. The audit pipeline is
+decided, plus the arguments, for tool rows. The audit pipeline is
 independent from the dispatch outcome: a failed audit insert never
 alters the response the caller sees.
 
@@ -43,8 +43,8 @@ don't need to add your own.
 ## Task rows
 
 A task-augmented `tools/call` writes one `entryType: "task"` row per
-state-changing transition — `create`, `input`, `cancel`, `complete`,
-`fail` — carrying the task id, tool name, owner subject and the task's
+state-changing transition, `create`, `input`, `cancel`, `complete`,
+`fail`, carrying the task id, tool name, owner subject and the task's
 age, and **never** task payloads (`args`, `result`,
 `inputRequests` / `inputResponses` are all absent). Idempotent no-ops
 (a repeated cancel, a duplicate input submission) deliberately write
@@ -52,10 +52,17 @@ nothing. Polling with `tasks/get` is not audited. Pruning a task that
 never reached a terminal state writes the `fail` row it never got, so
 the trail always shows how a task ended instead of stopping at `create`.
 
+A `complete` row records `outcome: "error"` (with `errorCode`, never the
+message) when the completion was marked as an error, which the row keeps
+as a `resultIsError` flag beside the value rather than inside it. For a
+host-executed task that row is the *only* audit trace, so without it a
+call that ran and reported a failure would be indistinguishable from one
+that succeeded.
+
 These rows are bookkeeping *around* the execution, not a record of it.
 A task run by the built-in executor dispatches through the same
 `dispatch.runTool` path as a synchronous call, so it **also** writes the
-ordinary `entryType: "tool"` row — same identity attribution, same
+ordinary `entryType: "tool"` row, same identity attribution, same
 argument recording, same error-text policy. A host-executed task
 (`tasks.execute`) runs the work in the host's own durable execution, so
 only the lifecycle rows exist for it unless the host audits its steps

@@ -33,13 +33,39 @@ export const TASK_MAX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Permitted serialized sizes (documented in docs/tasks.md). */
 export const TASK_MAX_ARGS_BYTES = 64 * 1024;
 export const TASK_MAX_INPUT_BYTES = 64 * 1024;
+/**
+ * Cap on a tool's result value. The row stores exactly that value, so
+ * this is the whole story: nothing inflates it between the check and the
+ * write, and the per-document budget stays what `docs/tasks.md` says
+ * (256 + 64 + 64 + 64 + 8 KiB, comfortably inside Convex's 1 MiB).
+ *
+ * The `CallToolResult` a client polls is DERIVED from the value at read
+ * time (see `descriptor`), never stored. Storing the envelope instead
+ * would keep the value twice over, so a legal 256 KiB value could
+ * serialize past a megabyte: the tool would commit its writes and the
+ * client would then be told the call failed, for a result the same tool
+ * returns fine inline.
+ *
+ * With compact serialization the derived form is bounded at about 3x this
+ * (see `callToolResult`), i.e. ~768 KiB, inside Convex's 1 MiB return
+ * limit. `completeTask` still measures the derived form once, at write
+ * time, so a value that somehow escapes that reasoning fails loudly then
+ * rather than making the task unreadable on every poll afterwards.
+ */
 export const TASK_MAX_RESULT_BYTES = 256 * 1024;
+/**
+ * Ceiling on the DERIVED envelope, checked once at completion. Not a
+ * storage bound (the row holds only the value) and unreachable for any
+ * value inside the cap above; it exists so the failure, if the bound is
+ * ever wrong, lands where a client can be told about it.
+ */
+export const TASK_MAX_DERIVED_RESULT_BYTES = 3 * TASK_MAX_RESULT_BYTES + 4096;
 
 /**
  * Per-owner cap on live (non-terminal) tasks, mirroring
  * `sessions.SUBSCRIPTION_CAP`. This is a CONCURRENCY bound: it stops a
  * caller from holding unbounded simultaneous work (and unbounded pending
- * scheduler jobs), but it does not bound total volume — terminal tasks
+ * scheduler jobs), but it does not bound total volume: terminal tasks
  * do not count, so a caller looping short tasks stays under the cap
  * while retained rows accumulate. Retention (`ttlMs` + `pruneTasks`) is
  * the only bound on that; size it accordingly, and rate-limit upstream
@@ -110,6 +136,9 @@ type TaskRow = {
   caller?: { subject: string; claims?: unknown };
   status: "working" | "input_required" | "completed" | "failed" | "cancelled";
   result?: unknown;
+  /** Shape flags for the result, recorded by whoever completed the task. */
+  resultIsError?: boolean;
+  resultStructured?: boolean;
   error?: { code: number; message: string };
   inputRequests?: unknown;
   inputResponses?: unknown;
@@ -202,7 +231,7 @@ function safeStableStringify(value: unknown): string | null {
  *
  * The task table is component-wide, so `ownerSubject` alone lets any
  * mount that resolves the same subject reach a task created through
- * another — including one whose `authorize` would have refused the
+ * another: including one whose `authorize` would have refused the
  * originating tool, since authorization runs at creation and never again
  * on `tasks/get` / `tasks/update`. A host that mounts the gateway more
  * than once with different policies sets `tasks.scope` per mount to close
@@ -223,9 +252,19 @@ function isOwnedBy(
   row: TaskRow,
   ownerSubject: string,
   scope: string | undefined,
+  /**
+   * Whether a mismatch is worth telling the operator about. True on the
+   * owner-facing paths, where a mismatch is the difference between
+   * answering and refusing. False on `createTask`'s reuse scan, which
+   * merely asks "is this row mine to adopt?" and legitimately walks rows
+   * belonging to other mounts: warning there would fire on healthy
+   * multi-mount traffic and train operators to ignore the message.
+   */
+  reportMismatch = true,
 ): boolean {
   if (row.ownerSubject !== ownerSubject) return false;
   if ((row.scope ?? undefined) === scope) return true;
+  if (!reportMismatch) return false;
   // The wire answer stays identical to an unknown id, but the OPERATOR
   // needs a signal: a mount that sets `scope` where its sibling does not
   // (or that renames one, or reads it from an unset env var) makes every
@@ -274,8 +313,19 @@ function descriptor(row: TaskRow) {
     // acceptance would leave that client unable to construct a
     // submission that passes the round check.
     ...(row.inputRound !== undefined ? { inputRound: row.inputRound } : {}),
+    // The MCP `CallToolResult` is built here rather than stored, so the
+    // row holds the tool's value exactly once and a client still reads
+    // what a synchronous `tools/call` returns. The two shape flags were
+    // recorded when the task completed, which is why deriving needs no
+    // tool metadata on the polling path.
     ...(row.status === "completed" && row.result !== undefined
-      ? { result: row.result }
+      ? {
+          result: callToolResult(
+            row.result,
+            row.resultStructured === true,
+            row.resultIsError === true,
+          ),
+        }
       : {}),
     ...(row.status === "failed" && row.error !== undefined
       ? { error: row.error }
@@ -330,7 +380,7 @@ const createTaskResultValidator = v.union(
     reused: v.optional(v.literal(true)),
     /**
      * Set alongside `reused` when the reused row is host-executed,
-     * non-terminal, and carries no `startedAt` — i.e. its original
+     * non-terminal, and carries no `startedAt`: i.e. its original
      * request never got execution started (the executor threw and the
      * compensating `failTask` threw too). The caller must start it, or the
      * client polls a handle nothing will ever advance.
@@ -418,7 +468,7 @@ export const createTask = mutation({
       return { created: false as const, reason: "duplicate_id" as const };
     }
     // Same idempotency key as a live task means this is a repeat of the
-    // request that created it — a replayed MRTR continuation, whose chain
+    // request that created it: a replayed MRTR continuation, whose chain
     // key IS this key. Return that task instead of a sibling: the client
     // asked once, so it should hold one handle, one TTL, and one audit
     // trail, not two rows it can drive out of step by cancelling either.
@@ -452,7 +502,7 @@ export const createTask = mutation({
     // this request did not make.
     const reusable = (sameKey as TaskRow[]).find(
       (row) =>
-        isOwnedBy(row, args.ownerSubject, args.scope) &&
+        isOwnedBy(row, args.ownerSubject, args.scope, false) &&
         row.toolName === args.toolName &&
         row.executor === args.executor &&
         (row.mrtrApproved ?? undefined) === (args.mrtrApproved ?? undefined) &&
@@ -460,8 +510,8 @@ export const createTask = mutation({
     );
     if (reusable) {
       // Terminal rows are reused deliberately. This is the SAME request
-      // (see the digest note above), so its outcome — including a cancel
-      // the owner asked for — is the honest answer. Falling through to a
+      // (see the digest note above), so its outcome, including a cancel
+      // the owner asked for, is the honest answer. Falling through to a
       // new row would re-run a tool whose task the owner just cancelled.
       //
       // Logged because nothing else records a reuse: no audit row is
@@ -480,9 +530,13 @@ export const createTask = mutation({
         reused: true as const,
         // The host's executor never confirmed it started this row, so the
         // caller must start it rather than assume the original did.
+        // `working` only. An `input_required` row demonstrably started,
+        // because its executor is what called `requireTaskInput`, so
+        // "starting" it again would re-run the executor against a paused
+        // task and fail one the owner is still answering.
         ...(reusable.executor === "host" &&
         reusable.startedAt === undefined &&
-        !TERMINAL_STATUSES.has(reusable.status)
+        reusable.status === "working"
           ? { startPending: true as const }
           : {}),
       };
@@ -585,11 +639,25 @@ export const getTaskInternal = query({
   },
 });
 
+/**
+ * Which executor owns a row, reported next to the descriptor rather than
+ * inside it. The handler spreads only `task` onto the wire, so this stays
+ * server-side; it exists because the task table is component-wide, so the
+ * MOUNT's configuration says nothing about whether a given task has a
+ * durable run to stop or resume.
+ */
+const executorField = v.union(v.literal("component"), v.literal("host"));
+
 const cancelResultValidator = v.union(
-  v.object({ outcome: v.literal("cancelled"), task: taskDescriptorValidator }),
+  v.object({
+    outcome: v.literal("cancelled"),
+    task: taskDescriptorValidator,
+    executor: executorField,
+  }),
   v.object({
     outcome: v.literal("already_cancelled"),
     task: taskDescriptorValidator,
+    executor: executorField,
   }),
   v.object({ outcome: v.literal("not_found") }),
   v.object({ outcome: v.literal("conflict"), status: taskStatusValidator }),
@@ -620,7 +688,11 @@ export const cancelTaskForOwner = mutation({
       return { outcome: "not_found" as const };
     }
     if (row.status === "cancelled") {
-      return { outcome: "already_cancelled" as const, task: descriptor(row) };
+      return {
+        outcome: "already_cancelled" as const,
+        task: descriptor(row),
+        executor: row.executor,
+      };
     }
     if (TERMINAL_STATUSES.has(row.status)) {
       return { outcome: "conflict" as const, status: row.status };
@@ -631,14 +703,30 @@ export const cancelTaskForOwner = mutation({
     });
     const updated = { ...row, status: "cancelled" as const, updatedAt: now };
     await recordTaskAudit(ctx, row, "cancel", "allowed", now - row.createdAt);
-    return { outcome: "cancelled" as const, task: descriptor(updated) };
+    return {
+      outcome: "cancelled" as const,
+      task: descriptor(updated),
+      executor: row.executor,
+    };
   },
 });
 
 const submitInputResultValidator = v.union(
-  v.object({ outcome: v.literal("accepted"), task: taskDescriptorValidator }),
-  v.object({ outcome: v.literal("duplicate"), task: taskDescriptorValidator }),
-  v.object({ outcome: v.literal("cancelled"), task: taskDescriptorValidator }),
+  v.object({
+    outcome: v.literal("accepted"),
+    task: taskDescriptorValidator,
+    executor: executorField,
+  }),
+  v.object({
+    outcome: v.literal("duplicate"),
+    task: taskDescriptorValidator,
+    executor: executorField,
+  }),
+  v.object({
+    outcome: v.literal("cancelled"),
+    task: taskDescriptorValidator,
+    executor: executorField,
+  }),
   v.object({ outcome: v.literal("not_found") }),
   v.object({ outcome: v.literal("conflict"), status: taskStatusValidator }),
   v.object({ outcome: v.literal("mismatch") }),
@@ -655,7 +743,7 @@ const submitInputResultValidator = v.union(
 
 /**
  * True when `value` is a non-empty response map whose every entry carries
- * `action: "cancel"` — the shape that cancels a task instead of resuming
+ * `action: "cancel"`: the shape that cancels a task instead of resuming
  * it, and therefore the only shape whose replay is a cancel replay.
  */
 function isAllCancel(value: unknown): boolean {
@@ -753,11 +841,15 @@ export const submitInputResponsesForOwner = mutation({
       safeStableStringify(row.inputResponses) ===
         safeStableStringify(args.inputResponses)
     ) {
-      return { outcome: "cancelled" as const, task: descriptor(row) };
+      return {
+        outcome: "cancelled" as const,
+        task: descriptor(row),
+        executor: row.executor,
+      };
     }
     // Idempotent duplicate: the same responses for the round still pending
     // were already applied, so the status has moved on to `working`. Any
-    // other TERMINAL row is deliberately not treated as a duplicate —
+    // other TERMINAL row is deliberately not treated as a duplicate:
     // "your answers were accepted" would paper over the fact that the
     // task has already produced an outcome, which the client must see as
     // a conflict.
@@ -768,7 +860,11 @@ export const submitInputResponsesForOwner = mutation({
       safeStableStringify(row.inputResponses) ===
         safeStableStringify(args.inputResponses)
     ) {
-      return { outcome: "duplicate" as const, task: descriptor(row) };
+      return {
+        outcome: "duplicate" as const,
+        task: descriptor(row),
+        executor: row.executor,
+      };
     }
     if (row.status !== "input_required") {
       return { outcome: "conflict" as const, status: row.status };
@@ -826,6 +922,7 @@ export const submitInputResponsesForOwner = mutation({
     return {
       outcome: cancelled ? ("cancelled" as const) : ("accepted" as const),
       task: descriptor(updated),
+      executor: row.executor,
     };
   },
 });
@@ -871,12 +968,22 @@ const completeResultValidator = v.union(
  * workflow. Only non-terminal tasks can complete; a cancel that raced
  * ahead wins (`"conflict"`), so a cancelled task never flips back to a
  * success. An oversized result fails the task instead of storing a row
- * the client could never fetch within limits — reported as
+ * the client could never fetch within limits: reported as
  * `"result_too_large"`, NOT `"finalized"`, because the caller's work
  * succeeded while the client will be served an error.
  */
 export const completeTask = mutation({
-  args: { taskId: v.string(), result: v.any() },
+  args: {
+    taskId: v.string(),
+    /**
+     * The tool's own return value, NOT a `CallToolResult`. The envelope a
+     * client polls is derived from this plus the two flags below, so the
+     * value is stored exactly once.
+     */
+    result: v.any(),
+    /** The call ran and reported a failure: becomes `isError` on the wire. */
+    isError: v.optional(v.boolean()),
+  },
   returns: completeResultValidator,
   handler: async (ctx, args) => {
     const row = await getRow(ctx, args.taskId);
@@ -887,6 +994,19 @@ export const completeTask = mutation({
     // outcome no one can fetch. Treat expiry as gone.
     if (isExpired(row, now)) return "not_found";
     if (TERMINAL_STATUSES.has(row.status)) return "conflict";
+    // Whether the derived envelope carries `structuredContent` is a fact
+    // about the TOOL, so read it here rather than trusting a caller to
+    // pass it: a host executor that forgot the flag would leave
+    // `tools/list` advertising an `outputSchema` while `tasks/get` served
+    // no structured value, which is a spec violation for a validating
+    // client and silent for everyone else. One read per completion, not
+    // per poll.
+    const tool = (await ctx.db
+      .query("tools")
+      .withIndex("by_name", (q: any) => q.eq("name", row.toolName))
+      .unique()) as { outputSchema?: unknown } | null;
+    const structured =
+      args.isError !== true && tool?.outputSchema !== undefined;
     if (exceeds(args.result, TASK_MAX_RESULT_BYTES)) {
       const error = {
         code: -32000,
@@ -907,12 +1027,57 @@ export const completeTask = mutation({
       );
       return "result_too_large";
     }
+    // Measure what a poll will materialize, once, while there is still a
+    // caller to answer. Unreachable for a value inside the cap above, so a
+    // hit means the bound in `callToolResult` needs revisiting rather than
+    // that the caller did anything wrong.
+    if (
+      exceeds(
+        callToolResult(args.result, structured, args.isError === true),
+        TASK_MAX_DERIVED_RESULT_BYTES,
+      )
+    ) {
+      const error = {
+        code: -32000,
+        message: `Task result does not fit a readable CallToolResult (over ${TASK_MAX_DERIVED_RESULT_BYTES} serialized bytes)`,
+      };
+      await ctx.db.patch("tasks", row._id, {
+        status: "failed",
+        error,
+        updatedAt: now,
+      });
+      await recordTaskAudit(
+        ctx,
+        row,
+        "fail",
+        "error",
+        now - row.createdAt,
+        error,
+      );
+      return "result_too_large";
+    }
     await ctx.db.patch("tasks", row._id, {
       status: "completed",
       result: args.result,
+      ...(args.isError === true ? { resultIsError: true } : {}),
+      ...(structured ? { resultStructured: true } : {}),
       updatedAt: now,
     });
-    await recordTaskAudit(ctx, row, "complete", "allowed", now - row.createdAt);
+    // A completed call that reported a failure is a business error, and it
+    // must not read as a clean success in the audit log: for a
+    // host-executed task this is the ONLY row (there is no
+    // `dispatch.runTool` tool row), so a declined destructive write would
+    // otherwise be indistinguishable from an approved one. Only the flag
+    // and a code travel; the payload contract stands.
+    const resultIsError = args.isError === true;
+    await recordTaskAudit(
+      ctx,
+      row,
+      "complete",
+      resultIsError ? "error" : "allowed",
+      now - row.createdAt,
+      resultIsError ? { code: -32000 } : undefined,
+    );
     return "finalized";
   },
 });
@@ -1049,7 +1214,7 @@ async function failScheduledTask(
  * a deploy or restart between creation and execution does not lose the
  * task. The invocation itself goes through `dispatch.runTool`, so a
  * task-run tool is identical to a synchronous one in identity injection
- * and error sanitization, and — importantly — produces the same
+ * and error sanitization, and (importantly) produces the same
  * `entryType: "tool"` audit row. (Redaction is moot here: `taskSupport`
  * is incompatible with `metadata.auditArgs`, so a task-run tool always
  * audits its arguments verbatim.) The task lifecycle
@@ -1096,6 +1261,7 @@ export const executeScheduledTask = action({
       | {
           kind: "query" | "mutation" | "action";
           identityArg?: string;
+          outputSchema?: unknown;
           mrtrArgs?: { idempotencyKey: string };
           mrtrGated?: boolean;
           taskSupport?: boolean;
@@ -1198,7 +1364,7 @@ export const executeScheduledTask = action({
     // failure needs no catch here. The `runAction` boundary itself can
     // still reject (registry read, size limits, timeout, transient
     // infrastructure), and that rejection can land after a mutation tool
-    // committed — hence the deliberately ambiguous audit text.
+    // committed, hence the deliberately ambiguous audit text.
     let dispatched: Awaited<ReturnType<typeof ctx.runAction>>;
     try {
       dispatched = await ctx.runAction(api.dispatch.runTool, {
@@ -1224,62 +1390,176 @@ export const executeScheduledTask = action({
       return null;
     }
     if (!dispatched.ok) {
-      // runTool already wrote the `entryType: "tool"` audit row, honouring
-      // the tool's `metadata.auditErrorMessage` setting. The task
-      // lifecycle row keeps its no-payload contract and records only the
-      // error code, so an opted-out message can't leak through it.
-      await fail(dispatched.error);
+      // A TOOL EXECUTION error is a *successful* call whose result says
+      // `isError: true`, which is what lets the model reason about it and
+      // retry, and is how the same tool answers synchronously (MCP
+      // 2025-06-18 §tools/call). Reporting it as a failed task would give
+      // a task-run tool a different contract from an inline one and hide a
+      // business error behind a transport-shaped failure. `runTool`
+      // already wrote the `entryType: "tool"` audit row honouring
+      // `metadata.auditErrorMessage`; the task lifecycle row keeps its
+      // no-payload contract either way.
+      //
+      // Enumerate what may be laundered into a result rather than what may
+      // not: `runTool` returns -32000 for anything the tool itself threw
+      // (including its arg-validator), -32602 for an unknown tool, and
+      // -32001 when a tool that needs a caller has none. Only the first is
+      // a call that ran. The other two are refusals, and this is where the
+      // task path is deliberately STRICTER than the inline one, which
+      // reports -32001 as a tool result: a queued call cannot re-challenge
+      // the caller, so it fails rather than reporting a refusal as a call
+      // that ran. A code added later defaults to failing the task too.
+      if (dispatched.error.code !== -32000) {
+        await fail(dispatched.error);
+        return null;
+      }
+      await finalize(ctx, args.taskId, task.toolName, dispatched.error.message, {
+        isError: true,
+      });
       return null;
     }
-    const data = dispatched.data;
-    try {
-      const outcome = await ctx.runMutation(api.tasks.completeTask, {
-        taskId: args.taskId,
-        result: data ?? null,
-      });
-      if (outcome === "conflict") {
-        // The owner cancelled while the tool was executing; cancel wins,
-        // but a mutation tool's side effects have already committed.
-        // Leave the operator a trace of the discarded result.
-        console.warn(
-          "[mcp-gateway] scheduled task finished after cancellation; the " +
-            "tool's committed side effects are not rolled back and its " +
-            "result was discarded",
-          args.taskId,
-          task.toolName,
-        );
-      } else if (outcome === "result_too_large") {
-        // The tool succeeded; the task was failed because its result
-        // could not be stored. The client sees an error, so make the
-        // discrepancy visible to whoever has to explain it.
-        console.error(
-          "[mcp-gateway] scheduled task succeeded but its result exceeded " +
-            "the storable size; the task was failed and the result discarded",
-          args.taskId,
-          task.toolName,
-        );
-      } else if (outcome === "not_found") {
-        console.error(
-          "[mcp-gateway] scheduled task row disappeared before completion; " +
-            "the tool result was discarded",
-          args.taskId,
-          task.toolName,
-        );
-      }
-    } catch (err) {
-      // The tool succeeded but completion could not be recorded. Do NOT
-      // mark the task failed (that would misreport committed work); the
-      // row is bounded by its TTL.
+    // Fail an oversized value here as well as in `completeTask`, so the
+    // log names the tool and says plainly that the work committed.
+    if (exceeds(dispatched.data, TASK_MAX_RESULT_BYTES)) {
       console.error(
-        "[mcp-gateway] failed to record scheduled task completion; the " +
-          "task will stay working until its TTL expires",
+        "[mcp-gateway] the tool SUCCEEDED and its side effects committed, " +
+          "but its result exceeds the documented size; the task is failed " +
+          "and the result discarded",
         args.taskId,
-        err,
+        task.toolName,
       );
+      await fail({
+        code: -32000,
+        message: `Task result exceeds ${TASK_MAX_RESULT_BYTES} serialized bytes`,
+      });
+      return null;
     }
+    // Store the value and the shape flags; the envelope is derived when a
+    // client polls. Nothing between this check and the write can inflate
+    // the row, so the documented cap above is the real limit.
+    await finalize(ctx, args.taskId, task.toolName, dispatched.data, {});
     return null;
   },
 });
+
+/**
+ * The MCP `CallToolResult` for a task, built from the stored value when
+ * the task is read: the text-JSON `content` block every client
+ * understands, `structuredContent` when the tool advertises an
+ * `outputSchema` (which spec-compliant clients prefer), and `isError`.
+ *
+ * Two deliberate differences from the handler's synchronous builder:
+ *
+ *   - The JSON is **compact**, not 2-space pretty-printed. Indentation
+ *     multiplies with nesting depth (measured: 3.7x at one level, 98x at
+ *     95), and unlike the synchronous path this envelope is materialized
+ *     inside a Convex query on every poll, so an inflated one would push
+ *     the query past its return limit and make a task that COMPLETED
+ *     permanently unreadable, with no code path in a position to say so.
+ *     Compact keeps it at 2.0x to 2.7x measured, and bounded by
+ *     construction: the text copy is at most 2x the value (every byte
+ *     escaped) plus one copy under `structuredContent`, so a value inside
+ *     `TASK_MAX_RESULT_BYTES` derives to at most ~768 KiB, inside
+ *     Convex's 1 MiB. Formatting is cosmetic; nobody reads a polled
+ *     result as raw JSON by eye.
+ *   - `structuredContent` is never emitted alongside `isError`, matching
+ *     the synchronous path: an error result carries a message, not a typed
+ *     value to validate against the tool's `outputSchema`.
+ */
+function callToolResult(
+  value: unknown,
+  withStructured: boolean,
+  isError: boolean,
+): Record<string, unknown> {
+  return {
+    content: [
+      {
+        type: "text",
+        // A string passes through as itself (the sanitized error message);
+        // anything else is serialized. `String(value)` here would render a
+        // structured error payload as "[object Object]", and the new
+        // `completeTask` contract invites hosts to pass exactly that.
+        text:
+          typeof value === "string" ? value : JSON.stringify(value ?? null),
+      },
+    ],
+    ...(withStructured && !isError
+      ? { structuredContent: value ?? null }
+      : {}),
+    isError,
+  };
+}
+
+/**
+ * Store a task's `CallToolResult` and narrate every way the store can
+ * fail to land, since a scheduled action is at-most-once and none of
+ * these is visible anywhere else.
+ */
+async function finalize(
+  ctx: { runMutation: (ref: any, args: any) => Promise<any> },
+  taskId: string,
+  toolName: string,
+  /** The tool's value, or its sanitized error message when `isError`. */
+  result: unknown,
+  /**
+   * Shape flags stored with the value. `isError` also picks the wording
+   * below, and the wording is the whole value of these logs: telling an
+   * operator that "the tool's committed side effects are not rolled back"
+   * when the tool actually threw sends them hunting for writes that never
+   * happened.
+   */
+  flags: { isError?: boolean },
+): Promise<void> {
+  const isError = flags.isError === true;
+  const what = isError ? "error" : "result";
+  try {
+    const outcome = await ctx.runMutation(api.tasks.completeTask, {
+      taskId,
+      result,
+      ...(flags.isError === true ? { isError: true } : {}),
+    });
+    if (outcome === "conflict") {
+      // The owner cancelled while the tool was executing; cancel wins. For
+      // a successful run a mutation tool's side effects have already
+      // committed, which is what an operator needs to know.
+      console.warn(
+        isError
+          ? "[mcp-gateway] scheduled task reported an error after " +
+              "cancellation; the cancel stands and the error was discarded"
+          : "[mcp-gateway] scheduled task finished after cancellation; the " +
+              "tool's committed side effects are not rolled back and its " +
+              "result was discarded",
+        taskId,
+        toolName,
+      );
+    } else if (outcome === "result_too_large") {
+      console.error(
+        `[mcp-gateway] scheduled task's ${what} exceeded the storable ` +
+          "size; the task was failed and it was discarded",
+        taskId,
+        toolName,
+      );
+    } else if (outcome === "not_found") {
+      console.error(
+        `[mcp-gateway] scheduled task row disappeared before completion; ` +
+          `the tool ${what} was discarded`,
+        taskId,
+        toolName,
+      );
+    }
+  } catch (err) {
+    // The outcome could not be recorded. Do NOT mark the task failed on a
+    // success (that would misreport committed work); the row is bounded by
+    // its TTL either way.
+    console.error(
+      `[mcp-gateway] failed to record the scheduled task's ${what}; the ` +
+        "task will stay working until its TTL expires",
+      taskId,
+      toolName,
+      err,
+    );
+  }
+}
 
 /**
  * Drop expired task rows. Bounded per call like every other prune in
@@ -1360,7 +1640,7 @@ export const pruneTasks = mutation({
  * `by_ownerSubject` index; the host re-invokes with
  * `cursorCreationTime = cursor` until `cursor` is `null`. `cancelled` may
  * legitimately be `0` for a page whose rows were all terminal while later
- * pages still hold live tasks, which is why the cursor — not the count —
+ * pages still hold live tasks, which is why the cursor, not the count,
  * terminates the loop. Returns what was cancelled this batch. Terminal tasks are left as-is
  * so their outcome stays observable. The host still cancels any durable
  * execution (workflow run) itself.
@@ -1386,7 +1666,7 @@ export const cancelPendingTasksForOwner = mutation({
      * Rows examined this page, whatever their status or scope. Lets the
      * caller tell "this subject had nothing pending" from "a `scope`
      * argument matched nothing", which are otherwise the same
-     * `cancelled: 0` — and the second one means a revoked subject's tasks
+     * `cancelled: 0`, and the second one means a revoked subject's tasks
      * are still armed.
      */
     scanned: v.number(),

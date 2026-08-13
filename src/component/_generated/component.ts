@@ -515,6 +515,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "internal",
         { ownerSubject: string; scope?: string; taskId: string },
         | {
+            executor: "component" | "host";
             outcome: "cancelled";
             task: {
               createdAt: number;
@@ -535,6 +536,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             };
           }
         | {
+            executor: "component" | "host";
             outcome: "already_cancelled";
             task: {
               createdAt: number;
@@ -569,7 +571,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       completeTask: FunctionReference<
         "mutation",
         "internal",
-        { result: any; taskId: string },
+        { isError?: boolean; result: any; taskId: string },
         "finalized" | "not_found" | "conflict" | "result_too_large",
         Name
       >;
@@ -700,6 +702,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           taskId: string;
         },
         | {
+            executor: "component" | "host";
             outcome: "accepted";
             task: {
               createdAt: number;
@@ -720,6 +723,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             };
           }
         | {
+            executor: "component" | "host";
             outcome: "duplicate";
             task: {
               createdAt: number;
@@ -740,6 +744,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             };
           }
         | {
+            executor: "component" | "host";
             outcome: "cancelled";
             task: {
               createdAt: number;
