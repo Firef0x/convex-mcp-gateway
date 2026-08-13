@@ -304,7 +304,7 @@ export type McpTasksOptions = {
    * `authorize` policies over the same identity namespace. The task table
    * is component-wide and `authorize` runs only at creation, so without a
    * scope a caller permitted on a broad mount can start a privileged task
-   * there and collect its result through a narrower one — bypassing the
+   * there and collect its result through a narrower one: bypassing the
    * narrower mount's policy without any bug in it.
    *
    * A sealed MRTR `requestState` is not bound to the mount, so two mounts
@@ -516,7 +516,7 @@ export interface HandleMcpRequestOptions {
    * built-in scheduled executor (durable across restarts, no retries) and
    * completes or fails the task. Hosts that need retry policy, delays,
    * or `input_required` rounds supply `execute` to start their own
-   * durable execution — typically a `@convex-dev/workflow` run — and
+   * durable execution (typically a `@convex-dev/workflow` run), and
    * finalize via `gateway.completeTask` / `failTask` /
    * `requireTaskInput`. See docs/tasks.md.
    */
@@ -3410,6 +3410,30 @@ async function handlePost(
           // Use the real 401 + WWW-Authenticate challenge (same as the
           // authorize denial path) so browser clients begin OAuth
           // discovery instead of seeing an unactionable 200.
+          //
+          // Audited like every other refusal on this path: this branch
+          // sits before `safeAuthorize`, so without the row an anonymous
+          // caller could probe which tools accept tasks and leave no
+          // trace at all.
+          try {
+            await ctx.runMutation(component.dispatch.recordAuthDenial, {
+              name: tool.name,
+              args,
+              auditIdentitySubject: null,
+              outcome: "denied",
+              errorCode: UNAUTHORIZED,
+              errorMessage: "Task-augmented calls require authentication",
+              durationMs: 0,
+            });
+          } catch (err) {
+            // Audit must never change the outcome (see safeRecordAudit in
+            // dispatch.ts); log so a recurring write failure is visible.
+            console.error(
+              "[mcp-gateway] failed to record anonymous task denial",
+              tool.name,
+              err,
+            );
+          }
           raw = await requireAuthChallenge(ctx, request, component, message.id);
           body = "";
           break;
@@ -4123,7 +4147,7 @@ async function handlePost(
       //     deferral of one: it returns a handle INSTEAD of dispatching,
       //     and once the row exists the executor runs the tool with no
       //     further gate. So it must be covered by the same
-      //     `resolution: "dispatched"` claim as a synchronous dispatch —
+      //     `resolution: "dispatched"` claim as a synchronous dispatch;
       //     otherwise a task-augmented continuation of a chain another
       //     branch already settled (a decline, say) would create a row
       //     that quietly runs the tool. A lost claim broke above with
@@ -4153,7 +4177,7 @@ async function handlePost(
         // that shortens `ttlMs` below the continuation's own lifetime gets
         // the reuse lookup to miss (the row is expired, so it is not
         // reusable) and every replay mints another task and another tool
-        // run from one chain — the exact duplication the shared chain key
+        // run from one chain: the exact duplication the shared chain key
         // exists to prevent.
         const ttlMs =
           continuation !== null
@@ -4215,7 +4239,7 @@ async function handlePost(
         // reports: the row is host-executed, non-terminal, and was never
         // marked started, so its original request died between creating it
         // and getting execution going. This retry is that row's only
-        // chance — skipping it would hand back a handle nothing advances.
+        // chance, skipping it would hand back a handle nothing advances.
         const mustStart =
           created.reused !== true || created.startPending === true;
         if (created.startPending === true) {
@@ -4575,15 +4599,16 @@ async function handlePost(
               err,
             );
           }
-        } else {
+        } else if (cancelled.executor === "host") {
           // The row is cancelled either way, so the wire answer is
-          // correct — but if this task is host-executed, nothing here can
-          // stop the run. Silence would make a misconfigured mount (or a
-          // task created on a different mount, since the task table is
-          // component-wide) indistinguishable from a working one.
+          // correct, but nothing here stops the durable run. Keyed on the
+          // ROW's executor, not this mount's config: the task table is
+          // component-wide, so a host-executed task can legitimately be
+          // cancelled through a mount that runs the built-in executor and
+          // has no hook, which is exactly the case worth reporting.
           console.warn(
-            "[mcp-gateway] task cancelled on a mount with no onCancel hook; " +
-              "a host-executed run will not be stopped",
+            "[mcp-gateway] host-executed task cancelled on a mount with no " +
+              "onCancel hook; the durable run will not be stopped",
             taskId,
             cancelled.task.toolName,
           );
@@ -4663,11 +4688,11 @@ async function handlePost(
                 err,
               );
             }
-          } else {
+          } else if (submitted.executor === "host") {
             console.warn(
-              "[mcp-gateway] input responses cancelled the task on a mount " +
-                "with no onCancel hook; a host-executed run will not be " +
-                "stopped",
+              "[mcp-gateway] input responses cancelled a host-executed task " +
+                "on a mount with no onCancel hook; the durable run will not " +
+                "be stopped",
               taskId,
               submitted.task.toolName,
             );
@@ -4705,14 +4730,17 @@ async function handlePost(
                 err,
               );
             }
-          } else {
+          } else if (submitted.executor === "host") {
             // Storing the responses is not the point: resuming the paused
             // execution is, and only the hook can do that. The client sees
             // success either way, so this is the operator's only signal.
+            // Keyed on the ROW: only a host-executed task can be paused,
+            // and it can be answered through any mount that resolves its
+            // owner, including one with no hook to resume it.
             console.warn(
-              "[mcp-gateway] tasks/update accepted input responses on a " +
-                "mount with no onInputResponses hook; a host-executed task " +
-                "will not resume",
+              "[mcp-gateway] accepted input responses for a host-executed " +
+                "task on a mount with no onInputResponses hook; the paused " +
+                "task will not resume",
               taskId,
               submitted.task.toolName,
             );

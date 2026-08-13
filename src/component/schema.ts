@@ -328,7 +328,7 @@ export default defineSchema({
    * ever returned on the wire, and neither appears in an
    * `entryType: "task"` audit row. The `entryType: "tool"` row that
    * `dispatch.runTool` writes for the run itself DOES carry the
-   * arguments, verbatim — a `taskSupport` tool may not set
+   * arguments, verbatim: a `taskSupport` tool may not set
    * `metadata.auditArgs`, precisely so that this is unambiguous.
    *
    * `idempotencyKey` is issued once per task; the executing tool persists
@@ -348,7 +348,19 @@ export default defineSchema({
       v.object({ subject: v.string(), claims: v.optional(v.any()) }),
     ),
     status: taskStatusValidator,
+    /**
+     * The tool's own return value. The MCP `CallToolResult` a client polls
+     * is derived from this and the two flags below when the task is read,
+     * never stored: an envelope would keep the value twice over (escaped
+     * inside `content[0].text` and again as `structuredContent`), so a
+     * legal 256 KiB result could serialize past Convex's document limit
+     * after the tool had already committed its writes.
+     */
     result: v.optional(v.any()),
+    /** The call ran and reported a failure: becomes `isError` on the wire. */
+    resultIsError: v.optional(v.boolean()),
+    /** The tool declares an `outputSchema`, so derive `structuredContent`. */
+    resultStructured: v.optional(v.boolean()),
     error: v.optional(v.object({ code: v.number(), message: v.string() })),
     inputRequests: v.optional(v.any()),
     inputResponses: v.optional(v.any()),
@@ -425,10 +437,11 @@ export default defineSchema({
    * outcome, duration, and optionally redacted args. Resource rows
    * capture operation metadata (resource URI, list/read, outcome,
    * duration) but never resource contents. Task rows capture the task
-   * id, operation, tool name, and owner subject but never task
-   * payloads. `identitySubject` is supplied by the host after resolving
-   * auth at the HTTP boundary; component code never reads identity
-   * directly.
+   * id, operation, tool name, and owner subject but never task payloads;
+   * a task run by the built-in executor also writes the ordinary tool row
+   * for the call itself. `identitySubject` is supplied by the host after
+   * resolving auth at the HTTP boundary; component code never reads
+   * identity directly.
    */
   audit: defineTable({
     /**

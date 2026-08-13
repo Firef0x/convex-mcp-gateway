@@ -94,7 +94,7 @@ Ten tables, all owned by the component:
   updates are bound to the subject and (when set) the mount that created
   the task; expired, foreign, and out-of-scope ids answer exactly like
   unknown ones. Drained by `gateway.pruneTasks`, which deletes expired
-  rows whatever their status — the TTL is the execution deadline, not just
+  rows whatever their status: the TTL is the execution deadline, not just
   a retention window. See [tasks.md](./tasks.md).
 
 ## MCP Streamable HTTP transport
@@ -433,7 +433,7 @@ and are never returned on the wire, nor written to any
 `entryType: "task"` row: those carry lifecycle metadata only. A
 component-executed run dispatches through `dispatch.runTool`, so it also
 writes the ordinary `entryType: "tool"` row, which does record the
-arguments (verbatim — a `taskSupport` tool may not set
+arguments (verbatim, since a `taskSupport` tool may not set
 `metadata.auditArgs`). Every state-changing lifecycle transition writes a
 task row; idempotent no-ops deliberately write none.
 

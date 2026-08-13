@@ -1661,10 +1661,34 @@ export class McpGateway {
    * something other than the work you just committed, so check the
    * outcome rather than discarding it.
    */
-  async completeTask(ctx: RunMutationCtx, taskId: string, result: unknown) {
+  async completeTask(
+    ctx: RunMutationCtx,
+    taskId: string,
+    /**
+     * Your tool's own return value. Do NOT hand-build a `CallToolResult`:
+     * the gateway derives `content` / `structuredContent` / `isError` from
+     * this value when a client polls, so the row keeps the value exactly
+     * once and both executors converge on one wire shape. Whether the
+     * envelope carries `structuredContent` is read from the tool's own
+     * registration, not passed here: only you know whether your run
+     * failed, and only the registry knows whether the tool advertises an
+     * `outputSchema`.
+     */
+    result: unknown,
+    flags?: {
+      /**
+       * The call ran and reported a failure (a declined confirmation, a
+       * validation error). Surfaces as `isError: true` on a COMPLETED
+       * task, which is how the synchronous path reports the same thing;
+       * `failTask` is for the call never producing a result at all.
+       */
+      isError?: boolean;
+    },
+  ) {
     return await ctx.runMutation(this.component.tasks.completeTask, {
       taskId,
       result,
+      ...(flags?.isError === true ? { isError: true } : {}),
     });
   }
 

@@ -142,8 +142,14 @@ export const summary = query({
  * gateway-issued idempotency key around the write (see docs/tasks.md).
  */
 export const recount = mutation({
-  args: { failWith: v.optional(v.string()), failPlain: v.optional(v.string()) },
-  returns: v.object({ total: v.number() }),
+  args: {
+    failWith: v.optional(v.string()),
+    failPlain: v.optional(v.string()),
+    // Test hook: pads the result past the task result cap so the suite can
+    // exercise the oversized-result path.
+    padResult: v.optional(v.number()),
+  },
+  returns: v.object({ total: v.number(), pad: v.optional(v.string()) }),
   handler: async (ctx, args) => {
     // Test hooks: `failWith` exercises the deliberate (ConvexError)
     // channel, `failPlain` the accidental one, whose text must NOT reach
@@ -151,7 +157,12 @@ export const recount = mutation({
     if (args.failPlain) throw new Error(args.failPlain);
     if (args.failWith) throw new ConvexError(args.failWith);
     const invoices = await ctx.db.query("invoices").collect();
-    return { total: invoices.length };
+    return {
+      total: invoices.length,
+      ...(args.padResult !== undefined
+        ? { pad: "x".repeat(args.padResult) }
+        : {}),
+    };
   },
 });
 

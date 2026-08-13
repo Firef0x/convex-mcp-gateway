@@ -53,6 +53,41 @@ gateway.handleMcpRequest(ctx, request, {
   A completed task carries `result`; a failed one carries
   `error: { code, message }`; an `input_required` one carries
   `inputRequests`.
+
+  `result` is the **`CallToolResult` the same call would have returned
+  synchronously**: the text-JSON `content` block, `structuredContent` when
+  the tool declares an `outputSchema`, and `isError`. A client renders and
+  validates it exactly as it would a `tools/call` response, and the
+  example suite asserts the two are byte-identical for the same tool and
+  arguments.
+
+  The envelope is **derived when the task is read**, not stored. The row
+  keeps the tool's value once, plus two flags recorded at completion time
+  (whether the call reported an error, and whether the tool advertises an
+  `outputSchema`). Storing the envelope instead would keep the value twice
+  over, pretty-printed as text and again as `structuredContent`: measured
+  on a moderately nested value that is legal under the 256 KiB cap, that
+  is roughly a 7x inflation, so the tool would commit its writes and the
+  client would then be told the call failed, for a result the same tool
+  returns fine inline. Deriving also means a host executor gets the same
+  wire shape without hand-building it.
+
+  That parity also decides which failures are which. A tool that ran and
+  reported an error is a **completed** task whose result carries
+  `isError: true`, following the split in MCP 2025-06-18 §tools/call: the
+  model can read the message and retry. Reporting a business error as
+  `failed` would give a task-run tool a different contract from the same
+  tool called inline.
+
+  `failed` is reserved for the task never producing a result at all: an
+  unknown tool, a tool whose kind changed since creation, a tool no longer
+  eligible for task execution, a dispatch that never ran, an executor that
+  could not start, a result too large to store, and a tool that needs an
+  authenticated caller when the row has none. That last one is the single
+  place the task path is deliberately **stricter** than the inline one,
+  where the same condition surfaces as a tool result: a queued call cannot
+  re-challenge the caller, so it fails rather than reporting a refusal as
+  a call that ran.
 - `tasks/update` (`params.taskId`, mirrored in `Mcp-Name`) takes exactly
   one of:
   - `action: "cancel"`: cancels a non-terminal task. Idempotent; a task
@@ -71,7 +106,7 @@ gateway.handleMcpRequest(ctx, request, {
     been asked, omitting `inputRound` is itself rejected as stale, and a
     malformed one is rejected outright rather than treated as absent. The
     descriptor carries `inputRound` on every status once a round has been
-    asked — not only while input is pending — so a client that lost its
+    asked, not only while input is pending, so a client that lost its
     copy can always recover it with `tasks/get`.
 - Statuses: `working` → `input_required` ⇄ `working` →
   `completed` | `failed` | `cancelled`. Terminal states never change; a
@@ -93,7 +128,7 @@ server-side, defense in depth on top of the owner binding.
 ### Deferred execution runs with the identity captured at creation
 
 A task snapshots the resolved caller (`subject` + claims) at creation
-and injects it into `identityArg` tools — and re-runs the host's
+and injects it into `identityArg` tools, and re-runs the host's
 `authorize` for the tool only at creation, not at execution. So a
 deferred task executes with the creator's identity as it was when the
 task was created, which stays valid until the task's TTL even if the
@@ -110,8 +145,8 @@ cancel.
 
 The task table is component-owned, so it is shared by every
 `handleMcpRequest` mount on the same component, independent of which
-mount's catalog a task was created through. That is deliberate — it lets
-a durable execution started on one mount be finalized from anywhere —
+mount's catalog a task was created through. That is deliberate, it lets
+a durable execution started on one mount be finalized from anywhere,
 but it means a `tasks/update` only resumes a host-executed task if it
 reaches a mount whose `tasks.onInputResponses` hook can act on it.
 Sending the update to a different mount stores the responses durably and
@@ -125,7 +160,7 @@ Ownership alone is not enough when the gateway is mounted more than once.
 `authorize` runs when a task is created and never again on `tasks/get` /
 `tasks/update`, so a caller permitted on a mount with a broad tool set can
 start a privileged task there and collect its **result** through a mount
-whose policy would have refused the tool — bypassing that policy without
+whose policy would have refused the tool, bypassing that policy without
 any bug in it. The 128-bit random task id is the only other barrier, and
 ids leak (logs, proxies, the `Mcp-Name` header).
 
@@ -149,7 +184,7 @@ gateway.handleMcpRequest(ctx, request, {
 The scope is stored on the row and must match on every owner-facing read
 or update; a mismatch is answered exactly like an unknown task id, so
 scoping never reveals that another mount's task exists. The match is
-required in **both** directions — a scoped row is invisible to an
+required in **both** directions, a scoped row is invisible to an
 unscoped mount, and an unscoped row is invisible to a scoped one.
 
 Leaving `scope` unset keeps the pre-scope behaviour, so a single-mount
@@ -161,13 +196,13 @@ window, or accept that in-flight tasks finish unobservably.
 `gateway.cancelPendingTasksForOwner(ctx, subject)` deliberately ignores
 scope by default and sweeps every mount, because a revocation is about
 the subject rather than one mount. Pass a third `scope` argument to narrow
-it — and note that a narrowed sweep which cancels nothing while the
+it, and note that a narrowed sweep which cancels nothing while the
 subject does have rows is logged as a probable wrong scope, since
 `cancelled: 0` otherwise reads as "nothing was pending" while the revoked
 subject's tasks stay armed until their TTL.
 
 A sealed `requestState` is bound to the tool, the caller, and the
-arguments — **not** to the mount. Two mounts that share `mrtr.secret`
+arguments, **not** to the mount. Two mounts that share `mrtr.secret`
 therefore both accept the same continuation, and because their task rows
 are scope-isolated, each will own its own task for that chain. The
 side effect stays single (both runs receive the same chain key in
@@ -211,7 +246,7 @@ which is what the executor injects into the tool's `mrtrArgs`.
 
 **Creating a task claims the chain.** An MRTR chain resolves exactly once
 (see [architecture.md](./architecture.md#stateless-multi-round-trips-mrtr)), and
-creating a task *is* a resolution — it returns a handle instead of
+creating a task *is* a resolution, it returns a handle instead of
 dispatching, and once the row exists the executor runs the tool with no
 further gate. So the gateway claims the chain with
 `resolution: "dispatched"` before the row is created, exactly as it would
@@ -236,7 +271,7 @@ Details worth knowing:
 - If the original request created the row but died before its host
   executor started (the `execute` throw *and* its compensating `failTask`
   both failed), the replay starts execution instead of assuming the
-  original did — otherwise the client would poll a handle nothing ever
+  original did, otherwise the client would poll a handle nothing ever
   advances. The row records a start marker so the normal case still starts
   exactly once.
 - Reuse writes no audit row, so it is logged instead; a replay storm is
@@ -244,7 +279,7 @@ Details worth knowing:
 - If the start failed *and* was recorded (the ordinary case: the client got
   `-32603 Task failed to start` and the row is `failed`), replaying the
   continuation reuses that failed row and answers with a task handle whose
-  status is `failed` — the outcome of this request, but a different
+  status is `failed`, the outcome of this request, but a different
   response *shape* from the error the client first saw. A chain whose task
   failed to start cannot be revived; start a new call without
   `requestState`.
@@ -274,7 +309,7 @@ case is a tool reached on both the task and synchronous paths, which sees
 the same key either way, so an insert-if-absent keyed on it dedupes them
 (see **Idempotency** below). The subtler one is that a replayed
 task-augmented continuation normally reuses its task rather than creating
-a second one — but not across two mounts with different `tasks.scope`
+a second one, but not across two mounts with different `tasks.scope`
 values, where each mount legitimately owns its own task row for that
 chain. There, the shared key is what keeps the side effect single.
 
@@ -325,8 +360,10 @@ The example app ships this exact shape without the workflow dependency:
 the `/mcp-host-tasks/` mount in
 [example/convex/http.ts](../example/convex/http.ts) pauses
 `invoices_bulkMarkPaid` for confirmation via `requireTaskInput`, resumes
-in `onInputResponses`, and keys the side effect on the task's
-idempotency key in
+in `onInputResponses` (completing with the tool's own value, which the
+gateway wraps on read), sets its own `tasks.scope` so its
+tasks cannot be driven from the other mount, and keys the side effect on
+the task's idempotency key in
 [example/convex/invoices.ts](../example/convex/invoices.ts)
 (`bulkMarkPaidTask` + the `taskExecutions` table).
 
@@ -334,7 +371,7 @@ idempotency key in
 `completeTask`, and `failTask` all report outcomes rather than throwing.
 `requireTaskInput` answering anything but `"updated"` means the task never
 entered `input_required`, so nothing will ever ask the owner and nothing
-will ever run — throw from `execute` (the gateway then fails the task and
+will ever run, throw from `execute` (the gateway then fails the task and
 returns a clean error) instead of returning normally, which would leave
 the client polling `working` until the TTL. `completeTask` answering
 `"result_too_large"` means your work committed but the task was **failed**
@@ -346,7 +383,7 @@ what happened, so log it.
 The task row is committed first, then `execute` runs in the same HTTP
 action. A throw is handled (the gateway fails the task, or hands back the
 handle if `execute` had already advanced it), but the action being killed
-outright — timeout, deploy, isolate death — is not: the row stays
+outright, timeout, deploy, isolate death, is not: the row stays
 `working` until its TTL with nothing started. Keep `execute` short and
 prefer a single `ctx.runMutation` that enqueues the real work, so the
 window is as small as possible. The built-in executor has no such window:
@@ -362,8 +399,27 @@ or cancelling an already-cancelled run must therefore be safe.
 
 Inside the workflow, finalize through the trusted gateway APIs:
 
-- `gateway.completeTask(ctx, taskId, result)`
-- `gateway.failTask(ctx, taskId, { code, message }, auditErrorMessage?)`
+- `gateway.completeTask(ctx, taskId, value, flags?)`. Pass your tool's own
+  value, not a `CallToolResult`: the gateway derives the envelope on read,
+  so both executors converge on one wire shape. `flags.isError` marks a
+  call that ran and reported a failure; whether the envelope carries
+  `structuredContent` is read from the tool's own registration rather than
+  passed here, so a host cannot leave `tools/list` advertising an
+  `outputSchema` that `tasks/get` then fails to honour.
+- `gateway.failTask(ctx, taskId, { code, message }, auditErrorMessage?)`.
+  For the task *itself* failing: `failed` tells a client the call never
+  produced a result, and it cannot act on a message it is told to
+  disregard. A tool that ran and failed (a validation error, a quota
+  refusal) should `completeTask` with `isError: true` instead.
+
+  A **declined confirmation is neither.** The negotiation succeeded and its
+  outcome was negative, so the example completes the task with a plain
+  result and no `isError`, matching how the synchronous MRTR path reports
+  the same decline via `completeCall`. Note the consequence for auditing: a
+  completion that is not marked as an error records `outcome: "allowed"`,
+  so if you need declines distinguishable in the audit log, record that
+  yourself, exactly as you would on the synchronous path where a decline
+  never reaches the audit at all.
 - `gateway.requireTaskInput(ctx, taskId, inputRequests)` to pause for
   MRTR-shaped input; the accepted responses come back through
   `onInputResponses` (and stay readable on the row via
@@ -381,11 +437,13 @@ must persist it around the effect (insert-if-absent keyed on it) so a
 retry recognizes prior work.
 
 A task created from a verified MRTR continuation inherits that chain's
-idempotency key instead of minting a new one, so a client that replays
-the continuation — which legitimately produces a *second* task row —
-still dedupes inside the tool. For a tool that reserves `mrtrArgs`, the
-executor injects the task row's key into the declared argument, exactly
-as the synchronous MRTR path does.
+idempotency key instead of minting a new one. That is what lets a
+replayed continuation be answered with the task it already created rather
+than a sibling, and what keeps the side effect single in the one case
+where a sibling is still legitimate (two mounts with different
+`tasks.scope`). For a tool that reserves `mrtrArgs`, the built-in executor
+injects the task row's key into the declared argument, exactly as the
+synchronous MRTR path does.
 
 ## Retention and size limits
 
@@ -396,7 +454,7 @@ as the synchronous MRTR path does.
 - The TTL is an **execution deadline**, not only a retention window.
   Expiry makes a task unobservable to its owner and makes the trusted
   finalizers answer `not_found`, and the prune deletes expired rows
-  whatever their status — including a `working` one. Pick a `ttlMs` that
+  whatever their status, including a `working` one. Pick a `ttlMs` that
   covers the tool's worst-case runtime plus however long the client may
   take to answer an `input_required` round; the lifecycle audit rows
   (never pruned here) stay as the record either way.
@@ -411,7 +469,7 @@ as the synchronous MRTR path does.
 
   This is a **concurrency** bound and nothing more. A task stops counting
   the moment it reaches `completed` / `failed` / `cancelled`, while its
-  row — and its stored arguments and result — persist until the TTL. So a
+  row, and its stored arguments and result, persist until the TTL. So a
   caller that loops short tasks stays under the cap indefinitely: it will
   hold one live task at a time and any number of retained ones. The cap
   will never be the thing that stops it.
@@ -429,14 +487,18 @@ as the synchronous MRTR path does.
   overflow. An oversized result fails the task (the client sees a clear
   error) instead of storing a row the transport could never deliver;
   `completeTask` reports that as `"result_too_large"` so the caller knows
-  its committed work is not what the client will see.
+  its committed work is not what the client will see. The 256 KiB applies
+  to the tool's own value, which is exactly what the row stores: the
+  `CallToolResult` is derived on read, so nothing inflates the row between
+  the check and the write, and the per-task budget stays inside Convex's
+  1 MiB document limit (256 + 64 + 64 + 64 + 8 KiB).
 
 ## Audit
 
 Every state-changing lifecycle transition writes an `entryType: "task"`
 audit row (`create`, `input`, `cancel`, `complete`, `fail`) carrying the
 task id, tool name, owner subject, and the task's age at that transition
-(`durationMs`, `0` on `create` — it is an age, not an operation latency),
+(`durationMs`, `0` on `create`, it is an age, not an operation latency),
 never task payloads. Idempotent no-ops (`already_cancelled`, a duplicate
 submission) deliberately write nothing. Pruning a task that never reached
 a terminal state writes the `fail` row it never got, so the trail always
@@ -445,7 +507,7 @@ shows how a task ended rather than stopping at `create`. Polling
 
 A **component-executed** run additionally writes the ordinary
 `entryType: "tool"` row, because it dispatches through the same
-`dispatch.runTool` path as a synchronous call — same identity attribution
+`dispatch.runTool` path as a synchronous call, same identity attribution
 and same error-text policy. That row carries the arguments verbatim;
 redaction is not available here, since `taskSupport` is incompatible with
 `metadata.auditArgs` (see **Enabling tasks**). Filter with

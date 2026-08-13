@@ -3340,7 +3340,18 @@ describe("MCP tasks (modern, e2e)", () => {
 
     const done = await getTask(t, taskId);
     expect(done.result?.task.status).toBe("completed");
-    expect(done.result?.task.result).toEqual({ total: 2 });
+    // The stored result is the same CallToolResult a synchronous call
+    // returns: renderable `content`, `structuredContent` because the tool
+    // declares an outputSchema, and `isError`.
+    expect(done.result?.task.result).toEqual({
+      // Compact rather than pretty-printed: the task envelope is derived
+      // inside a Convex query on every poll, where indentation that
+      // multiplies with nesting depth would eventually make a completed
+      // task unreadable.
+      content: [{ type: "text", text: '{"total":2}' }],
+      structuredContent: { total: 2 },
+      isError: false,
+    });
 
     // Lifecycle audit: create + complete, no payloads.
     const entries = await t.run(async (ctx) =>
@@ -3381,7 +3392,7 @@ describe("MCP tasks (modern, e2e)", () => {
         ctx.db.insert("invoices", { status: "open", amount: 7 }),
       );
 
-      // Round 1: the hook asks for confirmation. No task row is created —
+      // Round 1: the hook asks for confirmation. No task row is created:
       // MRTR owns the negotiation until it approves.
       const first = (await (
         await modernRpc(
@@ -3454,6 +3465,14 @@ describe("MCP tasks (modern, e2e)", () => {
       await t.finishAllScheduledFunctions(vi.runAllTimers);
       const done = await getTask(t, taskId);
       expect(done.result?.task.status).toBe("completed");
+      // This tool declares no `returns`, so it advertises no outputSchema
+      // and its task result must carry no `structuredContent` either. The
+      // synchronous path is asserted the same way elsewhere; that symmetry
+      // is the whole point of wrapping in the executor.
+      const envelope = done.result!.task.result as Record<string, unknown>;
+      expect(envelope.isError).toBe(false);
+      expect(Array.isArray(envelope.content)).toBe(true);
+      expect("structuredContent" in envelope).toBe(false);
 
       // The mutation is MCP-unaware: it only ever sees `continuationKey`.
       // That value must be the TASK ROW's key, or a replayed continuation
@@ -3468,6 +3487,107 @@ describe("MCP tasks (modern, e2e)", () => {
     }
   });
 
+  test("a value that would inflate when wrapped survives the executor", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = newTest();
+      // End to end through the real executor, which is the path that had no
+      // coverage when the previous design stored the envelope: a legal value
+      // whose wrapped form is several times larger must complete, not fail
+      // after the tool has committed.
+      const taskId = await startRecountTask(t, { padResult: 200 * 1024 });
+      await t.finishAllScheduledFunctions(vi.runAllTimers);
+      const done = await getTask(t, taskId);
+      expect(done.result?.task.status).toBe("completed");
+      const envelope = done.result!.task.result as {
+        content: Array<{ text: string }>;
+        structuredContent: { pad?: string };
+      };
+      expect(envelope.structuredContent.pad).toHaveLength(200 * 1024);
+      expect(envelope.content[0]!.text.length).toBeGreaterThan(200 * 1024);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("an oversized tool value fails the task, naming the documented cap", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = newTest();
+      // 256 KiB is the cap on the TOOL'S value. Measuring the envelope
+      // against it instead would reject legal results, since the envelope
+      // repeats the value (escaped text plus structuredContent).
+      const taskId = await startRecountTask(t, {
+        padResult: 256 * 1024 + 1,
+      });
+      await t.finishAllScheduledFunctions(vi.runAllTimers);
+      const failed = await getTask(t, taskId);
+      expect(failed.result?.task.status).toBe("failed");
+      expect(failed.result?.task.error?.message).toMatch(/262144 serialized/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("the task result is byte-identical to the synchronous result", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = newTest();
+      await t.run(async (ctx) => {
+        await ctx.db.insert("invoices", { status: "open", amount: 1 });
+      });
+
+      // Same tool, same args, both paths.
+      const taskId = await startRecountTask(t);
+      await t.finishAllScheduledFunctions(vi.runAllTimers);
+      const viaTask = (await getTask(t, taskId)).result?.task.result;
+
+      const sync = (await (
+        await modernRpc(
+          t,
+          50,
+          "tools/call",
+          { name: "invoices_recount", arguments: {} },
+          { name: "invoices_recount", as: "alice" },
+        )
+      ).json()) as {
+        result: {
+          content: unknown;
+          structuredContent: unknown;
+          isError: boolean;
+        };
+      };
+      // The whole point of routing task execution through dispatch.runTool:
+      // a client cannot tell which path produced the result, so its
+      // rendering and its outputSchema validation work either way.
+      //
+      // Structural rather than byte equality: the task path serializes the
+      // text block compactly on purpose (see callToolResult), because that
+      // envelope is materialized in a query on every poll. Same values,
+      // same keys, different whitespace.
+      const task = viaTask as {
+        content: Array<{ type: string; text: string }>;
+        structuredContent: unknown;
+        isError: boolean;
+      };
+      const inline = sync.result as unknown as {
+        content: Array<{ type: string; text: string }>;
+        structuredContent: unknown;
+        isError: boolean;
+      };
+      expect(task.structuredContent).toEqual(inline.structuredContent);
+      expect(task.isError).toBe(inline.isError);
+      expect(task.content.map((c) => c.type)).toEqual(
+        inline.content.map((c) => c.type),
+      );
+      expect(JSON.parse(task.content[0]!.text)).toEqual(
+        JSON.parse(inline.content[0]!.text),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("a failing tool surfaces on the polled task, sanitized", async () => {
     vi.useFakeTimers();
     const t = newTest();
@@ -3475,9 +3595,18 @@ describe("MCP tasks (modern, e2e)", () => {
     await t.finishAllScheduledFunctions(vi.runAllTimers);
     vi.useRealTimers();
     const failed = await getTask(t, taskId);
-    expect(failed.result?.task.status).toBe("failed");
+    // A tool that ran and reported an error is a COMPLETED call whose
+    // result says isError, exactly as on the synchronous path: the model
+    // can read it and retry. `failed` is reserved for the task itself
+    // failing (unknown tool, kind drift, a dispatch that never ran).
+    expect(failed.result?.task.status).toBe("completed");
+    const errorResult = failed.result?.task.result as {
+      content: Array<{ text: string }>;
+      isError: boolean;
+    };
+    expect(errorResult.isError).toBe(true);
     // ConvexError is the deliberate channel, so the text passes verbatim.
-    expect(failed.result?.task.error?.message).toBe("Recount exploded");
+    expect(errorResult.content[0]!.text).toBe("Recount exploded");
   });
 
   test("a non-ConvexError failure is generic on the wire, verbose in the audit row", async () => {
@@ -3489,11 +3618,16 @@ describe("MCP tasks (modern, e2e)", () => {
       });
       await t.finishAllScheduledFunctions(vi.runAllTimers);
       const failed = await getTask(t, taskId);
-      expect(failed.result?.task.status).toBe("failed");
+      expect(failed.result?.task.status).toBe("completed");
+      const sanitized = failed.result?.task.result as {
+        content: Array<{ text: string }>;
+        isError: boolean;
+      };
+      expect(sanitized.isError).toBe(true);
       // The polling client must not receive arbitrary exception text: it
       // is durable, owner-readable, and can quote credentials.
-      expect(failed.result?.task.error?.message).toBe("Tool execution failed");
-      expect(failed.result?.task.error?.message).not.toMatch(/postgres/);
+      expect(sanitized.content[0]!.text).toBe("Tool execution failed");
+      expect(sanitized.content[0]!.text).not.toMatch(/postgres/);
       // The operator still gets the full text, on the tool row.
       const toolRows = await t.run(async (ctx) =>
         ctx.runQuery(components.mcpGateway.audit.listEntries, {
@@ -3842,7 +3976,15 @@ describe("MCP tasks (host executor, e2e)", () => {
     expect(accepted.status).toBe(200);
     const done = await pollTask(t, taskId);
     expect(done?.status).toBe("completed");
-    expect(done?.result).toEqual({ updated: 2 });
+    // The host executor stores the same CallToolResult envelope as the
+    // built-in one, so a client reads both identically.
+    // No structuredContent: this tool advertises no outputSchema, and the
+    // component derives that from the registry rather than trusting the
+    // host to pass a flag.
+    expect(done?.result).toEqual({
+      content: [{ type: "text", text: '{"updated":2}' }],
+      isError: false,
+    });
 
     // Idempotency: re-sending the same responses re-fires the hook
     // (at-least-once), but the keyed side effect does not double-apply
@@ -3851,29 +3993,93 @@ describe("MCP tasks (host executor, e2e)", () => {
     expect(repeat.status).toBe(200);
     const still = await pollTask(t, taskId);
     expect(still?.status).toBe("completed");
-    expect(still?.result).toEqual({ updated: 2 });
+    expect(
+      (still?.result as { content?: Array<{ text: string }> } | undefined)
+        ?.content?.[0]?.text,
+    ).toContain('"updated":2');
     const executions = await t.run(async (ctx) =>
       ctx.db.query("taskExecutions").collect(),
     );
     expect(executions).toHaveLength(1);
   });
 
-  test("declined confirmation fails the task without side effects", async () => {
+  test("a declined confirmation completes without isError or side effects", async () => {
     const t = newTest();
     await t.run(async (ctx) => {
       await ctx.db.insert("invoices", { status: "open", amount: 1 });
     });
     const taskId = await startBulkTask(t);
     await answer(t, taskId, "decline");
-    const failed = await pollTask(t, taskId);
-    expect(failed?.status).toBe("failed");
-    expect(failed?.error?.message).toBe("Confirmation declined");
+    const declined = await pollTask(t, taskId);
+    // A decline completes the task: the negotiation succeeded and its
+    // outcome was negative. Not `isError`, which is for a call that ran and
+    // failed, and which the synchronous MRTR path also withholds for the
+    // same decline (convex/mcp.ts uses completeCall({ isError: false })).
+    // Both sides of the example have to answer this the same way.
+    expect(declined?.status).toBe("completed");
+    const result = declined?.result as {
+      content: Array<{ text: string }>;
+      isError: boolean;
+    };
+    expect(result.isError).toBe(false);
+    expect(result.content[0]!.text).toBe("Confirmation declined.");
     const open = await t.run(async (ctx) =>
       (await ctx.db.query("invoices").collect()).filter(
         (invoice) => invoice.status === "open",
       ),
     );
     expect(open).toHaveLength(1);
+  });
+
+  test("mount scope isolates the two mounts' tasks", async () => {
+    const t = newTest();
+    const taskId = await startBulkTask(t);
+    // The host-tasks mount owns this task (scope "host-tasks"). The main
+    // mount resolves the SAME subject from the same fixture token, so
+    // before scoping it could poll, cancel, and answer this task even
+    // though its own executor knows nothing about it.
+    //
+    // Note what this does and does not pin: the refusal comes from the
+    // scope MISMATCH, which exists whether or not the main mount sets its
+    // own `scope`. So this test protects `scope: "host-tasks"`, not
+    // `scope: "main"` — that one is defence in depth against a future
+    // third, unscoped mount, and no two-mount topology can observe it.
+    const fromOtherMount = await t.fetch("/mcp/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-protocol-version": "2026-07-28",
+        "mcp-method": "tasks/get",
+        "mcp-name": taskId,
+        authorization: "Bearer valid-userinfo-token",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 60,
+        method: "tasks/get",
+        params: {
+          taskId,
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": TASK_CAPS,
+          },
+        },
+      }),
+    });
+    const body = (await fromOtherMount.json()) as {
+      error?: { code: number; message: string };
+    };
+    // Answered exactly like an unknown id, so the isolation does not leak
+    // that the task exists.
+    expect(body.error?.code).toBe(-32602);
+    expect(body.error?.message).toMatch(/Unknown task/);
+
+    // Its own mount still sees it.
+    const own = (await (
+      await hostRpc(t, 61, "tasks/get", { taskId }, { name: taskId })
+    ).json()) as { result?: { task: { status: string } } };
+    expect(own.result?.task.status).toBe("input_required");
   });
 
   test("a synchronous call of the task-only tool refuses to run", async () => {

@@ -143,7 +143,13 @@ const mcpHandler = httpAction(async (ctx, request) =>
     // executor runs the tool once; hosts needing retries, delays, or
     // input_required rounds wire @convex-dev/workflow here instead
     // (see docs/tasks.md).
-    tasks: {},
+    //
+    // `scope` binds every task this mount creates to this mount. It
+    // matters because /mcp-host-tasks/ below resolves identities from the
+    // same fixtures with a DIFFERENT execution model: without a scope, a
+    // caller could start a task here and drive it through there (or vice
+    // versa), where the other mount's executor knows nothing about it.
+    tasks: { scope: "main" },
   }),
 );
 // Mount BOTH /mcp/ and /mcp (no trailing slash). claude.ai (and
@@ -310,6 +316,11 @@ const mcpHandlerHostTasks = httpAction(async (ctx, request) =>
     resolveIdentity,
     tools,
     tasks: {
+      // Paired with `scope: "main"` on the primary mount: tasks created
+      // here are invisible there and vice versa, so a confirmation sent to
+      // the wrong mount is refused instead of being stored where nothing
+      // will ever act on it.
+      scope: "host-tasks",
       execute: async (ctx, task) => {
         // Only start work the executor actually owns; other task tools
         // in the catalog keep their normal meaning for this host.
@@ -319,7 +330,7 @@ const mcpHandlerHostTasks = httpAction(async (ctx, request) =>
         // Check the outcome: every non-"updated" answer means the task
         // never entered `input_required`, so nothing would ever ask the
         // owner and nothing would ever run. Throwing here is the contract
-        // — the gateway fails the task and returns a clean error — while
+        // (the gateway fails the task and returns a clean error), while
         // dropping the value would leave the client polling `working`
         // until the TTL with no trace anywhere.
         const asked = await gateway.requireTaskInput(ctx, task.taskId, {
@@ -361,14 +372,24 @@ const mcpHandlerHostTasks = httpAction(async (ctx, request) =>
           | { action?: string }
           | undefined;
         if (confirm?.action !== "accept") {
-          const failed = await gateway.failTask(ctx, event.taskId, {
-            code: -32000,
-            message: "Confirmation declined",
-          });
-          if (failed !== "finalized") {
+          // A declined confirmation completes the task: the negotiation
+          // succeeded, its outcome was just negative. Deliberately NOT
+          // `isError`, matching how the synchronous MRTR path reports the
+          // same decline in convex/mcp.ts (`completeCall({ isError: false })`)
+          // -- this is the code people copy, so both sides answer the
+          // question the same way. `isError` is for a call that ran and
+          // failed; `failTask` is for a call that never produced a result.
+          const declined = await gateway.completeTask(
+            ctx,
+            event.taskId,
+            "Confirmation declined.",
+          );
+          // "conflict" is the benign owner-cancelled-first race, same as on
+          // the success path below: the recorded outcome stands.
+          if (declined !== "finalized" && declined !== "conflict") {
             console.warn(
               "[example] declined confirmation could not be recorded",
-              failed,
+              declined,
               event.taskId,
             );
           }
@@ -385,6 +406,11 @@ const mcpHandlerHostTasks = httpAction(async (ctx, request) =>
         // keyed mutation did not double-apply, but "not_found" (row
         // expired in between) and "result_too_large" both mean every
         // invoice is paid while the client sees no result. Log it.
+        // Pass the tool's value, not an envelope: the gateway derives the
+        // `CallToolResult` when the client polls, so a host executor and
+        // the built-in one converge on one wire shape without either
+        // hand-building it. No `structured` flag, because this tool
+        // declares no `returns` and therefore advertises no `outputSchema`.
         const completed = await gateway.completeTask(ctx, event.taskId, result);
         if (completed !== "finalized" && completed !== "conflict") {
           console.error(
