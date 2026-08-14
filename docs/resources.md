@@ -183,6 +183,67 @@ When `resources/read` receives a URI:
    (`-32603`) only if nothing else serves the URI, and carries no `data`:
    that failure is the server's, not the caller's URI.
 
+### Asking the caller a question before serving a read
+
+MCP 2026-07-28 lets `resources/read` answer with an `InputRequiredResult`,
+the same multi-round-trip mechanism tool calls use. Configure
+`beforeResourceRead` to use it:
+
+```ts
+import { declineRead, inputRequired } from "convex-mcp-gateway";
+
+gateway.handleMcpRequest(ctx, request, {
+  authorizeResource,
+  resources,
+  mrtr: { secret: process.env.MCP_MRTR_SECRET! },
+  beforeResourceRead: async (ctx, { uri, resourceMetadata, identity, inputResponses }) => {
+    if (uri !== "docs://confidential") return null;   // not gated
+    if (!inputResponses) {
+      return inputRequired({
+        confirm: {
+          method: "elicitation/create",
+          params: { mode: "form", message: "Share the full document?" },
+        },
+      });
+    }
+    const confirm = inputResponses.confirm as { action?: string };
+    if (confirm?.action !== "accept") {
+      return declineRead("Owner declined to share this document");
+    }
+    return null;                                       // serve it
+  },
+});
+```
+
+Four decisions, mirroring `beforeCall` on the tool side:
+
+| Return | Result |
+|---|---|
+| `null` | Fall through to the normal read path (providers, then templates) |
+| `inputRequired(requests, state?)` | `resultType: "input_required"` with a sealed `requestState`; the client retries with `inputResponses` |
+| `completeRead(contents)` | Serve these contents instead, e.g. a redacted summary |
+| `declineRead(reason)` | Refuse with `-32003` and that reason; nothing is read |
+
+It is **mount-level**, like `authorizeResource`, rather than per-resource:
+a provider serves many URIs and the gateway cannot know which one owns a
+URI without calling it, so the gate has to sit where the URI is known and
+nothing has run yet. Branch on `uri` inside the hook.
+
+The guarantees are the tool path's, because it is the same machinery: the
+continuation is HMAC-sealed and bound to `resources/read:<uri>` plus the
+caller's subject, so it cannot be replayed at another URI (a template
+expansion is a function of the URI, so expansions are bound too) or
+presented as a tool continuation; each round's id is redeemed once, and
+re-sending it with different answers is refused; and the chain resolves
+exactly once, so a branch forked by an idempotent replay cannot re-open a
+read that was already served or refused. Requires `mrtr` and the modern
+protocol: a hook that demands input where no continuation can travel fails
+the read (`-32603`) rather than serving the resource with the gate skipped.
+
+Auditing follows the tool path: the round that only asks writes no row,
+and the round that resolves writes `read`/`allowed` when content is
+served or `read`/`denied` for a `declineRead`.
+
 ### What the caller is told when a read fails
 
 A thrown exception message never reaches the MCP client. The caller gets

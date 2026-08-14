@@ -6,6 +6,9 @@ import {
   type McpAuthorizerArgs,
   type McpAuthorizerDecision,
   type McpAuthorizerHandler,
+  type McpBeforeResourceReadHandler,
+  type McpCompleteReadResult,
+  type McpDeclineReadResult,
   type McpIcon,
   type McpInputRequiredResult,
   type McpToolRegistration,
@@ -460,6 +463,30 @@ export interface HandleMcpRequestOptions {
    * `resources/read` checks `resource_read` before invoking the provider.
    */
   authorizeResource?: McpResourceAuthorizerHandler;
+  /**
+   * Optional MRTR hook for `resources/read`: the read counterpart of a
+   * tool's `beforeCall`. Runs after `authorizeResource` allowed the read
+   * and before any provider or template is consulted, on the first read
+   * AND on every verified continuation of it (where it additionally
+   * receives the decoded `state`, the client's untrusted `inputResponses`,
+   * and the `round`).
+   *
+   * Return `inputRequired()` to ask the client for input (per MCP
+   * 2026-07-28, `resources/read` may answer with an `InputRequiredResult`),
+   * `completeRead(contents)` to serve content yourself, `declineRead(reason)`
+   * to refuse after the answer, or `null` to fall through to the normal
+   * read path.
+   *
+   * Mount-level rather than per-resource, mirroring `authorizeResource`: a
+   * provider serves many URIs and the gateway cannot know which one owns a
+   * URI without calling it, so the gate has to sit where the URI is known
+   * and nothing has run yet. Branch on `uri` inside the hook.
+   *
+   * Requires the `mrtr` option (the continuation is sealed with its
+   * secret) and the modern protocol; a read that demands input on a legacy
+   * request fails closed rather than silently serving the resource.
+   */
+  beforeResourceRead?: McpBeforeResourceReadHandler;
   /**
    * Opt-in audit for MCP resource operations. Defaults to `false`.
    * `true` records `resources/list`, `resources/read`, and
@@ -1336,6 +1363,24 @@ function isMcpInputRequiredResult(
   );
 }
 
+function isMcpCompleteReadResult(
+  value: unknown,
+): value is McpCompleteReadResult {
+  return (
+    isPlainObject(value) &&
+    value.__mcpCompleteRead === true &&
+    Array.isArray(value.contents)
+  );
+}
+
+function isMcpDeclineReadResult(value: unknown): value is McpDeclineReadResult {
+  return (
+    isPlainObject(value) &&
+    value.__mcpDeclineRead === true &&
+    typeof value.reason === "string"
+  );
+}
+
 function isMcpCompleteCallResult(
   value: unknown,
 ): value is { __mcpCompleteCall: true; result: Record<string, unknown> } {
@@ -1515,8 +1560,7 @@ async function sha256Base64Url(value: string): Promise<string> {
  */
 function mrtrSecretTooShort(options: McpMrtrOptions): boolean {
   return (
-    new TextEncoder().encode(options.secret).byteLength <
-    MRTR_MIN_SECRET_BYTES
+    new TextEncoder().encode(options.secret).byteLength < MRTR_MIN_SECRET_BYTES
   );
 }
 
@@ -1569,10 +1613,7 @@ async function sealMrtrState(
   ) {
     throw new Error("MRTR ttlMs must be a positive finite number");
   }
-  const ttlMs = Math.min(
-    options.ttlMs ?? MRTR_DEFAULT_TTL_MS,
-    MRTR_MAX_TTL_MS,
-  );
+  const ttlMs = Math.min(options.ttlMs ?? MRTR_DEFAULT_TTL_MS, MRTR_MAX_TTL_MS);
   const now = Date.now();
   const payload = {
     v: 2,
@@ -1668,6 +1709,342 @@ async function ensureCatalogSynced(
   await options.ensureCatalogSynced?.();
 }
 
+/**
+ * Verify, redeem, and read the chain state for one MRTR continuation.
+ *
+ * Shared by `tools/call` and `resources/read` so the sequence exists
+ * once: verify the seal, pin the answers with a one-time `jti`
+ * redemption, then read how (or whether) the chain already resolved. A
+ * second copy of this is how a future MRTR fix lands on one call path and
+ * silently misses the other.
+ *
+ * `chainName` is both the value the seal binds and the label in logs, so
+ * a continuation minted for one operation can never be presented as
+ * another: tools pass the tool name, reads pass `resources/read:<uri>`.
+ *
+ * The three outcomes are kept apart on purpose. `"reject"` is the
+ * client's fault and carries the wire code/message; `"error"` means a
+ * step could not RUN (verification threw, the component predates a
+ * table) and is always a logged `-32603`, never a raw 500 that would
+ * skip the CORS wrapper.
+ */
+async function verifyMrtrContinuation(
+  ctx: HandlerCtx,
+  component: ComponentApi,
+  options: McpMrtrOptions,
+  input: {
+    chainName: string;
+    requestState: unknown;
+    inputResponses: unknown;
+    identitySubject: string | null;
+    argsDigest: string;
+  },
+): Promise<
+  | {
+      status: "ok";
+      continuation: VerifiedMrtrState;
+      requestDigest: string | undefined;
+      chain: MrtrChainState;
+    }
+  | { status: "reject"; code: number; message: string }
+  /**
+   * A step could not RUN. `message` overrides the caller's generic wire
+   * text where a more precise one exists (a misconfigured secret is not a
+   * verification failure), and is always paired with a console line.
+   */
+  | { status: "error"; message?: string }
+> {
+  if (mrtrSecretTooShort(options)) {
+    // Server misconfiguration, never the client's fault: the state being
+    // verified may be perfectly valid. Checked FIRST, so a misconfigured
+    // gateway never blames the client for a malformed payload it was never
+    // going to read.
+    console.error(
+      "[mcp-gateway] mrtr.secret is shorter than 32 bytes; " +
+        "refusing to verify continuations",
+    );
+    return {
+      status: "error",
+      message: "MRTR is misconfigured on this gateway",
+    };
+  }
+  if (
+    input.inputResponses !== undefined &&
+    !isPlainObject(input.inputResponses)
+  ) {
+    return {
+      status: "reject",
+      code: INVALID_PARAMS,
+      message: "MRTR inputResponses must be an object",
+    };
+  }
+  let continuation: VerifiedMrtrState | null;
+  try {
+    continuation = await verifyMrtrState(options, input.requestState, {
+      toolName: input.chainName,
+      identitySubject: input.identitySubject,
+      argsDigest: input.argsDigest,
+    });
+  } catch (err) {
+    // Verification could not run (as opposed to running and saying no).
+    console.error("[mcp-gateway] MRTR state verification failed to run", err);
+    return { status: "error" };
+  }
+  if (!continuation) {
+    return {
+      status: "reject",
+      code: INVALID_PARAMS,
+      message: "Invalid, expired, or mismatched MRTR requestState",
+    };
+  }
+  // One-time redemption: a continuation stays cryptographically valid
+  // until its TTL, so first use pins the responses it was answered with.
+  // A byte-identical re-send is an idempotent replay (safe to
+  // re-process); different responses for the same continuation would let
+  // a captured state flip an already-resolved decision (decline ->
+  // accept) and are rejected.
+  const requestDigest =
+    input.inputResponses !== undefined
+      ? await sha256Base64Url(stableJson(input.inputResponses))
+      : undefined;
+  let redemption: "fresh" | "replay" | "conflict";
+  try {
+    redemption = await ctx.runMutation(component.mrtr.redeemContinuation, {
+      jti: continuation.jti,
+      ...(requestDigest !== undefined
+        ? { responsesDigest: requestDigest }
+        : {}),
+      expiresAt: continuation.exp,
+    });
+  } catch (err) {
+    console.error(
+      "[mcp-gateway] MRTR continuation redemption failed to run " +
+        "(is the component deployment up to date?)",
+      input.chainName,
+      err,
+    );
+    return { status: "error" };
+  }
+  if (redemption === "conflict") {
+    // Either the replay-flip attack this mechanism exists for, or a
+    // client re-collecting semantically identical answers into
+    // byte-different responses. Make the event observable so an operator
+    // can tell the two apart.
+    console.warn(
+      "[mcp-gateway] MRTR continuation redeemed with different " +
+        "responses; rejecting",
+      input.chainName,
+      continuation.jti,
+    );
+    return {
+      status: "reject",
+      code: INVALID_PARAMS,
+      message:
+        "This MRTR continuation was already used with different input " +
+        "responses. Re-send the exact previous responses, or restart the " +
+        "call without requestState",
+    };
+  }
+  const chain = await readMrtrChain(
+    ctx,
+    component,
+    input.chainName,
+    continuation.idempotencyKey,
+  );
+  if (chain.status === "error") return { status: "error" };
+  return { status: "ok", continuation, requestDigest, chain };
+}
+
+/**
+ * Resolve a chain exactly once, immediately before the gateway does the
+ * thing that resolves it (dispatch a tool, finish a call itself, serve or
+ * refuse a read). Shared by every such site so the repeat rule is stated
+ * once.
+ *
+ * `"claimed"` means this branch owns the resolution. `"lost"` means
+ * another branch settled the chain first and this one must be refused.
+ * The resolving continuation re-sent with the same answer is NOT lost:
+ * that is the idempotent retry of a response the client never received.
+ *
+ * `chain` is passed in rather than read here, and deliberately so: each
+ * caller decides WHICH snapshot the repeat rule is judged against (the
+ * pre-hook read on the terminal paths, a fresh post-hook re-read before a
+ * dispatch). Reading it here would silently pick one for everybody.
+ */
+async function settleMrtrChain(
+  ctx: HandlerCtx,
+  component: ComponentApi,
+  input: {
+    chainName: string;
+    continuation: VerifiedMrtrState;
+    requestDigest: string | undefined;
+    chain: MrtrChainState;
+    resolution: "dispatched" | "completed";
+  },
+): Promise<"claimed" | "lost" | "error"> {
+  const { chainName, continuation, requestDigest, chain, resolution } = input;
+  if (
+    chain.status === "resolved" &&
+    isChainRepeat(chain, continuation.jti, requestDigest, resolution)
+  ) {
+    return "claimed";
+  }
+  const claim =
+    chain.status === "resolved"
+      ? { ...chain, status: "lost" as const }
+      : await claimMrtrChain(
+          ctx,
+          component,
+          chainName,
+          continuation.idempotencyKey,
+          continuation.jti,
+          requestDigest,
+          resolution,
+          Date.now() + MRTR_MAX_TTL_MS + MRTR_CLAIM_SLACK_MS,
+        );
+  if (claim.status === "error") return "error";
+  // Losing to a concurrent send of this very continuation with this very
+  // answer is the same lost-response retry, just interleaved. Refusing it
+  // would push the client to start a new chain, i.e. a new idempotency
+  // key, i.e. the duplicate the key exists to prevent.
+  if (
+    claim.status === "lost" &&
+    !isChainRepeat(claim, continuation.jti, requestDigest, resolution)
+  ) {
+    return "lost";
+  }
+  return "claimed";
+}
+
+/**
+ * Ask the client for input: the shared tail of both MRTR gates, from the
+ * last fail-closed checks through the sealed `input_required` envelope.
+ *
+ * Everything here is mechanical and must not drift between `tools/call`
+ * and `resources/read` — the round ceiling, the capability gate, and above
+ * all the sealed envelope, whose `toolName`/`argsDigest`/`idempotencyKey`
+ * are what bind a continuation to exactly one chain. The checks that DO
+ * differ (whether this request can carry a continuation at all) stay at
+ * the call sites, where their wording belongs.
+ *
+ * `hookLabel` names the asking hook in the logs and in the one wire
+ * message that mentions it. `{ response }` is the capability refusal,
+ * which per spec is a `-32021` on the modern envelope; `{ body }` is every
+ * other outcome, including success.
+ */
+async function askMrtrInput(
+  mrtr: McpMrtrOptions,
+  input: {
+    id: JsonRpcMessage["id"];
+    hookLabel: string;
+    chainName: string;
+    argsDigest: string;
+    identitySubject: string | null;
+    continuation: VerifiedMrtrState | null;
+    clientCapabilities: Record<string, unknown>;
+    inputRequests: Record<string, unknown>;
+    state: unknown;
+  },
+): Promise<{ body: string } | { response: Response }> {
+  if (mrtrSecretTooShort(mrtr)) {
+    console.error(
+      "[mcp-gateway] mrtr.secret is shorter than 32 bytes; " +
+        "refusing to seal a continuation",
+    );
+    return {
+      body: jsonErrorEnvelope(
+        input.id,
+        INTERNAL_ERROR,
+        "MRTR is misconfigured on this gateway",
+      ),
+    };
+  }
+  const round = (input.continuation?.round ?? 0) + 1;
+  if (round > MRTR_MAX_ROUNDS) {
+    console.error(
+      "[mcp-gateway] MRTR chain exceeded the round ceiling",
+      input.chainName,
+    );
+    return {
+      body: jsonErrorEnvelope(
+        input.id,
+        INTERNAL_ERROR,
+        "MRTR continuation exceeded the round limit",
+      ),
+    };
+  }
+  const requiredCapabilities = mrtrRequiredCapabilities(input.inputRequests);
+  if (!requiredCapabilities) {
+    // A host-side hook bug: a request method or shape the gateway cannot
+    // vouch for (typo'd method, unknown elicitation mode). Name the
+    // offending methods so the hook author can find it.
+    console.error(
+      `[mcp-gateway] ${input.hookLabel} returned unsupported input requests`,
+      input.chainName,
+      Object.values(input.inputRequests)
+        .map((request) =>
+          isPlainObject(request) ? String(request.method) : typeof request,
+        )
+        .join(", "),
+    );
+    return {
+      body: jsonErrorEnvelope(
+        input.id,
+        INTERNAL_ERROR,
+        `${input.hookLabel} returned unsupported input requests`,
+      ),
+    };
+  }
+  const missingCapabilities = missingMrtrCapabilities(
+    input.clientCapabilities,
+    requiredCapabilities,
+  );
+  if (Object.keys(missingCapabilities).length > 0) {
+    return {
+      response: statelessErrorResponse(
+        input.id,
+        -32021,
+        "Client lacks a capability required for MRTR input requests",
+        // Per spec, data.requiredCapabilities lists only what is MISSING,
+        // not the full required set.
+        { requiredCapabilities: missingCapabilities },
+      ),
+    };
+  }
+  try {
+    return {
+      body: jsonResultEnvelope(input.id, {
+        resultType: "input_required",
+        ...(Object.keys(input.inputRequests).length > 0
+          ? { inputRequests: input.inputRequests }
+          : {}),
+        requestState: await sealMrtrState(mrtr, {
+          toolName: input.chainName,
+          identitySubject: input.identitySubject,
+          argsDigest: input.argsDigest,
+          state: input.state ?? null,
+          // Round 1 mints the chain's key; later rounds carry it.
+          idempotencyKey:
+            input.continuation?.idempotencyKey ?? crypto.randomUUID(),
+          round,
+        }),
+      }),
+    };
+  } catch (err) {
+    console.error(
+      "[mcp-gateway] failed to seal MRTR requestState",
+      input.chainName,
+      err,
+    );
+    return {
+      body: jsonErrorEnvelope(
+        input.id,
+        INTERNAL_ERROR,
+        "Failed to create MRTR request state",
+      ),
+    };
+  }
+}
 
 /**
  * True when this request is the resolving continuation of an
@@ -1733,7 +2110,11 @@ async function claimMrtrChain(
   responsesDigest: string | undefined,
   resolution: "dispatched" | "completed",
   expiresAt: number,
-): Promise<{ status: "claimed" } | ({ status: "lost" } & ResolvedChain) | { status: "error" }> {
+): Promise<
+  | { status: "claimed" }
+  | ({ status: "lost" } & ResolvedChain)
+  | { status: "error" }
+> {
   try {
     const result = await ctx.runMutation(component.mrtr.claimChain, {
       chainKey,
@@ -2641,6 +3022,10 @@ async function handlePost(
         registeredTemplates.length > 0 ||
         (options.resources ?? []).length > 0 ||
         (options.resourceTemplates ?? []).length > 0 ||
+        // A hook-only mount serves reads with no provider and no template
+        // (ask, then answer with `completeRead`), so it has the capability
+        // even with an empty catalog.
+        options.beforeResourceRead !== undefined ||
         Boolean(options.resourceSubscriptions?.subscribe) ||
         Boolean(options.resourceSubscriptions?.listChanged);
       body = jsonResultEnvelope(message.id, {
@@ -2692,7 +3077,9 @@ async function handlePost(
         registeredResources.length > 0 ||
         registeredTemplates.length > 0 ||
         (options.resources ?? []).length > 0 ||
-        (options.resourceTemplates ?? []).length > 0;
+        (options.resourceTemplates ?? []).length > 0 ||
+        // As on `initialize`: a hook-only mount can serve a read.
+        options.beforeResourceRead !== undefined;
       body = jsonResultEnvelope(message.id, {
         resultType: "complete",
         supportedVersions: [
@@ -2973,7 +3360,12 @@ async function handlePost(
       if (
         providers.length === 0 &&
         registeredResources.length === 0 &&
-        templates.length === 0
+        templates.length === 0 &&
+        // A mount whose only read logic is the MRTR hook (ask, then answer
+        // with `completeRead`) serves reads with no provider and no
+        // template, so "nothing is registered" is not the same as "reads
+        // are unsupported here".
+        options.beforeResourceRead === undefined
       ) {
         if (isStateless) responseStatus = 404;
         body = jsonErrorEnvelope(
@@ -3058,6 +3450,322 @@ async function handlePost(
         );
         break;
       }
+      // MRTR for `resources/read`: the spec allows a read to answer with an
+      // `InputRequiredResult`. Placed after `authorizeResource` allowed the
+      // read and before any provider or template runs, so a hook question
+      // never reveals a resource the caller may not read, and a refusal
+      // after the answer costs no provider work.
+      const requestState = message.params?.requestState;
+      const inputResponses = message.params?.inputResponses;
+      const beforeResourceRead = options.beforeResourceRead;
+      const hasContinuation =
+        requestState !== undefined || inputResponses !== undefined;
+      if (hasContinuation && !beforeResourceRead) {
+        // Fail closed rather than serve the resource while ignoring the
+        // continuation the client believes it is answering.
+        body = jsonErrorEnvelope(
+          message.id,
+          INVALID_PARAMS,
+          "This gateway does not support MRTR continuations for resources/read",
+        );
+        break;
+      }
+      if (beforeResourceRead) {
+        // The chain is keyed on the operation AND the concrete URI, so a
+        // tool continuation can never be presented as a read continuation,
+        // and a continuation minted for one template expansion cannot be
+        // replayed against another (an expansion is a function of the URI).
+        const chainName = `resources/read:${uri}`;
+        const uriDigest = await sha256Base64Url(stableJson(uri));
+        let continuation: VerifiedMrtrState | null = null;
+        let chain: MrtrChainState = { status: "open" };
+        let requestDigest: string | undefined;
+        if (hasContinuation) {
+          if (!isStateless) {
+            body = jsonErrorEnvelope(
+              message.id,
+              INVALID_PARAMS,
+              "MRTR continuations require MCP protocol " +
+                `${STATELESS_PROTOCOL_VERSION} or later`,
+            );
+            break;
+          }
+          if (!options.mrtr || requestState === undefined) {
+            body = jsonErrorEnvelope(
+              message.id,
+              INVALID_PARAMS,
+              "MRTR retries require configured state verification and requestState",
+            );
+            break;
+          }
+          // The secret length and the `inputResponses` shape are both
+          // checked inside `verifyMrtrContinuation`, in that order, so both
+          // call paths get them and neither can forget one.
+          const verified = await verifyMrtrContinuation(
+            ctx,
+            component,
+            options.mrtr,
+            {
+              chainName,
+              requestState,
+              inputResponses,
+              identitySubject: auditIdentitySubject,
+              argsDigest: uriDigest,
+            },
+          );
+          if (verified.status === "error") {
+            body = jsonErrorEnvelope(
+              message.id,
+              INTERNAL_ERROR,
+              verified.message ?? "MRTR verification failed",
+            );
+            break;
+          }
+          if (verified.status === "reject") {
+            body = jsonErrorEnvelope(
+              message.id,
+              verified.code,
+              verified.message,
+            );
+            break;
+          }
+          continuation = verified.continuation;
+          requestDigest = verified.requestDigest;
+          chain = verified.chain;
+        }
+        // Refuse a superseded continuation BEFORE running the hook, as the
+        // tool path does: every post-hook branch would refuse it anyway, but
+        // `beforeResourceRead` is not documented as side-effect-free, and a
+        // client holding N sibling continuations could otherwise drive it N
+        // times on a decision that is already over.
+        if (
+          continuation &&
+          chain.status === "resolved" &&
+          !isChainRepeat(
+            chain,
+            continuation.jti,
+            requestDigest,
+            chain.resolution,
+          )
+        ) {
+          body = alreadyResolvedEnvelope(message.id, chainName);
+          break;
+        }
+        let decision: unknown;
+        try {
+          decision = await beforeResourceRead(ctx, {
+            uri,
+            resourceMetadata: metadata as Record<string, unknown> | null,
+            identity,
+            ...(continuation
+              ? {
+                  state: continuation.state,
+                  ...(isPlainObject(inputResponses) ? { inputResponses } : {}),
+                  round: continuation.round,
+                }
+              : {}),
+          });
+        } catch (err) {
+          console.error("[mcp-gateway] beforeResourceRead failed", uri, err);
+          body = jsonErrorEnvelope(
+            message.id,
+            INTERNAL_ERROR,
+            "beforeResourceRead failed",
+          );
+          break;
+        }
+        // Validate a hook-supplied payload BEFORE anything is settled, the
+        // same order the tool path validates `completeCall`'s result in: a
+        // host bug should not consume the chain's single resolution.
+        if (isMcpCompleteReadResult(decision)) {
+          const problem = describeResourceContentsProblem(decision.contents);
+          if (problem) {
+            console.error(
+              "[mcp-gateway] beforeResourceRead returned invalid contents",
+              uri,
+              problem,
+            );
+            body = jsonErrorEnvelope(
+              message.id,
+              INTERNAL_ERROR,
+              "beforeResourceRead returned invalid contents",
+            );
+            break;
+          }
+        }
+        // Serving content and refusing are both terminal, so both resolve
+        // the chain, exactly as `completeCall` does on the tool path: a
+        // forked branch must not turn a settled refusal into a served read.
+        //
+        // This settles against the PRE-hook snapshot, where the tool path
+        // re-reads after its hook. The difference is safe, not an oversight:
+        // `claimMrtrChain` is an atomic insert-or-return-winner, so a chain
+        // resolved during the hook's await yields snapshot `open` and then
+        // loses the claim. A STALE `resolved` snapshot cannot get here at
+        // all, because the pre-hook refusal above already rejected it. Only
+        // the ask branch needs a fresher read, because the continuation it
+        // would mint must not outlive another branch's claim, and it does
+        // re-read.
+        const isTerminal =
+          isMcpCompleteReadResult(decision) || isMcpDeclineReadResult(decision);
+        if (continuation && (isTerminal || decision == null)) {
+          const settled = await settleMrtrChain(ctx, component, {
+            chainName,
+            continuation,
+            requestDigest,
+            chain,
+            resolution: isTerminal ? "completed" : "dispatched",
+          });
+          if (settled === "error") {
+            body = jsonErrorEnvelope(
+              message.id,
+              INTERNAL_ERROR,
+              "MRTR verification failed",
+            );
+            break;
+          }
+          if (settled === "lost") {
+            body = alreadyResolvedEnvelope(message.id, chainName);
+            break;
+          }
+        }
+        if (isMcpDeclineReadResult(decision)) {
+          // Same family as an `authorizeResource` denial: the caller asked
+          // for a resource and is getting none, so it belongs on the error
+          // channel rather than dressed up as content. `reason` is
+          // host-authored and reaches the caller verbatim.
+          if (shouldAuditResource(options.auditResources, "read")) {
+            await safeRecordResourceAudit(ctx, component, {
+              resourceUri: uri,
+              resourceOperation: "read",
+              args: null,
+              outcome: "denied",
+              identitySubject: auditIdentitySubject,
+              durationMs: Date.now() - start,
+              errorCode: FORBIDDEN,
+              errorMessage: decision.reason,
+            });
+          }
+          body = jsonErrorEnvelope(message.id, FORBIDDEN, decision.reason);
+          break;
+        }
+        if (isMcpCompleteReadResult(decision)) {
+          // Contents were validated above, before the chain was settled.
+          if (shouldAuditResource(options.auditResources, "read")) {
+            await safeRecordResourceAudit(ctx, component, {
+              resourceUri: uri,
+              resourceOperation: "read",
+              args: null,
+              outcome: "allowed",
+              identitySubject: auditIdentitySubject,
+              durationMs: Date.now() - start,
+            });
+          }
+          body = jsonResultEnvelope(message.id, {
+            contents: decision.contents,
+          });
+          break;
+        }
+        if (decision != null) {
+          if (!isMcpInputRequiredResult(decision)) {
+            console.error(
+              "[mcp-gateway] beforeResourceRead returned an invalid result",
+              uri,
+              isPlainObject(decision)
+                ? `object keys: ${Object.keys(decision).join(", ")}`
+                : typeof decision,
+            );
+            body = jsonErrorEnvelope(
+              message.id,
+              INTERNAL_ERROR,
+              "beforeResourceRead returned an invalid result",
+            );
+            break;
+          }
+          // Asking again on a chain that already resolved would mint a
+          // fresh continuation for a decision that is over: exactly the
+          // sibling an attacker needs. Re-read rather than trusting the
+          // pre-hook snapshot, because the hook is an await point another
+          // branch can resolve the chain across, and the continuation
+          // minted here would outlive that branch's claim. No repeat case
+          // applies: asking again never reproduces a terminal outcome.
+          if (continuation) {
+            const fresh = await readMrtrChain(
+              ctx,
+              component,
+              chainName,
+              continuation.idempotencyKey,
+            );
+            if (fresh.status === "error") {
+              body = jsonErrorEnvelope(
+                message.id,
+                INTERNAL_ERROR,
+                "MRTR verification failed",
+              );
+              break;
+            }
+            chain = fresh;
+          }
+          if (chain.status === "resolved") {
+            body = alreadyResolvedEnvelope(message.id, chainName);
+            break;
+          }
+          // Asking is only possible where a continuation can travel: the
+          // modern protocol with state verification configured. Fail closed
+          // instead of serving a resource whose gate wanted input.
+          if (!isStateless) {
+            // The client's problem, and actionable: upgrade the protocol.
+            // Distinguished from the misconfiguration below exactly as the
+            // tool path distinguishes them, rather than telling a legacy
+            // client the server broke.
+            console.error(
+              "[mcp-gateway] beforeResourceRead requested input on a legacy " +
+                "request; failing closed for resource",
+              uri,
+            );
+            body = jsonErrorEnvelope(
+              message.id,
+              -32601,
+              "This resource requires multi-round-trip input; connect with " +
+                `MCP protocol ${STATELESS_PROTOCOL_VERSION} or later`,
+            );
+            break;
+          }
+          if (!options.mrtr) {
+            // The host's problem: a hook that asks for input on a mount with
+            // no state verification can never be answered.
+            console.error(
+              "[mcp-gateway] beforeResourceRead requested input but the " +
+                "`mrtr` option is not configured; failing closed for resource",
+              uri,
+            );
+            body = jsonErrorEnvelope(
+              message.id,
+              INTERNAL_ERROR,
+              "MRTR is not configured on this gateway",
+            );
+            break;
+          }
+          const asked = await askMrtrInput(options.mrtr, {
+            id: message.id,
+            hookLabel: "beforeResourceRead",
+            chainName,
+            argsDigest: uriDigest,
+            identitySubject: auditIdentitySubject,
+            continuation,
+            // Guaranteed non-null here (validated for every modern
+            // request, and non-modern requests broke at the check above);
+            // the fallback only satisfies the type system.
+            clientCapabilities: statelessClientCapabilities ?? {},
+            inputRequests: decision.inputRequests ?? {},
+            state: decision.state,
+          });
+          if ("response" in asked) return asked.response;
+          body = asked.body;
+          break;
+        }
+      }
+
       try {
         let found = false;
         // Track a provider throw so a buggy provider can't mask a resource
@@ -3751,116 +4459,37 @@ async function handlePost(
           );
           break;
         }
-        if (mrtrSecretTooShort(options.mrtr)) {
-          // Server misconfiguration, never the client's fault: the
-          // state being verified may be perfectly valid.
-          console.error(
-            "[mcp-gateway] mrtr.secret is shorter than 32 bytes; " +
-              "refusing to verify continuations",
-          );
-          body = jsonErrorEnvelope(
-            message.id,
-            INTERNAL_ERROR,
-            "MRTR is misconfigured on this gateway",
-          );
-          break;
-        }
-        if (inputResponses !== undefined && !isPlainObject(inputResponses)) {
-          body = jsonErrorEnvelope(
-            message.id,
-            INVALID_PARAMS,
-            "MRTR inputResponses must be an object",
-          );
-          break;
-        }
+        // The secret length and the `inputResponses` shape are both checked
+        // inside `verifyMrtrContinuation`, in that order, so both call paths
+        // get them and neither can forget one.
         mrtrArgsDigest = await sha256Base64Url(stableJson(args));
-        try {
-          continuation = await verifyMrtrState(options.mrtr, requestState, {
-            toolName: tool.name,
+        const verified = await verifyMrtrContinuation(
+          ctx,
+          component,
+          options.mrtr,
+          {
+            chainName: tool.name,
+            requestState,
+            inputResponses,
             identitySubject: auditIdentitySubject,
             argsDigest: mrtrArgsDigest,
-          });
-        } catch (err) {
-          // Verification could not run (as opposed to running and
-          // saying no): -32603, mirroring the sealing path.
-          console.error(
-            "[mcp-gateway] MRTR state verification failed to run",
-            err,
-          );
+          },
+        );
+        if (verified.status === "error") {
           body = jsonErrorEnvelope(
             message.id,
             INTERNAL_ERROR,
-            "MRTR verification failed",
+            verified.message ?? "MRTR verification failed",
           );
           break;
         }
-        if (!continuation) {
-          body = jsonErrorEnvelope(
-            message.id,
-            INVALID_PARAMS,
-            "Invalid, expired, or mismatched MRTR requestState",
-          );
+        if (verified.status === "reject") {
+          body = jsonErrorEnvelope(message.id, verified.code, verified.message);
           break;
         }
-        // One-time redemption: a continuation stays cryptographically
-        // valid until its TTL, so first use pins the responses it was
-        // answered with. A byte-identical re-send is an idempotent
-        // replay (safe to re-process); different responses for the same
-        // continuation would let a captured state flip an
-        // already-resolved decision (decline -> accept) and are
-        // rejected. Guarded like every sibling step: a redemption that
-        // cannot RUN (e.g. the component deployment predates the
-        // mrtrRedemptions table) is a logged -32603, not a raw 500 that
-        // skips the CORS wrapper.
-        if (inputResponses !== undefined) {
-          requestDigest = await sha256Base64Url(stableJson(inputResponses));
-        }
-        let redemption: "fresh" | "replay" | "conflict";
-        try {
-          redemption = await ctx.runMutation(
-            component.mrtr.redeemContinuation,
-            {
-              jti: continuation.jti,
-              ...(requestDigest !== undefined
-                ? { responsesDigest: requestDigest }
-                : {}),
-              expiresAt: continuation.exp,
-            },
-          );
-        } catch (err) {
-          console.error(
-            "[mcp-gateway] MRTR continuation redemption failed to run " +
-              "(is the component deployment up to date?)",
-            tool.name,
-            err,
-          );
-          body = jsonErrorEnvelope(
-            message.id,
-            INTERNAL_ERROR,
-            "MRTR verification failed",
-          );
-          break;
-        }
-        if (redemption === "conflict") {
-          // Either the replay-flip attack this mechanism exists for, or
-          // a client re-collecting semantically identical answers into
-          // byte-different responses. Make the event observable so an
-          // operator can tell the two apart.
-          console.warn(
-            "[mcp-gateway] MRTR continuation redeemed with different " +
-              "responses; rejecting",
-            tool.name,
-            continuation.jti,
-          );
-          body = jsonErrorEnvelope(
-            message.id,
-            INVALID_PARAMS,
-            "This MRTR continuation was already used with different input " +
-              "responses. Re-send the exact previous responses, or restart " +
-              "the call without requestState",
-          );
-          break;
-        }
+        continuation = verified.continuation;
+        requestDigest = verified.requestDigest;
+        chain = verified.chain;
       }
 
       // The host-side MRTR state machine. It runs before `runTool` on
@@ -3873,28 +4502,14 @@ async function handlePost(
       // cannot carry a continuation (legacy protocol, or `mrtr` not
       // configured), the call fails closed instead of dispatching.
       //
-      // A chain resolves exactly once. Read that state up front for a
-      // verified continuation, so an already-resolved chain refuses the
-      // outcomes that would re-open it (another input round, or a
-      // dispatch) while still letting an idempotent re-send of a
-      // completed call reproduce its result.
-      if (beforeCall && continuation) {
-        const read = await readMrtrChain(
-          ctx,
-          component,
-          tool.name,
-          continuation.idempotencyKey,
-        );
-        if (read.status === "error") {
-          body = jsonErrorEnvelope(
-            message.id,
-            INTERNAL_ERROR,
-            "MRTR verification failed",
-          );
-          break;
-        }
-        chain = read;
-      }
+      // A chain resolves exactly once, and `verifyMrtrContinuation` already
+      // read that state for us as its last step, so an already-resolved
+      // chain refuses the outcomes that would re-open it (another input
+      // round, or a dispatch) while still letting an idempotent re-send of a
+      // completed call reproduce its result. Re-reading it here would be a
+      // second Convex query on every continuation for the same answer; the
+      // sites that genuinely need a fresher view (across the hook's await
+      // point) re-read for themselves below.
       // Refuse a superseded continuation BEFORE running the host hook.
       // Only the continuation that actually resolved the chain has
       // anything to reproduce; every other branch is answering a
@@ -3931,9 +4546,7 @@ async function handlePost(
             ...(continuation
               ? {
                   state: continuation.state,
-                  ...(isPlainObject(inputResponses)
-                    ? { inputResponses }
-                    : {}),
+                  ...(isPlainObject(inputResponses) ? { inputResponses } : {}),
                   idempotencyKey: continuation.idempotencyKey,
                   round: continuation.round,
                 }
@@ -4000,57 +4613,28 @@ async function handlePost(
             chain = fresh;
           }
           if (continuation) {
-            // Reproducing a completion is legitimate for exactly one
-            // continuation: the one that resolved the chain, re-sent
-            // after its response was lost. Any sibling would be handing
-            // the caller its own hook output as the settled result.
-            const mayRepeat =
-              chain.status === "resolved" &&
-              isChainRepeat(
-                chain,
-                continuation.jti,
-                requestDigest,
-                "completed",
+            // Finishing the call resolves the chain, so claim it. Only the
+            // continuation that resolved it may reproduce the outcome (a
+            // client whose response was lost); any sibling would be handed
+            // its own hook output as the settled result.
+            const settled = await settleMrtrChain(ctx, component, {
+              chainName: tool.name,
+              continuation,
+              requestDigest,
+              chain,
+              resolution: "completed",
+            });
+            if (settled === "error") {
+              body = jsonErrorEnvelope(
+                message.id,
+                INTERNAL_ERROR,
+                "MRTR verification failed",
               );
-            if (!mayRepeat) {
-              const claim =
-                chain.status === "resolved"
-                  ? { ...chain, status: "lost" as const }
-                  : await claimMrtrChain(
-                      ctx,
-                      component,
-                      tool.name,
-                      continuation.idempotencyKey,
-                      continuation.jti,
-                      requestDigest,
-                      "completed",
-                      Date.now() + MRTR_MAX_TTL_MS + MRTR_CLAIM_SLACK_MS,
-                    );
-              if (claim.status === "error") {
-                body = jsonErrorEnvelope(
-                  message.id,
-                  INTERNAL_ERROR,
-                  "MRTR verification failed",
-                );
-                break;
-              }
-              // Losing to a concurrent send of this very continuation
-              // with this very answer is the same lost-response retry,
-              // just interleaved. Refusing it would push the client to
-              // start a new chain, i.e. a new idempotency key, i.e. the
-              // duplicate the key exists to prevent.
-              if (
-                claim.status === "lost" &&
-                !isChainRepeat(
-                  claim,
-                  continuation.jti,
-                  requestDigest,
-                  "completed",
-                )
-              ) {
-                body = alreadyResolvedEnvelope(message.id, tool.name);
-                break;
-              }
+              break;
+            }
+            if (settled === "lost") {
+              body = alreadyResolvedEnvelope(message.id, tool.name);
+              break;
             }
           }
           // The MRTR chain claim above is already written, so an escape
@@ -4129,103 +4713,22 @@ async function handlePost(
             );
             break;
           }
-          if (mrtrSecretTooShort(options.mrtr)) {
-            console.error(
-              "[mcp-gateway] mrtr.secret is shorter than 32 bytes; " +
-                "refusing to seal a continuation",
-            );
-            body = jsonErrorEnvelope(
-              message.id,
-              INTERNAL_ERROR,
-              "MRTR is misconfigured on this gateway",
-            );
-            break;
-          }
-          const round = (continuation?.round ?? 0) + 1;
-          if (round > MRTR_MAX_ROUNDS) {
-            console.error(
-              "[mcp-gateway] MRTR chain exceeded the round ceiling",
-              tool.name,
-            );
-            body = jsonErrorEnvelope(
-              message.id,
-              INTERNAL_ERROR,
-              "MRTR continuation exceeded the round limit",
-            );
-            break;
-          }
-          const inputRequests = requested.inputRequests ?? {};
-          const requiredCapabilities = mrtrRequiredCapabilities(inputRequests);
-          if (!requiredCapabilities) {
-            // Another host-side hook bug: a request method or shape the
-            // gateway cannot vouch for (typo'd method, unknown
-            // elicitation mode). Name the offending methods so the hook
-            // author can find it.
-            console.error(
-              "[mcp-gateway] MRTR beforeCall returned unsupported input " +
-                "requests",
-              tool.name,
-              Object.values(inputRequests)
-                .map((request) =>
-                  isPlainObject(request)
-                    ? String(request.method)
-                    : typeof request,
-                )
-                .join(", "),
-            );
-            body = jsonErrorEnvelope(
-              message.id,
-              INTERNAL_ERROR,
-              "MRTR beforeCall returned unsupported input requests",
-            );
-            break;
-          }
-          const missingCapabilities = missingMrtrCapabilities(
+          const asked = await askMrtrInput(options.mrtr, {
+            id: message.id,
+            hookLabel: "MRTR beforeCall",
+            chainName: tool.name,
+            argsDigest,
+            identitySubject: auditIdentitySubject,
+            continuation,
             // Guaranteed non-null here (validated for every stateless
-            // request, and legacy requests broke at the -32601 above);
+            // request, and session-era requests broke at the -32601 above);
             // the fallback only satisfies the type system.
-            statelessClientCapabilities ?? {},
-            requiredCapabilities,
-          );
-          if (Object.keys(missingCapabilities).length > 0) {
-            return statelessErrorResponse(
-              message.id,
-              -32021,
-              "Client lacks a capability required for MRTR input requests",
-              // Per spec, data.requiredCapabilities lists only what is
-              // MISSING, not the full required set.
-              { requiredCapabilities: missingCapabilities },
-            );
-          }
-          try {
-            body = jsonResultEnvelope(message.id, {
-              resultType: "input_required",
-              ...(Object.keys(inputRequests).length > 0
-                ? { inputRequests }
-                : {}),
-              requestState: await sealMrtrState(options.mrtr, {
-                toolName: tool.name,
-                identitySubject: auditIdentitySubject,
-                argsDigest,
-                state: requested.state ?? null,
-                // Round 1 mints the chain's key; later rounds carry it.
-                idempotencyKey:
-                  continuation?.idempotencyKey ?? crypto.randomUUID(),
-                round,
-              }),
-            });
-          } catch (err) {
-            console.error(
-              "[mcp-gateway] failed to seal MRTR requestState",
-              tool.name,
-              err,
-            );
-            body = jsonErrorEnvelope(
-              message.id,
-              INTERNAL_ERROR,
-              "Failed to create MRTR request state",
-            );
-          }
+            clientCapabilities: statelessClientCapabilities ?? {},
+            inputRequests: requested.inputRequests ?? {},
+            state: requested.state,
+          });
+          if ("response" in asked) return asked.response;
+          body = asked.body;
           break;
         }
       }
@@ -4259,52 +4762,29 @@ async function handlePost(
           break;
         }
         chain = fresh;
-        // Only the continuation that dispatched may dispatch again,
-        // which is the lost-response retry the tool deduplicates via
-        // its injected idempotency key. Everything else claims, and
-        // losing the claim means another branch settled this chain
-        // first: there is no idempotent case for a second dispatch.
-        const mayRepeat =
-          chain.status === "resolved" &&
-          isChainRepeat(chain, continuation.jti, requestDigest, "dispatched");
-        if (!mayRepeat) {
-          const claim =
-            chain.status === "resolved"
-              ? { ...chain, status: "lost" as const }
-              : await claimMrtrChain(
-                  ctx,
-                  component,
-                  tool.name,
-                  continuation.idempotencyKey,
-                  continuation.jti,
-                  requestDigest,
-                  "dispatched",
-                  Date.now() + MRTR_MAX_TTL_MS + MRTR_CLAIM_SLACK_MS,
-                );
-          if (claim.status === "error") {
-            body = jsonErrorEnvelope(
-              message.id,
-              INTERNAL_ERROR,
-              "MRTR verification failed",
-            );
-            break;
-          }
-          // As on the completion path: losing to a concurrent send of
-          // the same continuation with the same answer is that same
-          // retry, and dispatching it again under the unchanged chain
-          // key is what the tool deduplicates on.
-          if (
-            claim.status === "lost" &&
-            !isChainRepeat(
-              claim,
-              continuation.jti,
-              requestDigest,
-              "dispatched",
-            )
-          ) {
-            body = alreadyResolvedEnvelope(message.id, tool.name);
-            break;
-          }
+        // Only the continuation that dispatched may dispatch again, which
+        // is the lost-response retry the tool deduplicates via its
+        // injected idempotency key. Everything else claims, and losing the
+        // claim means another branch settled this chain first: there is no
+        // idempotent case for a second dispatch.
+        const settled = await settleMrtrChain(ctx, component, {
+          chainName: tool.name,
+          continuation,
+          requestDigest,
+          chain,
+          resolution: "dispatched",
+        });
+        if (settled === "error") {
+          body = jsonErrorEnvelope(
+            message.id,
+            INTERNAL_ERROR,
+            "MRTR verification failed",
+          );
+          break;
+        }
+        if (settled === "lost") {
+          body = alreadyResolvedEnvelope(message.id, tool.name);
+          break;
         }
       }
 
@@ -4675,11 +5155,7 @@ async function handlePost(
       }
       const taskId = message.params?.taskId;
       if (typeof taskId !== "string" || taskId.length === 0) {
-        body = jsonErrorEnvelope(
-          message.id,
-          INVALID_PARAMS,
-          "Missing task id",
-        );
+        body = jsonErrorEnvelope(message.id, INVALID_PARAMS, "Missing task id");
         break;
       }
       const pollIntervalMs =

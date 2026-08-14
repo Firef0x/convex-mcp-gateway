@@ -33,7 +33,10 @@ Built as a [Convex Component](https://www.convex.dev/components).
 - **Stateless multi-round trips**: declarative stateless-era tools use a host-side
   `beforeCall` hook to request input before any Convex function runs, then
   receive HMAC-verified continuation state plus an idempotency key on retry;
-  see [Multi-round-trip requests](#multi-round-trip-requests)
+  `resources/read` gets the same treatment through `beforeResourceRead`, so
+  a read can ask a question before serving content. See
+  [Multi-round-trip requests](#multi-round-trip-requests) and
+  [Resources](./docs/resources.md)
 - **MCP Tasks (poll-first)**: opt-in `io.modelcontextprotocol/tasks`
   support; task-augmented `tools/call` returns a handle, clients poll
   `tasks/get`, owner-bound with TTL retention and lifecycle audit.

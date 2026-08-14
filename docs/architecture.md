@@ -141,6 +141,17 @@ including when a client incorrectly includes stateless metadata.
 
 ### Stateless multi-round trips (MRTR)
 
+MRTR serves two call paths. A tool's `beforeCall` hook is described below;
+`resources/read` has the same mechanism through the mount-level
+`beforeResourceRead` hook, with read-shaped decisions
+(`completeRead(contents)` / `declineRead(reason)` instead of
+`completeCall(result)`) and a chain keyed on `resources/read:<uri>` so a
+continuation cannot cross between the two paths or between URIs. The
+sealing, one-time redemption, and single-resolution machinery is shared
+code (`verifyMrtrContinuation` and `settleMrtrChain`), deliberately: a
+second copy is how a future fix lands on one path and misses the other.
+See [resources.md](./resources.md) for the read side.
+
 The host-side `beforeCall` hook of a declarative tool is the MRTR state
 machine. It runs after authorization but before component dispatch, on
 the first call AND on every verified continuation, and returns one of
