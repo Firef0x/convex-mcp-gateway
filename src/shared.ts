@@ -135,6 +135,20 @@ export function completeCall(
  * union here would reject schemes the spec adds later without buying
  * any runtime safety.
  */
+/**
+ * An icon a client may display next to a tool, resource, or template. `src`
+ * is host-supplied and reaches the client verbatim: the gateway advertises
+ * it and never fetches it, so the consumer-side precautions the spec
+ * describes (same-domain checks, care with SVG) belong to the client.
+ */
+export interface McpIcon {
+  src: string;
+  mimeType?: string;
+  /** WxH strings (`"48x48"`), or `"any"` for a scalable format. */
+  sizes?: string[];
+  theme?: "light" | "dark";
+}
+
 export interface McpToolSecurityScheme {
   type: string;
   [key: string]: unknown;
@@ -158,6 +172,12 @@ export interface McpToolDefinition {
   annotations?: McpToolAnnotations;
   _meta?: Record<string, unknown>;
   securitySchemes?: McpToolSecurityScheme[];
+  /**
+   * Optional icons a client may display next to this tool in a picker.
+   * Advertised verbatim in `tools/list`; the gateway never dereferences an
+   * icon `src`. Same shape the spec puts on resources and templates.
+   */
+  icons?: McpIcon[];
   /**
    * Name of the tool function argument the gateway fills server-side
    * with the resolved caller identity (`{ subject, claims }`). When set:

@@ -719,6 +719,81 @@ describe("outputSchema / structuredContent (MCP returns)", () => {
     });
   });
 
+  test("icons reach every catalog, and stay absent when undeclared", async () => {
+    const t = newTest();
+    const session = await initialize(t);
+    // Same fixture token the sibling tests in this file authenticate with.
+    const BEARER = { authorization: "Bearer valid-userinfo-token" };
+
+    const tools = (await (
+      await rpc(
+        t,
+        session,
+        { jsonrpc: "2.0", id: 20, method: "tools/list" },
+        BEARER,
+      )
+    ).json()) as { result: { tools: Array<{ name: string; icons?: unknown }> } };
+    expect(
+      tools.result.tools.find((tool) => tool.name === "invoices_summary")?.icons,
+    ).toEqual([
+      { src: "https://example.com/icons/summary.png", mimeType: "image/png" },
+    ]);
+    // Absent must stay absent: no empty array materialised for the rest.
+    for (const tool of tools.result.tools) {
+      if (tool.name !== "invoices_summary") {
+        expect("icons" in tool).toBe(false);
+      }
+    }
+
+    const resources = (await (
+      await rpc(
+        t,
+        session,
+        { jsonrpc: "2.0", id: 21, method: "resources/list" },
+        BEARER,
+      )
+    ).json()) as {
+      result: { resources: Array<{ uri: string; icons?: unknown }> };
+    };
+    expect(
+      resources.result.resources.find(
+        (resource) => resource.uri === "invoices://summary",
+      )?.icons,
+    ).toEqual([
+      {
+        src: "https://example.com/icons/invoices-48.png",
+        mimeType: "image/png",
+        sizes: ["48x48"],
+      },
+      {
+        src: "https://example.com/icons/invoices-dark.svg",
+        mimeType: "image/svg+xml",
+        sizes: ["any"],
+        theme: "dark",
+      },
+    ]);
+
+    const templates = (await (
+      await rpc(
+        t,
+        session,
+        { jsonrpc: "2.0", id: 22, method: "resources/templates/list" },
+        BEARER,
+      )
+    ).json()) as {
+      result: {
+        resourceTemplates: Array<{ uriTemplate: string; icons?: unknown }>;
+      };
+    };
+    expect(
+      templates.result.resourceTemplates.find(
+        (template) => template.uriTemplate === "invoice://{id}",
+      )?.icons,
+    ).toEqual([
+      { src: "https://example.com/icons/invoice.png", sizes: ["96x96"] },
+    ]);
+  });
+
   test("tools/list omits outputSchema for tools without returns", async () => {
     const t = newTest();
     await t.mutation(internal.mcp.registerDefaults, {});

@@ -153,6 +153,9 @@ export const tools: McpToolRegistration[] = [
   defineMcpQuery({
     name: "invoices_summary",
     description: "Return the total number of invoices. Public.",
+    icons: [
+      { src: "https://example.com/icons/summary.png", mimeType: "image/png" },
+    ],
     fn: api.invoices.summary,
     args: {},
     // Declaring `returns` makes the gateway advertise an MCP
@@ -215,6 +218,13 @@ export const resources: McpResourceRegistration[] = [
     description: "Total invoice count for the authenticated caller.",
     mimeType: "application/json",
     annotations: { audience: ["assistant"], priority: 0.5 },
+    // Advertised verbatim in resources/list. The gateway never fetches an
+    // icon; a client decides whether to load it (the spec asks consumers to
+    // be careful with cross-domain URLs and with SVG).
+    icons: [
+      { src: "https://example.com/icons/invoices-48.png", mimeType: "image/png", sizes: ["48x48"] },
+      { src: "https://example.com/icons/invoices-dark.svg", mimeType: "image/svg+xml", sizes: ["any"], theme: "dark" },
+    ],
     read: async (ctx, { uri, identity }) => {
       const summary = await ctx.runQuery(api.invoices.summary, {});
       return [
@@ -243,6 +253,9 @@ export const resourceTemplates: McpResourceTemplateProvider[] = [
     title: "Invoice by id",
     description: "Read a single invoice by its id.",
     mimeType: "application/json",
+    // Persisted with the template row, unlike a concrete resource's, so a
+    // registry-only template still lists its full descriptor.
+    icons: [{ src: "https://example.com/icons/invoice.png", sizes: ["96x96"] }],
     read: async (ctx, { uri, params }) => {
       const invoice = await ctx.runQuery(api.invoices.get, { id: params.id });
       if (!invoice) return null;

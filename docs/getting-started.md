@@ -172,7 +172,7 @@ defineMcpQuery({
 See [architecture.md → Identity propagation](./architecture.md#identity-propagation)
 for the full data flow.
 
-**Protocol metadata (optional)**: four fields go straight onto the tool
+**Protocol metadata (optional)**: five fields go straight onto the tool
 entry in `tools/list`, so MCP clients see them:
 
 ```ts
@@ -184,13 +184,17 @@ defineMcpQuery({
   annotations: { readOnlyHint: true },       // MCP behavior hints
   _meta: { "example.com/category": "invoices" }, // client-specific data
   securitySchemes: [{ type: "noauth" }],     // draft MCP spec, passthrough
+  icons: [{ src: "https://example.com/invoices.png" }], // client display icons
 }),
 ```
 
 The gateway stores these as one `protocolMetadata` object and never
 reads them. Omit a field and it does not appear on the wire.
 `securitySchemes` is not yet in the stable MCP Tool specification; the
-gateway passes it through unchanged for clients that track the draft.
+gateway passes it through unchanged for clients that track the draft. An
+icon `src` is advertised verbatim and never fetched by the gateway; see
+[resources.md](./resources.md), where the same field appears on resources
+and templates.
 
 `defineMcp{Query,Mutation,Action}` validates `args` against
 `FunctionArgs<typeof fn>` at compile time. Passing the wrong validator or
@@ -198,7 +202,7 @@ the wrong function kind is a type error, not a runtime surprise.
 
 `metadata` is host-defined free-form data. The gateway never inspects it;
 your authorize callback (step 4) reads it for public/role/scope checks.
-It stays server-side, unlike the four protocol fields above.
+It stays server-side, unlike the five protocol fields above.
 
 **No manual registration step.** Because step 4 passes this array to
 `handleMcpRequest`, the registry is reconciled on `initialize` and again
