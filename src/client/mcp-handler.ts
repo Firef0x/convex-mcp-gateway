@@ -628,7 +628,10 @@ const MODERN_PROTOCOL_VERSION = "2026-07-28";
 const SUPPORTED_PROTOCOL_VERSIONS = LEGACY_PROTOCOL_VERSIONS;
 const DEFAULT_PROTOCOL_VERSION = LEGACY_PROTOCOL_VERSIONS[0];
 const SERVER_NAME = "convex-mcp-gateway";
-const SERVER_VERSION = "0.0.0";
+// Kept in step with package.json by release-please; the trailing
+// annotation is what it looks for. A host overrides the whole block
+// with `options.serverInfo`.
+const SERVER_VERSION = "0.8.0"; // x-release-please-version
 
 const UNAUTHORIZED = -32001;
 const FORBIDDEN = -32003;
@@ -904,12 +907,64 @@ function jsonResultEnvelope(id: JsonRpcMessage["id"], value: unknown): string {
 }
 
 /**
- * Whether a value may be shipped as `structuredContent`. MCP models it
- * as structured output, and a scalar there fails a validating client.
- * Mirrored in the component for task results.
+ * Whether an `outputSchema` may be advertised, and its value shipped as
+ * `structuredContent`, to a client speaking `revision`.
+ *
+ * The two eras disagree, and the disagreement is not cosmetic. Through
+ * `2025-11-25`, `Tool.outputSchema` must be rooted at `type: "object"`
+ * and `CallToolResult.structuredContent` is typed `{ [key: string]:
+ * unknown }`. A client validating to that revision rejects the WHOLE
+ * `tools/list` response over one scalar-rooted schema, so a single
+ * `returns: v.string()` tool hides every other tool from it. `2026-07-28`
+ * widened both: any JSON Schema 2020-12, and `structuredContent` as
+ * `unknown` ("object, array, string, number, boolean, or null").
+ *
+ * So a non-object schema is withheld from legacy clients and advertised
+ * to modern ones. The tool still works either way; a legacy client just
+ * sees it untyped, with the value in the text block as always.
  */
-function isStructuredShape(value: unknown): boolean {
-  return Array.isArray(value) || isPlainObject(value);
+function mayAdvertiseOutputSchema(
+  outputSchema: unknown,
+  isModern: boolean,
+): boolean {
+  if (outputSchema === undefined) return false;
+  if (isModern) return true;
+  return (
+    isPlainObject(outputSchema) &&
+    (outputSchema as { type?: unknown }).type === "object"
+  );
+}
+
+/**
+ * `jsonResultEnvelope` for a host-authored result, where a value JSON
+ * cannot represent (a `v.int64()` field read straight off a document)
+ * would otherwise escape the switch as a raw 500: no JSON-RPC envelope,
+ * no CORS headers, nothing the client can act on. Reported as an error
+ * RESULT because the call itself already happened.
+ */
+function hostResultEnvelope(
+  id: JsonRpcMessage["id"],
+  value: unknown,
+  toolName: string,
+): string {
+  try {
+    return jsonResultEnvelope(id, value);
+  } catch (err) {
+    console.error(
+      "[mcp-gateway] hook result cannot be serialized for the wire",
+      toolName,
+      err,
+    );
+    return jsonResultEnvelope(id, {
+      content: [
+        {
+          type: "text",
+          text: `Tool "${toolName}" returned a value that cannot be represented on the wire`,
+        },
+      ],
+      isError: true,
+    });
+  }
 }
 
 function jsonErrorEnvelope(
@@ -1254,16 +1309,21 @@ function isMcpCompleteCallResult(
  */
 function describeCompleteCallResultProblem(
   result: Record<string, unknown>,
+  isModern: boolean,
 ): string | null {
   if (!Array.isArray(result.content)) {
     return "result.content must be an array";
   }
+  // Same era split the emit paths apply: `2026-07-28` types
+  // `structuredContent` as `unknown`, everything before it as an object.
+  // Judging a hook's result by a different rule than the gateway's own
+  // output is what let the two drift apart before.
   if (
     result.structuredContent !== undefined &&
-    !isPlainObject(result.structuredContent) &&
-    !Array.isArray(result.structuredContent)
+    !isModern &&
+    !isPlainObject(result.structuredContent)
   ) {
-    return "result.structuredContent must be an object or array";
+    return "result.structuredContent must be an object on this protocol revision";
   }
   if (result.isError !== undefined && typeof result.isError !== "boolean") {
     return "result.isError must be a boolean";
@@ -2327,8 +2387,8 @@ async function handlePost(
   }
 
   // MCP-Protocol-Version header: required on post-initialize requests
-  // by spec. Missing → silently default to 2025-03-26 (legacy clients).
-  // Unsupported value → MUST 400 per spec.
+  // by spec. Missing → silently default to DEFAULT_PROTOCOL_VERSION
+  // (legacy clients). Unsupported value → MUST 400 per spec.
   if (!isInitialize && !isModern) {
     const protoHeader = headerProtocolVersion;
     if (
@@ -3187,8 +3247,10 @@ async function handlePost(
             inputSchema: tool.inputSchema,
             // Only emit `outputSchema` when the tool actually declared
             // one, some MCP clients (Inspector older versions) are
-            // strict about the field being absent vs null vs {}.
-            ...(tool.outputSchema !== undefined
+            // strict about the field being absent vs null vs {}. A
+            // non-object schema is withheld from legacy clients, which
+            // would reject this entire response over it.
+            ...(mayAdvertiseOutputSchema(tool.outputSchema, isModern)
               ? { outputSchema: tool.outputSchema }
               : {}),
             // Advertise task support only when the host actually
@@ -3792,7 +3854,10 @@ async function handlePost(
           // Validate the shape rather than forward a malformed result a
           // spec-compliant client would reject, matching how every other
           // hook output is checked.
-          const problem = describeCompleteCallResultProblem(requested.result);
+          const problem = describeCompleteCallResultProblem(
+            requested.result,
+            isModern,
+          );
           if (problem) {
             console.error(
               "[mcp-gateway] MRTR beforeCall completeCall() returned a " +
@@ -3888,7 +3953,9 @@ async function handlePost(
               }
             }
           }
-          body = jsonResultEnvelope(message.id, requested.result);
+          // The MRTR chain claim above is already written, so an escape
+          // here would leave the client with a 500 it cannot even retry.
+          body = hostResultEnvelope(message.id, requested.result, tool.name);
           break;
         }
         if (requested !== null && requested !== undefined) {
@@ -4462,12 +4529,13 @@ async function handlePost(
             text: serializedResult,
           },
         ],
-        // MCP defines `structuredContent` as structured output, so a
-        // scalar must not be stamped as one just because the tool
-        // advertises a schema: a validating client rejects the whole
-        // result. Same rule the task path applies, so the two agree.
-        ...(tool.outputSchema !== undefined &&
-        isStructuredShape(dispatched.data)
+        // Tied to the SAME condition as the advertisement in
+        // `tools/list`: a client that was shown an `outputSchema` treats
+        // a missing `structuredContent` as a protocol error, and one
+        // that was not shown a schema rejects a scalar block against its
+        // own revision's type. Deciding both with one predicate is what
+        // keeps the two halves from contradicting each other.
+        ...(mayAdvertiseOutputSchema(tool.outputSchema, isModern)
           ? { structuredContent: dispatched.data }
           : {}),
         isError: false,
